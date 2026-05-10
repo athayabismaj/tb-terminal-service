@@ -1,0 +1,17 @@
+ktor:
+  deployment:
+    port: 8080
+  application:
+    modules:
+      - com.tbterminal.HttpKt.configureHttp
+      - com.tbterminal.SerializationKt.configureSerialization
+      - com.tbterminal.SecurityKt.configureSecurity
+      - com.tbterminal.StatusPagesKt.configureStatusPages
+      - com.tbterminal.PostgresKt.configurePostgres
+      - com.tbterminal.ExposedKt.configureExposed
+      - com.tbterminal.RoutingKt.configureRouting
+
+postgres:
+  url: jdbc:postgresql://localhost:5432/tb_terminal
+  user: postgres
+  password: "676767"
