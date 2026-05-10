@@ -3,13 +3,12 @@ ktor:
     port: 8080
   application:
     modules:
-      - com.tbterminal.HttpKt.configureHttp
-      - com.tbterminal.SerializationKt.configureSerialization
-      - com.tbterminal.SecurityKt.configureSecurity
-      - com.tbterminal.StatusPagesKt.configureStatusPages
-      - com.tbterminal.PostgresKt.configurePostgres
-      - com.tbterminal.ExposedKt.configureExposed
-      - com.tbterminal.RoutingKt.configureRouting
+      - com.service.tbterminal.plugins.DatabaseKt.configureDatabase
+      - com.service.tbterminal.plugins.CorsKt.configureCors
+      - com.service.tbterminal.plugins.SerializationKt.configureSerialization
+      - com.service.tbterminal.plugins.SecurityKt.configureSecurity
+      - com.service.tbterminal.plugins.StatusPagesKt.configureStatusPages
+      - com.service.tbterminal.plugins.RoutingKt.configureRouting
 
 postgres:
   url: jdbc:postgresql://localhost:5432/tb_terminal

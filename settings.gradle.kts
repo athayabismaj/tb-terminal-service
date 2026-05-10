@@ -1,4 +1,4 @@
-rootProject.name = "backend"
+rootProject.name = "tb-terminal-service"
 
 pluginManagement {
     repositories {

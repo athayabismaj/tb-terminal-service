@@ -5,7 +5,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-group = "com.tbterminal"
+group = "com.service.tbterminal"
 version = "1.0.0-SNAPSHOT"
 
 application {
@@ -33,6 +33,9 @@ dependencies {
     implementation(libs.logback.classic)
     implementation(libs.postgresql)
     implementation(libs.postgresql.r2dbc)
+    implementation(libs.flyway.core)
+    implementation(libs.flyway.postgresql)
+    implementation(libs.hikari)
 
     testImplementation(kotlin("test"))
     testImplementation(ktorLibs.server.testHost)

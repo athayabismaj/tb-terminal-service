@@ -1,4 +1,4 @@
-package com.tbterminal
+package com.service.tbterminal.plugins
 
 import io.ktor.http.*
 import io.ktor.server.application.*

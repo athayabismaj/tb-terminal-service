@@ -1,4 +1,4 @@
-package com.tbterminal
+package com.service.tbterminal
 
 import io.ktor.client.request.get
 import io.ktor.http.HttpStatusCode

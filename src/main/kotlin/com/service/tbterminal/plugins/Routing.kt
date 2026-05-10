@@ -1,0 +1,17 @@
+package com.service.tbterminal.plugins
+
+import io.ktor.server.application.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+
+fun Application.configureRouting() {
+    routing {
+        get("/health") {
+            call.respond(mapOf(
+                "status" to "running",
+                "service" to "tb-terminal-service",
+                "version" to "1.0.0-SNAPSHOT"
+            ))
+        }
+    }
+}
