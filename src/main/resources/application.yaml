@@ -3,6 +3,7 @@ ktor:
     port: 8080
   application:
     modules:
+      - com.service.tbterminal.plugins.DependencyInjectionKt.configureDI
       - com.service.tbterminal.plugins.DatabaseKt.configureDatabase
       - com.service.tbterminal.plugins.CorsKt.configureCors
       - com.service.tbterminal.plugins.SerializationKt.configureSerialization

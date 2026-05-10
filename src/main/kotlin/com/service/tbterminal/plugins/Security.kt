@@ -12,7 +12,7 @@ fun Application.configureSecurity() {
     val jwtRealm = "ktor sample app"
     val jwtSecret = "secret"
     authentication {
-        jwt {
+        jwt("jwt-auth") {
             realm = jwtRealm
             verifier(
                 JWT

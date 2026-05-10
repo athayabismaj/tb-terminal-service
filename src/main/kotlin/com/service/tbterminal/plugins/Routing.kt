@@ -3,6 +3,7 @@ package com.service.tbterminal.plugins
 import io.ktor.server.application.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import com.service.tbterminal.system.systemRoutes
 
 fun Application.configureRouting() {
     routing {
@@ -14,4 +15,7 @@ fun Application.configureRouting() {
             ))
         }
     }
+    
+    // Register module routes
+    systemRoutes()
 }

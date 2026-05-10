@@ -37,6 +37,6 @@ fun Application.configureDatabase() {
     val result = flyway.migrate()
     log.info("Flyway: Successfully applied ${result.migrationsExecuted} migration(s)")
 
-    // Close the DataSource after migration — the app uses its own connections
-    dataSource.close()
+    // Connect Exposed to the HikariDataSource
+    org.jetbrains.exposed.sql.Database.connect(dataSource)
 }

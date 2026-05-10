@@ -1,22 +1,27 @@
 [versions]
-exposed = "1.2.0"
+exposed = "0.44.1"
 h2 = "2.4.240"
 kotlin = "2.3.20"
 logback = "1.5.21"
 flyway = "10.4.1"
 hikari = "5.0.1"
+koin = "3.5.3"
+jbcrypt = "0.4"
+
 
 [libraries]
 exposed-core = { module = "org.jetbrains.exposed:exposed-core", version.ref = "exposed" }
-exposed-r2dbc = { module = "org.jetbrains.exposed:exposed-r2dbc", version.ref = "exposed" }
+exposed-jdbc = { module = "org.jetbrains.exposed:exposed-jdbc", version.ref = "exposed" }
+exposed-javatime = { module = "org.jetbrains.exposed:exposed-java-time", version.ref = "exposed" }
 h2database-h2 = { module = "com.h2database:h2", version.ref = "h2" }
-h2database-r2dbc = { module = "io.r2dbc:r2dbc-h2", version = "1.1.0.RELEASE" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 postgresql = { module = "org.postgresql:postgresql", version = "42.7.10" }
-postgresql-r2dbc = { module = "org.postgresql:r2dbc-postgresql", version = "1.0.7.RELEASE" }
 flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
 flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
 hikari = { module = "com.zaxxer:HikariCP", version.ref = "hikari" }
+koin-ktor = { module = "io.insert-koin:koin-ktor", version.ref = "koin" }
+koin-logger = { module = "io.insert-koin:koin-logger-slf4j", version.ref = "koin" }
+jbcrypt = { module = "org.mindrot:jbcrypt", version.ref = "jbcrypt" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
