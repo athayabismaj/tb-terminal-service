@@ -131,3 +131,61 @@ data class PaginatedResponse<T>(
     val limit: Int,
     val totalPages: Int
 )
+
+enum class AdjType { OPNAME, CORRECTION, DAMAGE }
+
+object StockAdjustmentsTable : Table("inventory.stock_adjustments") {
+    val id = uuid("id")
+    val productId = uuid("product_id").references(ProductsTable.id)
+    val userId = uuid("user_id") // References system.users (we don't have the table mapped here, so just UUID)
+    val adjType = customEnumeration(
+        name = "adj_type",
+        sql = "system.adj_type",
+        fromDb = { value -> AdjType.valueOf(value.toString().uppercase()) },
+        toDb = { it.name.lowercase() }
+    )
+    val qtySystem = decimal("qty_system", 10, 2)
+    val qtyActual = decimal("qty_actual", 10, 2)
+    val qtyDiff = decimal("qty_diff", 10, 2)
+    val notes = text("notes").nullable()
+    val createdAt = timestamp("created_at")
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+object VStockDetailView : Table("inventory.v_stock_detail") {
+    val productId = uuid("product_id")
+    val sku = varchar("sku", 50)
+    val productName = varchar("product_name", 200)
+    val categoryName = varchar("category_name", 100)
+    val unitName = varchar("unit_name", 50)
+    val quantity = decimal("quantity", 10, 2)
+    val minStock = decimal("min_stock", 10, 2)
+    val priceBuy = decimal("price_buy", 15, 2)
+    val priceRetail = decimal("price_retail", 15, 2)
+    val priceContractor = decimal("price_contractor", 15, 2)
+    val isActive = bool("is_active")
+}
+
+@Serializable
+data class StockDetailResponse(
+    val productId: String,
+    val sku: String,
+    val productName: String,
+    val categoryName: String,
+    val unitName: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val quantity: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val minStock: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceBuy: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceRetail: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceContractor: java.math.BigDecimal,
+    val isActive: Boolean
+)
+
+@Serializable
+data class StockAdjustmentRequest(
+    val productId: String,
+    val adjType: String, // "OPNAME", "CORRECTION", "DAMAGE"
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val qtyActual: java.math.BigDecimal,
+    val notes: String? = null
+)
