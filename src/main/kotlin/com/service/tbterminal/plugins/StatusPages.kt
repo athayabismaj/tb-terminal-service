@@ -11,6 +11,9 @@ fun Application.configureStatusPages() {
         exception<NotFoundException> { call, cause ->
             call.respond(HttpStatusCode.NotFound, ApiResponse.error<Unit>(cause.message ?: "Data tidak ditemukan", "NOT_FOUND"))
         }
+        exception<UnauthorizedException> { call, cause ->
+            call.respond(HttpStatusCode.Unauthorized, ApiResponse.error<Unit>(cause.message ?: "Sesi tidak valid", "UNAUTHORIZED"))
+        }
         exception<ForbiddenException> { call, cause ->
             call.respond(HttpStatusCode.Forbidden, ApiResponse.error<Unit>(cause.message ?: "Akses ditolak", "FORBIDDEN"))
         }

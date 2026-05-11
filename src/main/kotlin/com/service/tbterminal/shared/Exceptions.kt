@@ -12,6 +12,9 @@ class NotFoundException(message: String = "Data tidak ditemukan") : RuntimeExcep
 /** User tidak memiliki akses ke resource ini */
 class ForbiddenException(message: String = "Akses ditolak") : RuntimeException(message)
 
+/** User belum terautentikasi (Token invalid/tidak ada) */
+class UnauthorizedException(message: String = "Sesi tidak valid atau telah berakhir") : RuntimeException(message)
+
 /** Input dari request body tidak valid */
 class ValidationException(message: String = "Validasi gagal") : RuntimeException(message)
 
