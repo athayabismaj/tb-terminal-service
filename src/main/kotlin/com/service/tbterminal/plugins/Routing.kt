@@ -5,6 +5,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import com.service.tbterminal.system.systemRoutes
 import com.service.tbterminal.inventory.inventoryRoutes
+import com.service.tbterminal.sales.salesRoutes
 
 fun Application.configureRouting() {
     routing {
@@ -19,4 +20,5 @@ fun Application.configureRouting() {
     
     // Register module routes
     systemRoutes()
+    salesRoutes()
 }
