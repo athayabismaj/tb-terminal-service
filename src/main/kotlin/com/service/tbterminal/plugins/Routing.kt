@@ -4,6 +4,7 @@ import io.ktor.server.application.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import com.service.tbterminal.system.systemRoutes
+import com.service.tbterminal.inventory.inventoryRoutes
 
 fun Application.configureRouting() {
     routing {
