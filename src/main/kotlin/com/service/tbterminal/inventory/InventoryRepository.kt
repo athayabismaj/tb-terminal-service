@@ -21,6 +21,27 @@ interface InventoryRepository {
     suspend fun createUnit(name: String, symbol: String): UUID
     suspend fun updateUnit(id: UUID, name: String, symbol: String): Boolean
     suspend fun deleteUnit(id: UUID): Boolean
+
+    // Products
+    suspend fun getProducts(page: Int, limit: Int, search: String?): PaginatedResponse<ProductResponse>
+    suspend fun getProductById(id: UUID): ProductResponse?
+    suspend fun getProductBySku(sku: String, includeInactive: Boolean = false): ProductResponse?
+    suspend fun createProductAndInitStock(
+        categoryId: UUID, baseUnitId: UUID, sku: String, name: String,
+        priceBuy: java.math.BigDecimal, priceRetail: java.math.BigDecimal, priceContractor: java.math.BigDecimal,
+        minStock: java.math.BigDecimal, photoFilename: String?
+    ): UUID
+    suspend fun updateProduct(
+        id: UUID, categoryId: UUID, baseUnitId: UUID, name: String,
+        priceBuy: java.math.BigDecimal, priceRetail: java.math.BigDecimal, priceContractor: java.math.BigDecimal,
+        minStock: java.math.BigDecimal, photoFilename: String?
+    ): Boolean
+    suspend fun restoreProductAndOverwrite(
+        id: UUID, categoryId: UUID, baseUnitId: UUID, name: String,
+        priceBuy: java.math.BigDecimal, priceRetail: java.math.BigDecimal, priceContractor: java.math.BigDecimal,
+        minStock: java.math.BigDecimal, photoFilename: String?
+    ): Boolean
+    suspend fun softDeleteProduct(id: UUID): Boolean
 }
 
 class InventoryRepositoryImpl : InventoryRepository {
@@ -134,5 +155,141 @@ class InventoryRepositoryImpl : InventoryRepository {
     override suspend fun deleteUnit(id: UUID): Boolean = transaction {
         val deletedRows = UnitsTable.deleteWhere { UnitsTable.id eq id }
         deletedRows > 0
+    }
+
+    // ==========================================
+    // PRODUCTS
+    // ==========================================
+
+    override suspend fun getProducts(page: Int, limit: Int, search: String?): PaginatedResponse<ProductResponse> = transaction {
+        val offset = ((page - 1) * limit).toLong()
+        
+        var query = ProductsTable.select { ProductsTable.isActive eq true }
+        
+        if (!search.isNullOrBlank()) {
+            val searchTerm = "%${search.lowercase()}%"
+            query = query.andWhere {
+                (ProductsTable.name.lowerCase() like searchTerm) or 
+                (ProductsTable.sku.lowerCase() like searchTerm)
+            }
+        }
+
+        val totalCount = query.count()
+        val totalPages = Math.ceil(totalCount.toDouble() / limit).toInt()
+
+        val data = query.limit(limit, offset).map { rowToProductResponse(it) }
+
+        PaginatedResponse(
+            data = data,
+            total = totalCount,
+            page = page,
+            limit = limit,
+            totalPages = totalPages
+        )
+    }
+
+    override suspend fun getProductById(id: UUID): ProductResponse? = transaction {
+        ProductsTable.select { (ProductsTable.id eq id) and (ProductsTable.isActive eq true) }
+            .singleOrNull()?.let { rowToProductResponse(it) }
+    }
+
+    override suspend fun getProductBySku(sku: String, includeInactive: Boolean): ProductResponse? = transaction {
+        var query = ProductsTable.select { ProductsTable.sku eq sku }
+        if (!includeInactive) {
+            query = query.andWhere { ProductsTable.isActive eq true }
+        }
+        query.singleOrNull()?.let { rowToProductResponse(it) }
+    }
+
+    override suspend fun createProductAndInitStock(
+        categoryId: UUID, baseUnitId: UUID, sku: String, name: String,
+        priceBuy: java.math.BigDecimal, priceRetail: java.math.BigDecimal, priceContractor: java.math.BigDecimal,
+        minStock: java.math.BigDecimal, photoFilename: String?
+    ): UUID = transaction {
+        val productId = ProductsTable.insert {
+            it[this.categoryId] = categoryId
+            it[this.baseUnitId] = baseUnitId
+            it[this.sku] = sku
+            it[this.name] = name
+            it[this.priceBuy] = priceBuy
+            it[this.priceRetail] = priceRetail
+            it[this.priceContractor] = priceContractor
+            it[this.minStock] = minStock
+            it[this.photoFilename] = photoFilename
+            it[this.isActive] = true
+        } get ProductsTable.id
+
+        // Init stock with 0
+        StockTable.insert {
+            it[this.productId] = productId
+            it[this.unitId] = baseUnitId
+            it[this.quantity] = java.math.BigDecimal.ZERO
+        }
+
+        productId
+    }
+
+    override suspend fun updateProduct(
+        id: UUID, categoryId: UUID, baseUnitId: UUID, name: String,
+        priceBuy: java.math.BigDecimal, priceRetail: java.math.BigDecimal, priceContractor: java.math.BigDecimal,
+        minStock: java.math.BigDecimal, photoFilename: String?
+    ): Boolean = transaction {
+        val updatedRows = ProductsTable.update({ ProductsTable.id eq id }) {
+            it[this.categoryId] = categoryId
+            it[this.baseUnitId] = baseUnitId
+            it[this.name] = name
+            it[this.priceBuy] = priceBuy
+            it[this.priceRetail] = priceRetail
+            it[this.priceContractor] = priceContractor
+            it[this.minStock] = minStock
+            if (photoFilename != null) {
+                it[this.photoFilename] = photoFilename
+            }
+        }
+        updatedRows > 0
+    }
+
+    override suspend fun restoreProductAndOverwrite(
+        id: UUID, categoryId: UUID, baseUnitId: UUID, name: String,
+        priceBuy: java.math.BigDecimal, priceRetail: java.math.BigDecimal, priceContractor: java.math.BigDecimal,
+        minStock: java.math.BigDecimal, photoFilename: String?
+    ): Boolean = transaction {
+        val updatedRows = ProductsTable.update({ ProductsTable.id eq id }) {
+            it[this.isActive] = true
+            it[this.categoryId] = categoryId
+            it[this.baseUnitId] = baseUnitId
+            it[this.name] = name
+            it[this.priceBuy] = priceBuy
+            it[this.priceRetail] = priceRetail
+            it[this.priceContractor] = priceContractor
+            it[this.minStock] = minStock
+            if (photoFilename != null) {
+                it[this.photoFilename] = photoFilename
+            }
+        }
+        updatedRows > 0
+    }
+
+    override suspend fun softDeleteProduct(id: UUID): Boolean = transaction {
+        val updatedRows = ProductsTable.update({ ProductsTable.id eq id }) {
+            it[isActive] = false
+        }
+        updatedRows > 0
+    }
+
+    private fun rowToProductResponse(row: ResultRow): ProductResponse {
+        return ProductResponse(
+            id = row[ProductsTable.id].toString(),
+            categoryId = row[ProductsTable.categoryId].toString(),
+            baseUnitId = row[ProductsTable.baseUnitId].toString(),
+            sku = row[ProductsTable.sku],
+            name = row[ProductsTable.name],
+            priceBuy = row[ProductsTable.priceBuy],
+            priceRetail = row[ProductsTable.priceRetail],
+            priceContractor = row[ProductsTable.priceContractor],
+            minStock = row[ProductsTable.minStock],
+            photoFilename = row[ProductsTable.photoFilename],
+            isActive = row[ProductsTable.isActive]
+        )
     }
 }
