@@ -126,6 +126,113 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     // ==========================================
+    // PRODUCTS
+    // ==========================================
+
+    suspend fun getProducts(page: Int, limit: Int, search: String?): PaginatedResponse<ProductResponse> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = if (limit < 1) 20 else limit
+        return repository.getProducts(safePage, safeLimit, search)
+    }
+
+    suspend fun getProductById(id: String): ProductResponse {
+        val uuid = parseUUID(id)
+        return repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
+    }
+
+    suspend fun createProduct(request: ProductCreateRequest): ProductResponse {
+        val sku = request.sku.trim()
+        val name = request.name.trim()
+
+        if (sku.isEmpty()) throw ValidationException("SKU tidak boleh kosong")
+        if (name.isEmpty()) throw ValidationException("Nama produk tidak boleh kosong")
+
+        val categoryId = parseUUID(request.categoryId)
+        val unitId = parseUUID(request.baseUnitId)
+
+        // Verifikasi eksistensi Kategori dan Satuan
+        repository.getCategoryById(categoryId) ?: throw ValidationException("Kategori tidak valid atau tidak ditemukan")
+        repository.getUnitById(unitId) ?: throw ValidationException("Satuan tidak valid atau tidak ditemukan")
+
+        // Cek duplikasi SKU (mencakup produk yang tidak aktif)
+        val existingSku = repository.getProductBySku(sku, includeInactive = true)
+
+        if (existingSku != null) {
+            if (existingSku.isActive) {
+                throw ValidationException("Produk dengan SKU '$sku' sudah ada dan aktif")
+            } else {
+                // Restore & Overwrite jika SKU ada tapi tidak aktif
+                val existingUuid = UUID.fromString(existingSku.id)
+                repository.restoreProductAndOverwrite(
+                    id = existingUuid,
+                    categoryId = categoryId,
+                    baseUnitId = unitId,
+                    name = name,
+                    priceBuy = request.priceBuy,
+                    priceRetail = request.priceRetail,
+                    priceContractor = request.priceContractor,
+                    minStock = request.minStock,
+                    photoFilename = request.photoFilename
+                )
+                return repository.getProductById(existingUuid)!!
+            }
+        }
+
+        // Jika benar-benar baru, buat dan inisialisasi stok
+        val newId = repository.createProductAndInitStock(
+            categoryId = categoryId,
+            baseUnitId = unitId,
+            sku = sku,
+            name = name,
+            priceBuy = request.priceBuy,
+            priceRetail = request.priceRetail,
+            priceContractor = request.priceContractor,
+            minStock = request.minStock,
+            photoFilename = request.photoFilename
+        )
+
+        return repository.getProductById(newId)!!
+    }
+
+    suspend fun updateProduct(id: String, request: ProductUpdateRequest): ProductResponse {
+        val uuid = parseUUID(id)
+        val name = request.name.trim()
+
+        if (name.isEmpty()) throw ValidationException("Nama produk tidak boleh kosong")
+
+        val categoryId = parseUUID(request.categoryId)
+        val unitId = parseUUID(request.baseUnitId)
+
+        // Verifikasi Produk, Kategori dan Satuan
+        repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
+        repository.getCategoryById(categoryId) ?: throw ValidationException("Kategori tidak valid atau tidak ditemukan")
+        repository.getUnitById(unitId) ?: throw ValidationException("Satuan tidak valid atau tidak ditemukan")
+
+        repository.updateProduct(
+            id = uuid,
+            categoryId = categoryId,
+            baseUnitId = unitId,
+            name = name,
+            priceBuy = request.priceBuy,
+            priceRetail = request.priceRetail,
+            priceContractor = request.priceContractor,
+            minStock = request.minStock,
+            photoFilename = request.photoFilename
+        )
+
+        return repository.getProductById(uuid)!!
+    }
+
+    suspend fun deleteProduct(id: String) {
+        val uuid = parseUUID(id)
+        // Pastikan produk ada dan aktif
+        repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau sudah dihapus")
+        
+        // Soft delete
+        repository.softDeleteProduct(uuid)
+    }
+
+    // ==========================================
     // HELPERS
     // ==========================================
 
