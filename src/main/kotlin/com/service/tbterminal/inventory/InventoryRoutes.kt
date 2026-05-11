@@ -3,6 +3,7 @@ package com.service.tbterminal.inventory
 import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.getUserId
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
@@ -137,6 +138,30 @@ fun Route.inventoryRoutes() {
                     val id = call.parameters["id"] ?: return@delete call.respond(HttpStatusCode.BadRequest)
                     service.deleteProduct(id)
                     call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Produk berhasil dihapus"))
+                }
+            }
+            // ==========================================
+            // STOCK ROUTES
+            // ==========================================
+            route("/stock") {
+                // GET is open to all authenticated users
+                get {
+                    val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+                    val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+                    val search = call.request.queryParameters["search"]
+                    
+                    val stockDetails = service.getStockDetails(page, limit, search)
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(stockDetails))
+                }
+
+                // POST restricted to Management roles
+                post("/adjust") {
+                    call.requireRole(Role.OWNER, Role.ADMIN)
+                    val userId = call.getUserId().toString()
+                    val request = call.receive<StockAdjustmentRequest>()
+                    
+                    service.adjustStock(userId, request)
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Penyesuaian stok berhasil disimpan"))
                 }
             }
         }
