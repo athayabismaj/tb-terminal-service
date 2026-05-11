@@ -21,5 +21,5 @@ val appModule = module {
 
     // Sales Module
     single<SalesRepository> { SalesRepositoryImpl() }
-    single { SalesService(get()) }
+    single { SalesService(get(), get()) } // get() = SalesRepository, get() = InventoryRepository
 }

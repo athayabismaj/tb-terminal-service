@@ -2,6 +2,7 @@ package com.service.tbterminal.sales
 
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
+import org.jetbrains.exposed.sql.javatime.date
 import org.jetbrains.exposed.sql.javatime.timestamp
 
 // ==========================================
@@ -63,3 +64,167 @@ data class CashSessionResponse(
     val notes: String?,
     val status: String   // "OPEN" | "CLOSED"
 )
+
+// ==========================================
+// ENUM — Sesuai ENUM PostgreSQL di V5 (lowercase DB values)
+// ==========================================
+
+enum class PaymentMethod(val dbValue: String) {
+    TUNAI("tunai"),
+    TRANSFER("transfer"),
+    QRIS("qris"),
+    HUTANG("hutang"),
+    DP("dp")
+}
+
+enum class TrxStatus(val dbValue: String) {
+    LUNAS("lunas"),
+    DP("dp"),
+    HUTANG("hutang")
+}
+
+enum class TrxType(val dbValue: String) {
+    PENJUALAN("penjualan"),
+    RETUR_MASUK("retur_masuk")
+}
+
+enum class ReceivableStatus(val dbValue: String) {
+    BELUM_LUNAS("belum_lunas"),
+    SEBAGIAN("sebagian"),
+    LUNAS("lunas")
+}
+
+// ==========================================
+// EXPOSED TABLES — POS
+// ==========================================
+
+object TransactionsTable : Table("sales.transactions") {
+    val id = uuid("id")
+    val sessionId = uuid("session_id").references(CashSessionsTable.id)
+    val customerId = uuid("customer_id").nullable()
+    val userId = uuid("user_id")
+    val type = customEnumeration(
+        "type", "system.trx_type",
+        fromDb = { TrxType.entries.first { e -> e.dbValue == it.toString() } },
+        toDb = { it.dbValue }
+    )
+    val status = customEnumeration(
+        "status", "system.trx_status",
+        fromDb = { TrxStatus.entries.first { e -> e.dbValue == it.toString() } },
+        toDb = { it.dbValue }
+    )
+    val total = decimal("total", 15, 2)
+    val dpAmount = decimal("dp_amount", 15, 2)
+    val paidAmount = decimal("paid_amount", 15, 2)
+    val notes = text("notes").nullable()
+    val createdAt = timestamp("created_at")
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+object TransactionItemsTable : Table("sales.transaction_items") {
+    val id = uuid("id")
+    val transactionId = uuid("transaction_id").references(TransactionsTable.id)
+    val productId = uuid("product_id")
+    val unitId = uuid("unit_id")
+    val quantity = decimal("quantity", 10, 2)
+    val priceAtTransaction = decimal("price_at_transaction", 15, 2)
+    val cogsAtTransaction = decimal("cogs_at_transaction", 15, 2)
+    val discount = decimal("discount", 15, 2)
+    val subtotal = decimal("subtotal", 15, 2)
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+object PaymentsTable : Table("sales.payments") {
+    val id = uuid("id")
+    val transactionId = uuid("transaction_id").references(TransactionsTable.id)
+    val method = customEnumeration(
+        "method", "system.payment_method",
+        fromDb = { PaymentMethod.entries.first { e -> e.dbValue == it.toString() } },
+        toDb = { it.dbValue }
+    )
+    val amount = decimal("amount", 15, 2)
+    val reference = varchar("reference", 100).nullable()
+    val paidAt = timestamp("paid_at")
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+// Mapping minimal untuk insert ke receivable.receivables dari modul Sales
+object SalesReceivablesTable : Table("receivable.receivables") {
+    val id = uuid("id")
+    val customerId = uuid("customer_id")
+    val transactionId = uuid("transaction_id")
+    val amount = decimal("amount", 15, 2)
+    val paidAmount = decimal("paid_amount", 15, 2)
+    val dueDate = date("due_date")
+    val status = customEnumeration(
+        "status", "system.receivable_status",
+        fromDb = { ReceivableStatus.entries.first { e -> e.dbValue == it.toString() } },
+        toDb = { it.dbValue }
+    )
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+// ==========================================
+// DTOs — POS
+// ==========================================
+
+@Serializable
+data class CheckoutItemRequest(
+    val productId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val qty: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO
+)
+
+@Serializable
+data class CheckoutRequest(
+    val customerId: String? = null,       // null = pelanggan umum
+    val items: List<CheckoutItemRequest>,
+    val paymentMethod: String,             // "tunai", "transfer", "qris", "hutang", "dp"
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amountPaid: java.math.BigDecimal,
+    val notes: String? = null,
+    val dueDays: Int = 30                 // Termin piutang jika TEMPO/HUTANG (hari)
+)
+
+@Serializable
+data class TransactionItemResponse(
+    val productId: String,
+    val productName: String,
+    val unitId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val quantity: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val priceAtTransaction: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val cogsAtTransaction: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val discount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val subtotal: java.math.BigDecimal
+)
+
+@Serializable
+data class TransactionResponse(
+    val id: String,
+    val sessionId: String,
+    val customerId: String?,
+    val userId: String,
+    val type: String,
+    val status: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val total: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val dpAmount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val paidAmount: java.math.BigDecimal,
+    val notes: String?,
+    val createdAt: String,
+    val items: List<TransactionItemResponse>
+)
+

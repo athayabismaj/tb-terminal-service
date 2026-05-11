@@ -53,7 +53,32 @@ fun Application.salesRoutes() {
                         call.respond(HttpStatusCode.OK, ApiResponse.success(session, "Sesi kasir berhasil ditutup"))
                     }
                 }
+
+                // ==========================================
+                // POS — CHECKOUT & HISTORY
+                // ==========================================
+
+                // POST checkout (transaksi baru)
+                post("/checkout") {
+                    call.requireRole("KASIR", "ADMIN", "OWNER")
+                    val userId = call.getUserId()
+                    val request = call.receive<CheckoutRequest>()
+                    val transaction = service.checkout(userId, request)
+                    call.respond(HttpStatusCode.Created, ApiResponse.success(transaction, "Transaksi berhasil diproses"))
+                }
+
+                // GET riwayat transaksi dengan pagination
+                get("/transactions") {
+                    call.requireRole("KASIR", "ADMIN", "OWNER")
+                    val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+                    val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+                    val sessionId = call.request.queryParameters["sessionId"]
+
+                    val transactions = service.getTransactions(page, limit, sessionId)
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(transactions))
+                }
             }
         }
     }
 }
+
