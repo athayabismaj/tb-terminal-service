@@ -22,13 +22,16 @@ fun Application.configureDatabase() {
         this.password = password
         driverClassName = "org.postgresql.Driver"
         maximumPoolSize = 10
+        // Set search_path so all schemas are visible without prefix in queries
+        connectionInitSql = "SET search_path TO system,inventory,sales,receivable,purchasing,public"
     })
 
     // Run Flyway migrations
     val flyway = Flyway.configure()
         .dataSource(dataSource)
         .locations("classpath:db/migration")
-        .schemas("system")
+        .schemas("system", "inventory", "sales", "receivable", "purchasing")
+        .defaultSchema("system")
         .createSchemas(true)
         .baselineOnMigrate(true)
         .baselineVersion("0")
