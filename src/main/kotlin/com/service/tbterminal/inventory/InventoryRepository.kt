@@ -42,9 +42,14 @@ interface InventoryRepository {
         minStock: java.math.BigDecimal, photoFilename: String?
     ): Boolean
     suspend fun softDeleteProduct(id: UUID): Boolean
+
+    // Stock
+    suspend fun getStockDetails(page: Int, limit: Int, search: String?): PaginatedResponse<StockDetailResponse>
+    suspend fun adjustStock(productId: UUID, userId: UUID, adjType: AdjType, qtyActual: java.math.BigDecimal, notes: String?): Boolean
 }
 
 class InventoryRepositoryImpl : InventoryRepository {
+
 
     // ==========================================
     // CATEGORIES
@@ -291,5 +296,78 @@ class InventoryRepositoryImpl : InventoryRepository {
             photoFilename = row[ProductsTable.photoFilename],
             isActive = row[ProductsTable.isActive]
         )
+    }
+
+    // ==========================================
+    // STOCK MANAGEMENT
+    // ==========================================
+
+    override suspend fun getStockDetails(page: Int, limit: Int, search: String?): PaginatedResponse<StockDetailResponse> = transaction {
+        val offset = ((page - 1) * limit).toLong()
+        
+        var query = VStockDetailView.selectAll()
+        
+        if (!search.isNullOrBlank()) {
+            val searchTerm = "%${search.lowercase()}%"
+            query = query.andWhere {
+                (VStockDetailView.productName.lowerCase() like searchTerm) or 
+                (VStockDetailView.sku.lowerCase() like searchTerm)
+            }
+        }
+
+        val totalCount = query.count()
+        val totalPages = Math.ceil(totalCount.toDouble() / limit).toInt()
+
+        val data = query.limit(limit, offset).map { row ->
+            StockDetailResponse(
+                productId = row[VStockDetailView.productId].toString(),
+                sku = row[VStockDetailView.sku],
+                productName = row[VStockDetailView.productName],
+                categoryName = row[VStockDetailView.categoryName],
+                unitName = row[VStockDetailView.unitName],
+                quantity = row[VStockDetailView.quantity],
+                minStock = row[VStockDetailView.minStock],
+                priceBuy = row[VStockDetailView.priceBuy],
+                priceRetail = row[VStockDetailView.priceRetail],
+                priceContractor = row[VStockDetailView.priceContractor],
+                isActive = row[VStockDetailView.isActive]
+            )
+        }
+
+        PaginatedResponse(
+            data = data,
+            total = totalCount,
+            page = page,
+            limit = limit,
+            totalPages = totalPages
+        )
+    }
+
+    override suspend fun adjustStock(productId: UUID, userId: UUID, adjType: AdjType, qtyActual: java.math.BigDecimal, notes: String?): Boolean = transaction {
+        // Lock row in stock table
+        val stockRow = StockTable.select { StockTable.productId eq productId }
+            .forUpdate()
+            .singleOrNull() ?: return@transaction false
+            
+        val qtySystem = stockRow[StockTable.quantity]
+        val qtyDiff = qtyActual.subtract(qtySystem)
+        
+        // Insert history
+        StockAdjustmentsTable.insert {
+            it[this.productId] = productId
+            it[this.userId] = userId
+            it[this.adjType] = adjType
+            it[this.qtySystem] = qtySystem
+            it[this.qtyActual] = qtyActual
+            it[this.qtyDiff] = qtyDiff
+            it[this.notes] = notes
+        }
+        
+        // Update stock
+        val updatedRows = StockTable.update({ StockTable.productId eq productId }) {
+            it[this.quantity] = qtyActual
+        }
+        
+        updatedRows > 0
     }
 }
