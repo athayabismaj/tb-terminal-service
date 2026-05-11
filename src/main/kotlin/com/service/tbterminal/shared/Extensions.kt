@@ -53,3 +53,19 @@ suspend fun ApplicationCall.respondError(exception: Throwable) {
     
     respond(status, ApiResponse.error<Unit>(message, code))
 }
+
+/**
+ * Custom serializer untuk java.math.BigDecimal agar dapat digunakan oleh kotlinx.serialization
+ */
+object BigDecimalSerializer : kotlinx.serialization.KSerializer<java.math.BigDecimal> {
+    override val descriptor: kotlinx.serialization.descriptors.SerialDescriptor =
+        kotlinx.serialization.descriptors.PrimitiveSerialDescriptor("java.math.BigDecimal", kotlinx.serialization.descriptors.PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): java.math.BigDecimal {
+        return java.math.BigDecimal(decoder.decodeString())
+    }
+
+    override fun serialize(encoder: kotlinx.serialization.encoding.Encoder, value: java.math.BigDecimal) {
+        encoder.encodeString(value.toPlainString())
+    }
+}
