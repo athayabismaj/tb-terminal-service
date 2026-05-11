@@ -239,10 +239,11 @@ class InventoryService(private val repository: InventoryRepository) {
     suspend fun getStockDetails(page: Int, limit: Int, search: String?): PaginatedResponse<StockDetailResponse> {
         val safePage = if (page < 1) 1 else page
         val safeLimit = if (limit < 1) 20 else limit
-        return repository.getStockDetails(safePage, safeLimit, search)
+        val offset = (safePage - 1) * safeLimit
+        return repository.getPaginatedStockDetail(safeLimit, offset, search)
     }
 
-    suspend fun adjustStock(userId: String, request: StockAdjustmentRequest) {
+    suspend fun executeOpname(userId: String, request: StockOpnameRequest) {
         val productId = parseUUID(request.productId)
         val userUuid = parseUUID(userId)
         
@@ -251,28 +252,45 @@ class InventoryService(private val repository: InventoryRepository) {
 
         // Parse AdjType
         val adjType = try {
-            AdjType.valueOf(request.adjType.uppercase())
+            AdjType.valueOf(request.adjustmentType.uppercase())
         } catch (e: IllegalArgumentException) {
-            throw ValidationException("Tipe penyesuaian (adjType) tidak valid. Gunakan OPNAME, CORRECTION, atau DAMAGE")
+            throw ValidationException("Tipe penyesuaian (adjustmentType) tidak valid. Gunakan OPNAME, CORRECTION, atau DAMAGE")
         }
 
         // Validasi qty actual tidak boleh negatif
-        if (request.qtyActual < java.math.BigDecimal.ZERO) {
+        if (request.actualQty < java.math.BigDecimal.ZERO) {
             throw ValidationException("Quantity aktual tidak boleh kurang dari nol")
         }
 
-        val success = repository.adjustStock(
-            productId = productId,
-            userId = userUuid,
-            adjType = adjType,
-            qtyActual = request.qtyActual,
-            notes = request.notes
-        )
+        // Jalankan seluruh proses validasi dan operasi database di dalam satu transaksi
+        org.jetbrains.exposed.sql.transactions.transaction {
+            // Lock dan baca stok saat ini
+            val currentSystemQty = kotlinx.coroutines.runBlocking { repository.getCurrentStockForUpdate(productId) }
+                ?: throw NotFoundException("Data stok untuk produk ini tidak ditemukan")
 
-        if (!success) {
-            throw NotFoundException("Data stok untuk produk ini tidak ditemukan")
+            // Validasi jika tidak ada perubahan
+            if (currentSystemQty.compareTo(request.actualQty) == 0) {
+                throw ValidationException("Stok fisik sama dengan sistem, tidak ada penyesuaian.")
+            }
+
+            // Eksekusi pembaruan dan pencatatan audit trail
+            val success = kotlinx.coroutines.runBlocking {
+                repository.executeOpname(
+                    productId = productId,
+                    oldQty = currentSystemQty,
+                    newQty = request.actualQty,
+                    userId = userUuid,
+                    adjType = adjType,
+                    notes = request.notes
+                )
+            }
+
+            if (!success) {
+                throw NotFoundException("Gagal melakukan opname pada stok ini")
+            }
         }
     }
+
 
     // ==========================================
     // HELPERS

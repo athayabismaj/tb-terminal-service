@@ -183,9 +183,9 @@ data class StockDetailResponse(
 )
 
 @Serializable
-data class StockAdjustmentRequest(
+data class StockOpnameRequest(
     val productId: String,
-    val adjType: String, // "OPNAME", "CORRECTION", "DAMAGE"
-    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val qtyActual: java.math.BigDecimal,
+    val adjustmentType: String, // "OPNAME", "CORRECTION", "DAMAGE", dll
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val actualQty: java.math.BigDecimal,
     val notes: String? = null
 )

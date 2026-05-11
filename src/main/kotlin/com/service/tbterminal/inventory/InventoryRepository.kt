@@ -44,11 +44,18 @@ interface InventoryRepository {
     suspend fun softDeleteProduct(id: UUID): Boolean
 
     // Stock
-    suspend fun getStockDetails(page: Int, limit: Int, search: String?): PaginatedResponse<StockDetailResponse>
-    suspend fun adjustStock(productId: UUID, userId: UUID, adjType: AdjType, qtyActual: java.math.BigDecimal, notes: String?): Boolean
+    suspend fun getPaginatedStockDetail(limit: Int, offset: Int, search: String?): PaginatedResponse<StockDetailResponse>
+    suspend fun getCurrentStockForUpdate(productId: UUID): java.math.BigDecimal?
+    suspend fun executeOpname(productId: UUID, oldQty: java.math.BigDecimal, newQty: java.math.BigDecimal, userId: UUID, adjType: AdjType, notes: String?): Boolean
 }
 
 class InventoryRepositoryImpl : InventoryRepository {
+
+    // ==========================================
+    // CATEGORIES
+    // ==========================================
+    // ... (rest of implementation)
+
 
 
     // ==========================================
@@ -302,9 +309,7 @@ class InventoryRepositoryImpl : InventoryRepository {
     // STOCK MANAGEMENT
     // ==========================================
 
-    override suspend fun getStockDetails(page: Int, limit: Int, search: String?): PaginatedResponse<StockDetailResponse> = transaction {
-        val offset = ((page - 1) * limit).toLong()
-        
+    override suspend fun getPaginatedStockDetail(limit: Int, offset: Int, search: String?): PaginatedResponse<StockDetailResponse> = transaction {
         var query = VStockDetailView.selectAll()
         
         if (!search.isNullOrBlank()) {
@@ -318,7 +323,7 @@ class InventoryRepositoryImpl : InventoryRepository {
         val totalCount = query.count()
         val totalPages = Math.ceil(totalCount.toDouble() / limit).toInt()
 
-        val data = query.limit(limit, offset).map { row ->
+        val data = query.limit(limit, offset.toLong()).map { row ->
             StockDetailResponse(
                 productId = row[VStockDetailView.productId].toString(),
                 sku = row[VStockDetailView.sku],
@@ -334,6 +339,9 @@ class InventoryRepositoryImpl : InventoryRepository {
             )
         }
 
+        // Hitung page dari limit/offset
+        val page = (offset / limit) + 1
+
         PaginatedResponse(
             data = data,
             total = totalCount,
@@ -343,29 +351,32 @@ class InventoryRepositoryImpl : InventoryRepository {
         )
     }
 
-    override suspend fun adjustStock(productId: UUID, userId: UUID, adjType: AdjType, qtyActual: java.math.BigDecimal, notes: String?): Boolean = transaction {
-        // Lock row in stock table
-        val stockRow = StockTable.select { StockTable.productId eq productId }
+    override suspend fun getCurrentStockForUpdate(productId: UUID): java.math.BigDecimal? = transaction {
+        StockTable.select { StockTable.productId eq productId }
             .forUpdate()
-            .singleOrNull() ?: return@transaction false
-            
-        val qtySystem = stockRow[StockTable.quantity]
-        val qtyDiff = qtyActual.subtract(qtySystem)
+            .singleOrNull()?.get(StockTable.quantity)
+    }
+
+    override suspend fun executeOpname(
+        productId: UUID, oldQty: java.math.BigDecimal, newQty: java.math.BigDecimal,
+        userId: UUID, adjType: AdjType, notes: String?
+    ): Boolean = transaction {
+        val qtyDiff = newQty.subtract(oldQty)
         
         // Insert history
         StockAdjustmentsTable.insert {
             it[this.productId] = productId
             it[this.userId] = userId
             it[this.adjType] = adjType
-            it[this.qtySystem] = qtySystem
-            it[this.qtyActual] = qtyActual
+            it[this.qtySystem] = oldQty
+            it[this.qtyActual] = newQty
             it[this.qtyDiff] = qtyDiff
             it[this.notes] = notes
         }
         
         // Update stock
         val updatedRows = StockTable.update({ StockTable.productId eq productId }) {
-            it[this.quantity] = qtyActual
+            it[this.quantity] = newQty
         }
         
         updatedRows > 0

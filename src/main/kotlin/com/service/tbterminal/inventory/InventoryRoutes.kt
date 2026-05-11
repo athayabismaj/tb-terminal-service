@@ -155,12 +155,12 @@ fun Route.inventoryRoutes() {
                 }
 
                 // POST restricted to Management roles
-                post("/adjust") {
+                post("/opname") {
                     call.requireRole(Role.OWNER, Role.ADMIN)
                     val userId = call.getUserId().toString()
-                    val request = call.receive<StockAdjustmentRequest>()
+                    val request = call.receive<StockOpnameRequest>()
                     
-                    service.adjustStock(userId, request)
+                    service.executeOpname(userId, request)
                     call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Penyesuaian stok berhasil disimpan"))
                 }
             }
