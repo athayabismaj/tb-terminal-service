@@ -233,6 +233,48 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     // ==========================================
+    // STOCK MANAGEMENT
+    // ==========================================
+
+    suspend fun getStockDetails(page: Int, limit: Int, search: String?): PaginatedResponse<StockDetailResponse> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = if (limit < 1) 20 else limit
+        return repository.getStockDetails(safePage, safeLimit, search)
+    }
+
+    suspend fun adjustStock(userId: String, request: StockAdjustmentRequest) {
+        val productId = parseUUID(request.productId)
+        val userUuid = parseUUID(userId)
+        
+        // Verifikasi Produk
+        repository.getProductById(productId) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
+
+        // Parse AdjType
+        val adjType = try {
+            AdjType.valueOf(request.adjType.uppercase())
+        } catch (e: IllegalArgumentException) {
+            throw ValidationException("Tipe penyesuaian (adjType) tidak valid. Gunakan OPNAME, CORRECTION, atau DAMAGE")
+        }
+
+        // Validasi qty actual tidak boleh negatif
+        if (request.qtyActual < java.math.BigDecimal.ZERO) {
+            throw ValidationException("Quantity aktual tidak boleh kurang dari nol")
+        }
+
+        val success = repository.adjustStock(
+            productId = productId,
+            userId = userUuid,
+            adjType = adjType,
+            qtyActual = request.qtyActual,
+            notes = request.notes
+        )
+
+        if (!success) {
+            throw NotFoundException("Data stok untuk produk ini tidak ditemukan")
+        }
+    }
+
+    // ==========================================
     // HELPERS
     // ==========================================
 
