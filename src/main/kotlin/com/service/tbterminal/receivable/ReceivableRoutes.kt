@@ -2,6 +2,7 @@ package com.service.tbterminal.receivable
 
 import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.Role
+import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.requireRole
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -70,7 +71,50 @@ fun Application.receivableRoutes() {
                         call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Pelanggan berhasil dihapus"))
                     }
                 }
+
+                // ==========================================
+                // RECEIVABLES ROUTES
+                // ==========================================
+                route("/receivables") {
+
+                    // GET list piutang — akses semua role
+                    get {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+                        val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+                        val customerId = call.request.queryParameters["customerId"]
+                        val status = call.request.queryParameters["status"]
+
+                        val receivables = service.getReceivables(page, limit, customerId, status)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(receivables))
+                    }
+
+                    // GET detail piutang — akses semua role
+                    get("/{id}") {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val id = call.parameters["id"]
+                            ?: return@get call.respond(HttpStatusCode.BadRequest, ApiResponse.error<Unit>("ID tidak ditemukan"))
+                        val receivable = service.getReceivableById(id)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(receivable))
+                    }
+                }
+
+                // ==========================================
+                // PAYMENTS ROUTES
+                // ==========================================
+                route("/payments") {
+
+                    // POST bayar piutang — akses semua role (kasir di lapangan bisa terima cicilan)
+                    post {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val userId = call.getUserId()
+                        val request = call.receive<PaymentRequest>()
+                        val payment = service.pay(userId, request)
+                        call.respond(HttpStatusCode.Created, ApiResponse.success(payment, "Pembayaran berhasil dicatat"))
+                    }
+                }
             }
         }
     }
 }
+

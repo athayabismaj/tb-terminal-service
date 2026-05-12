@@ -1,5 +1,7 @@
 package com.service.tbterminal.sales
 
+import com.service.tbterminal.receivable.ReceivableStatus
+import com.service.tbterminal.receivable.ReceivablesTable
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -180,7 +182,7 @@ class SalesRepositoryImpl : SalesRepository {
         // 4. Jika HUTANG/DP — insert ke receivable.receivables
         if ((trxStatus == TrxStatus.HUTANG || trxStatus == TrxStatus.DP) && customerId != null) {
             val sisaHutang = totalAmount.subtract(amountPaid)
-            SalesReceivablesTable.insert {
+            ReceivablesTable.insert {
                 it[this.customerId] = customerId
                 it[this.transactionId] = trxId
                 it[this.amount] = sisaHutang

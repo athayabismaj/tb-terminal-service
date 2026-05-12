@@ -2,7 +2,6 @@ package com.service.tbterminal.sales
 
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
-import org.jetbrains.exposed.sql.javatime.date
 import org.jetbrains.exposed.sql.javatime.timestamp
 
 // ==========================================
@@ -88,12 +87,6 @@ enum class TrxType(val dbValue: String) {
     RETUR_MASUK("retur_masuk")
 }
 
-enum class ReceivableStatus(val dbValue: String) {
-    BELUM_LUNAS("belum_lunas"),
-    SEBAGIAN("sebagian"),
-    LUNAS("lunas")
-}
-
 // ==========================================
 // EXPOSED TABLES — POS
 // ==========================================
@@ -147,23 +140,6 @@ object PaymentsTable : Table("sales.payments") {
     val amount = decimal("amount", 15, 2)
     val reference = varchar("reference", 100).nullable()
     val paidAt = timestamp("paid_at")
-
-    override val primaryKey = PrimaryKey(id)
-}
-
-// Mapping minimal untuk insert ke receivable.receivables dari modul Sales
-object SalesReceivablesTable : Table("receivable.receivables") {
-    val id = uuid("id")
-    val customerId = uuid("customer_id")
-    val transactionId = uuid("transaction_id")
-    val amount = decimal("amount", 15, 2)
-    val paidAmount = decimal("paid_amount", 15, 2)
-    val dueDate = date("due_date")
-    val status = customEnumeration(
-        "status", "system.receivable_status",
-        fromDb = { ReceivableStatus.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
-    )
 
     override val primaryKey = PrimaryKey(id)
 }

@@ -2,7 +2,26 @@ package com.service.tbterminal.receivable
 
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
+import org.jetbrains.exposed.sql.javatime.date
 import org.jetbrains.exposed.sql.javatime.timestamp
+
+// ==========================================
+// ENUMS — Sesuai ENUM PostgreSQL di V5 (lowercase DB values)
+// ==========================================
+
+enum class ReceivableStatus(val dbValue: String) {
+    BELUM_LUNAS("belum_lunas"),
+    SEBAGIAN("sebagian"),
+    LUNAS("lunas")
+}
+
+enum class RecPaymentMethod(val dbValue: String) {
+    TUNAI("tunai"),
+    TRANSFER("transfer"),
+    QRIS("qris"),
+    HUTANG("hutang"),
+    DP("dp")
+}
 
 // ==========================================
 // EXPOSED TABLES
@@ -23,8 +42,44 @@ object CustomersTable : Table("receivable.customers") {
     override val primaryKey = PrimaryKey(id)
 }
 
+// Dipindahkan dari SalesModels.kt (SalesReceivablesTable) dan diperluas
+object ReceivablesTable : Table("receivable.receivables") {
+    val id = uuid("id")
+    val customerId = uuid("customer_id").references(CustomersTable.id)
+    val transactionId = uuid("transaction_id") // FK ke sales.transactions (cross-schema, diatur di V11)
+    val amount = decimal("amount", 15, 2)
+    val paidAmount = decimal("paid_amount", 15, 2)
+    val dueDate = date("due_date")
+    val status = customEnumeration(
+        "status", "system.receivable_status",
+        fromDb = { ReceivableStatus.entries.first { e -> e.dbValue == it.toString() } },
+        toDb = { it.dbValue }
+    )
+    val createdAt = timestamp("created_at")
+    val updatedAt = timestamp("updated_at")
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+object ReceivablePaymentsTable : Table("receivable.receivable_payments") {
+    val id = uuid("id")
+    val receivableId = uuid("receivable_id").references(ReceivablesTable.id)
+    val userId = uuid("user_id") // FK ke system.users (cross-schema, diatur di V11)
+    val amount = decimal("amount", 15, 2)
+    val method = customEnumeration(
+        "method", "system.payment_method",
+        fromDb = { RecPaymentMethod.entries.first { e -> e.dbValue == it.toString() } },
+        toDb = { it.dbValue }
+    )
+    val reference = varchar("reference", 100).nullable()
+    val notes = text("notes").nullable()
+    val paidAt = timestamp("paid_at")
+
+    override val primaryKey = PrimaryKey(id)
+}
+
 // ==========================================
-// DTOs
+// DTOs — Customer
 // ==========================================
 
 @Serializable
@@ -51,4 +106,51 @@ data class CustomerResponse(
     val isActive: Boolean,
     val createdAt: String,
     val updatedAt: String
+)
+
+// ==========================================
+// DTOs — Receivable & Payment
+// ==========================================
+
+@Serializable
+data class ReceivableResponse(
+    val id: String,
+    val customerId: String,
+    val customerName: String,
+    val transactionId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val paidAmount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val remainingAmount: java.math.BigDecimal,  // Kalkulasi: amount - paidAmount
+    val dueDate: String,
+    val status: String,
+    val createdAt: String
+)
+
+@Serializable
+data class PaymentRequest(
+    val receivableId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val method: String,         // "tunai", "transfer", "qris"
+    val reference: String? = null,
+    val notes: String? = null
+)
+
+@Serializable
+data class PaymentResponse(
+    val id: String,
+    val receivableId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val method: String,
+    val reference: String?,
+    val notes: String?,
+    val paidAt: String,
+    // Status piutang setelah pembayaran
+    val receivableStatus: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val receivableRemainingAmount: java.math.BigDecimal
 )
