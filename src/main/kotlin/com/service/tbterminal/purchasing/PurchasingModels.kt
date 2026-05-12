@@ -175,3 +175,70 @@ data class PurchaseSummary(
     val createdAt: String
 )
 
+// ==========================================
+// EXPOSED TABLES — Supplier Payments
+// ==========================================
+
+object SupplierPaymentsTable : Table("purchasing.supplier_payments") {
+    val id = uuid("id")
+    val supplierPayableId = uuid("supplier_payable_id").references(SupplierPayablesTable.id)
+    val userId = uuid("user_id")
+    val amount = decimal("amount", 15, 2)
+    val method = customEnumeration(
+        "method", "system.payment_method",
+        fromDb = { PurchasePaymentMethod.entries.first { e -> e.dbValue == it.toString() } },
+        toDb = { it.dbValue }
+    )
+    val reference = varchar("reference", 100).nullable()
+    val notes = text("notes").nullable()
+    val paidAt = timestamp("paid_at")
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+// ==========================================
+// DTOs — Payable & Payment
+// ==========================================
+
+@Serializable
+data class PayableResponse(
+    val id: String,
+    val supplierId: String,
+    val supplierName: String,
+    val purchaseId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val paidAmount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val remainingAmount: java.math.BigDecimal,  // Kalkulasi: amount - paidAmount
+    val dueDate: String,
+    val status: String,
+    val createdAt: String
+)
+
+@Serializable
+data class SupplierPaymentRequest(
+    val payableId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val method: String,         // "tunai", "transfer", "qris"
+    val reference: String? = null,
+    val notes: String? = null
+)
+
+@Serializable
+data class SupplierPaymentResponse(
+    val id: String,
+    val payableId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val method: String,
+    val reference: String?,
+    val notes: String?,
+    val paidAt: String,
+    // Status hutang setelah pembayaran
+    val payableStatus: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val payableRemainingAmount: java.math.BigDecimal
+)
