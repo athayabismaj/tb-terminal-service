@@ -1,12 +1,16 @@
 package com.service.tbterminal.purchasing
 
+import com.service.tbterminal.inventory.InventoryRepository
 import com.service.tbterminal.inventory.PaginatedResponse
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.ValidationException
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import java.util.UUID
 
-class PurchasingService(private val repository: PurchasingRepository) {
+class PurchasingService(
+    private val repository: PurchasingRepository,
+    private val inventoryRepository: InventoryRepository
+) {
 
     // ==========================================
     // SUPPLIERS
@@ -28,7 +32,6 @@ class PurchasingService(private val repository: PurchasingRepository) {
         val name = request.name.trim()
         validateSupplierInput(name, request.paymentTermDays)
 
-        // Cek duplikasi nama
         val existing = repository.getSupplierByName(name)
         if (existing != null) {
             throw ValidationException("Supplier dengan nama '$name' sudah ada")
@@ -51,7 +54,6 @@ class PurchasingService(private val repository: PurchasingRepository) {
         val current = repository.getSupplierById(uuid)
             ?: throw NotFoundException("Supplier tidak ditemukan atau sudah dinonaktifkan")
 
-        // Cek duplikasi nama hanya jika nama berubah
         if (current.name.lowercase() != name.lowercase()) {
             val existing = repository.getSupplierByName(name)
             if (existing != null) {
@@ -85,6 +87,98 @@ class PurchasingService(private val repository: PurchasingRepository) {
     }
 
     // ==========================================
+    // PURCHASE ENGINE
+    // ==========================================
+
+    suspend fun purchase(userId: UUID, request: PurchaseRequest): PurchaseResponse {
+        // 1. Validasi items tidak boleh kosong
+        if (request.items.isEmpty()) {
+            throw ValidationException("Daftar item pembelian tidak boleh kosong")
+        }
+
+        // 2. Parse supplierId
+        val supplierId = parseUUID(request.supplierId)
+
+        // 3. Validasi supplier ada
+        repository.getSupplierById(supplierId)
+            ?: throw NotFoundException("Supplier tidak ditemukan atau sudah dinonaktifkan")
+
+        // 4. Parse paymentMethod
+        val paymentMethod = PurchasePaymentMethod.entries.firstOrNull {
+            it.dbValue == request.paymentMethod.lowercase()
+        } ?: throw ValidationException(
+            "Metode pembayaran '${request.paymentMethod}' tidak valid. " +
+            "Gunakan: tunai, transfer, qris, hutang, atau dp"
+        )
+
+        // 5. Resolve setiap item: ambil data produk dari DB untuk snapshot HPP
+        val resolvedItems = mutableListOf<ResolvedPurchaseItem>()
+        var calculatedTotal = java.math.BigDecimal.ZERO
+
+        for (item in request.items) {
+            val productId = parseUUID(item.productId)
+
+            // Validasi qty & price > 0
+            if (item.qty <= java.math.BigDecimal.ZERO) {
+                throw ValidationException("Kuantitas produk harus lebih dari nol")
+            }
+            if (item.price <= java.math.BigDecimal.ZERO) {
+                throw ValidationException("Harga beli produk harus lebih dari nol")
+            }
+
+            // Ambil data produk dari DB
+            val product = inventoryRepository.getProductById(productId)
+                ?: throw NotFoundException("Produk dengan ID '${item.productId}' tidak ditemukan")
+
+            val subtotal = item.qty.multiply(item.price)
+            calculatedTotal = calculatedTotal.add(subtotal)
+
+            resolvedItems.add(
+                ResolvedPurchaseItem(
+                    productId = productId,
+                    unitId = UUID.fromString(product.baseUnitId),
+                    productName = product.name,
+                    qty = item.qty,
+                    priceAtTransaction = item.price,        // Harga beli baru dari nota
+                    cogsAtTransaction = product.priceBuy,   // Snapshot HPP lama sebelum update
+                    subtotal = subtotal
+                )
+            )
+        }
+
+        // 6. Validasi amountPaid
+        if (request.amountPaid < java.math.BigDecimal.ZERO) {
+            throw ValidationException("Jumlah pembayaran tidak boleh negatif")
+        }
+
+        // 7. Eksekusi purchase atomik di repository
+        return repository.executePurchase(
+            userId = userId,
+            supplierId = supplierId,
+            invoiceNo = request.invoiceNo?.trim(),
+            resolvedItems = resolvedItems,
+            calculatedTotal = calculatedTotal,
+            paymentMethod = paymentMethod,
+            amountPaid = request.amountPaid,
+            notes = request.notes?.trim(),
+            dueDays = request.dueDays
+        )
+    }
+
+    suspend fun getPurchases(page: Int, limit: Int, supplierId: String?): PaginatedResponse<PurchaseSummary> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = if (limit < 1) 20 else limit
+        val supplierUuid = supplierId?.let { parseUUID(it) }
+        return repository.getPaginatedPurchases(safePage, safeLimit, supplierUuid)
+    }
+
+    suspend fun getPurchaseById(id: String): PurchaseResponse {
+        val uuid = parseUUID(id)
+        return repository.getPurchaseById(uuid)
+            ?: throw NotFoundException("Data pembelian tidak ditemukan")
+    }
+
+    // ==========================================
     // HELPERS
     // ==========================================
 
@@ -105,3 +199,4 @@ class PurchasingService(private val repository: PurchasingRepository) {
         }
     }
 }
+

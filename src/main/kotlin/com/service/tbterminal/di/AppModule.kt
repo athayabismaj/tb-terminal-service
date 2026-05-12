@@ -35,5 +35,5 @@ val appModule = module {
 
     // Purchasing Module
     single<PurchasingRepository> { PurchasingRepositoryImpl() }
-    single { PurchasingService(get()) }
+    single { PurchasingService(get(), get()) } // get() = PurchasingRepository, get() = InventoryRepository
 }

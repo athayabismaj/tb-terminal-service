@@ -2,6 +2,7 @@ package com.service.tbterminal.purchasing
 
 import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.Role
+import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.requireRole
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -23,7 +24,6 @@ fun Application.purchasingRoutes() {
                 // ==========================================
                 route("/suppliers") {
 
-                    // GET list supplier — ADMIN/OWNER
                     get {
                         call.requireRole(Role.ADMIN, Role.OWNER)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
@@ -34,7 +34,6 @@ fun Application.purchasingRoutes() {
                         call.respond(HttpStatusCode.OK, ApiResponse.success(suppliers))
                     }
 
-                    // GET detail supplier — ADMIN/OWNER
                     get("/{id}") {
                         call.requireRole(Role.ADMIN, Role.OWNER)
                         val id = call.parameters["id"]
@@ -43,7 +42,6 @@ fun Application.purchasingRoutes() {
                         call.respond(HttpStatusCode.OK, ApiResponse.success(supplier))
                     }
 
-                    // POST buat supplier baru — ADMIN/OWNER
                     post {
                         call.requireRole(Role.ADMIN, Role.OWNER)
                         val request = call.receive<SupplierRequest>()
@@ -51,7 +49,6 @@ fun Application.purchasingRoutes() {
                         call.respond(HttpStatusCode.Created, ApiResponse.success(supplier, "Supplier berhasil ditambahkan"))
                     }
 
-                    // PUT update supplier — ADMIN/OWNER
                     put("/{id}") {
                         call.requireRole(Role.ADMIN, Role.OWNER)
                         val id = call.parameters["id"]
@@ -61,7 +58,6 @@ fun Application.purchasingRoutes() {
                         call.respond(HttpStatusCode.OK, ApiResponse.success(supplier, "Supplier berhasil diperbarui"))
                     }
 
-                    // DELETE soft delete supplier — ADMIN/OWNER
                     delete("/{id}") {
                         call.requireRole(Role.ADMIN, Role.OWNER)
                         val id = call.parameters["id"]
@@ -70,7 +66,43 @@ fun Application.purchasingRoutes() {
                         call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Supplier berhasil dihapus"))
                     }
                 }
+
+                // ==========================================
+                // PURCHASE ROUTES
+                // ==========================================
+                route("/purchases") {
+
+                    // GET list nota beli — ADMIN/OWNER
+                    get {
+                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+                        val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+                        val supplierId = call.request.queryParameters["supplierId"]
+
+                        val purchases = service.getPurchases(page, limit, supplierId)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(purchases))
+                    }
+
+                    // GET detail nota beli — ADMIN/OWNER
+                    get("/{id}") {
+                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        val id = call.parameters["id"]
+                            ?: return@get call.respond(HttpStatusCode.BadRequest, ApiResponse.error<Unit>("ID tidak ditemukan"))
+                        val purchase = service.getPurchaseById(id)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(purchase))
+                    }
+
+                    // POST buat nota beli — ADMIN/OWNER
+                    post {
+                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        val userId = call.getUserId()
+                        val request = call.receive<PurchaseRequest>()
+                        val purchase = service.purchase(userId, request)
+                        call.respond(HttpStatusCode.Created, ApiResponse.success(purchase, "Pembelian berhasil dicatat"))
+                    }
+                }
             }
         }
     }
 }
+
