@@ -3,6 +3,9 @@ package com.service.tbterminal.di
 import com.service.tbterminal.inventory.InventoryRepository
 import com.service.tbterminal.inventory.InventoryRepositoryImpl
 import com.service.tbterminal.inventory.InventoryService
+import com.service.tbterminal.purchasing.PurchasingRepository
+import com.service.tbterminal.purchasing.PurchasingRepositoryImpl
+import com.service.tbterminal.purchasing.PurchasingService
 import com.service.tbterminal.receivable.ReceivableRepository
 import com.service.tbterminal.receivable.ReceivableRepositoryImpl
 import com.service.tbterminal.receivable.ReceivableService
@@ -29,4 +32,8 @@ val appModule = module {
     // Receivable Module
     single<ReceivableRepository> { ReceivableRepositoryImpl() }
     single { ReceivableService(get()) }
+
+    // Purchasing Module
+    single<PurchasingRepository> { PurchasingRepositoryImpl() }
+    single { PurchasingService(get()) }
 }
