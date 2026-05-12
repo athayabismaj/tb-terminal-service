@@ -179,6 +179,103 @@ class PurchasingService(
     }
 
     // ==========================================
+    // PAYABLES
+    // ==========================================
+
+    suspend fun getPayables(
+        page: Int, limit: Int, supplierId: String?, status: String?
+    ): PaginatedResponse<PayableResponse> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = if (limit < 1) 20 else limit
+
+        val supplierUuid = supplierId?.let { parseUUID(it) }
+        val payableStatus = status?.let {
+            PayableStatus.entries.firstOrNull { e -> e.dbValue == it.lowercase() }
+                ?: throw ValidationException(
+                    "Status '$it' tidak valid. Gunakan: belum_lunas, sebagian, atau lunas"
+                )
+        }
+
+        return repository.getPaginatedPayables(safePage, safeLimit, supplierUuid, payableStatus)
+    }
+
+    suspend fun getPayableById(id: String): PayableResponse {
+        val uuid = parseUUID(id)
+        return repository.getPayableById(uuid)
+            ?: throw NotFoundException("Data hutang tidak ditemukan")
+    }
+
+    // ==========================================
+    // SUPPLIER PAYMENT ENGINE
+    // ==========================================
+
+    suspend fun paySupplier(userId: UUID, request: SupplierPaymentRequest): SupplierPaymentResponse {
+        // 1. Validasi amount > 0
+        if (request.amount <= java.math.BigDecimal.ZERO) {
+            throw ValidationException("Jumlah pembayaran harus lebih dari nol")
+        }
+
+        // 2. Parse payableId
+        val payableId = parseUUID(request.payableId)
+
+        // 3. Parse method (hanya tunai/transfer/qris untuk pembayaran hutang)
+        val method = PurchasePaymentMethod.entries.firstOrNull {
+            it.dbValue == request.method.lowercase()
+        } ?: throw ValidationException(
+            "Metode pembayaran '${request.method}' tidak valid. " +
+            "Gunakan: tunai, transfer, atau qris"
+        )
+
+        // 4-10. Eksekusi dalam satu transaksi atomik dengan FOR UPDATE lock
+        return org.jetbrains.exposed.sql.transactions.transaction {
+            // 4. Lock row hutang (FOR UPDATE) — mencegah race condition
+            val payable = kotlinx.coroutines.runBlocking { repository.getPayableForUpdate(payableId) }
+                ?: throw NotFoundException("Hutang dengan ID '${request.payableId}' tidak ditemukan")
+
+            // 5. LUNAS Guard — Cek apakah sudah lunas
+            if (payable.status == PayableStatus.LUNAS) {
+                throw ValidationException("Hutang ini sudah lunas, tidak dapat menerima pembayaran lagi")
+            }
+
+            // 6. Hitung sisa hutang
+            val remainingAmount = payable.amount.subtract(payable.paidAmount)
+
+            // 7. Overpayment Guard
+            if (request.amount > remainingAmount) {
+                throw ValidationException(
+                    "Pembayaran melebihi sisa hutang. " +
+                    "Sisa hutang: ${remainingAmount.toPlainString()}, " +
+                    "jumlah bayar: ${request.amount.toPlainString()}"
+                )
+            }
+
+            // 8. Hitung newPaidAmount
+            val newPaidAmount = payable.paidAmount.add(request.amount)
+
+            // 9. Tentukan status baru
+            val newStatus = if (newPaidAmount >= payable.amount) {
+                PayableStatus.LUNAS
+            } else {
+                PayableStatus.SEBAGIAN
+            }
+
+            // 10. Insert payment + update payable (atomik)
+            kotlinx.coroutines.runBlocking {
+                repository.insertPaymentAndUpdatePayable(
+                    payableId = payableId,
+                    userId = userId,
+                    paymentAmount = request.amount,
+                    method = method,
+                    reference = request.reference?.trim(),
+                    notes = request.notes?.trim(),
+                    newPaidAmount = newPaidAmount,
+                    newStatus = newStatus
+                )
+            }
+        }
+    }
+
+    // ==========================================
     // HELPERS
     // ==========================================
 
