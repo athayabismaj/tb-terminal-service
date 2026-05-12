@@ -101,8 +101,45 @@ fun Application.purchasingRoutes() {
                         call.respond(HttpStatusCode.Created, ApiResponse.success(purchase, "Pembelian berhasil dicatat"))
                     }
                 }
+
+                // ==========================================
+                // PAYABLE ROUTES
+                // ==========================================
+                route("/payables") {
+
+                    // GET list hutang — ADMIN/OWNER
+                    get {
+                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+                        val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+                        val supplierId = call.request.queryParameters["supplierId"]
+                        val status = call.request.queryParameters["status"]
+
+                        val payables = service.getPayables(page, limit, supplierId, status)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(payables))
+                    }
+
+                    // GET detail hutang — ADMIN/OWNER
+                    get("/{id}") {
+                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        val id = call.parameters["id"]
+                            ?: return@get call.respond(HttpStatusCode.BadRequest, ApiResponse.error<Unit>("ID tidak ditemukan"))
+                        val payable = service.getPayableById(id)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(payable))
+                    }
+
+                    // POST bayar hutang supplier — ADMIN/OWNER
+                    route("/payments") {
+                        post {
+                            call.requireRole(Role.ADMIN, Role.OWNER)
+                            val userId = call.getUserId()
+                            val request = call.receive<SupplierPaymentRequest>()
+                            val payment = service.paySupplier(userId, request)
+                            call.respond(HttpStatusCode.Created, ApiResponse.success(payment, "Pembayaran hutang berhasil dicatat"))
+                        }
+                    }
+                }
             }
         }
     }
 }
-
