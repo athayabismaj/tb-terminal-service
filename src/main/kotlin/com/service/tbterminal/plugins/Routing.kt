@@ -8,6 +8,7 @@ import com.service.tbterminal.inventory.inventoryRoutes
 import com.service.tbterminal.sales.salesRoutes
 import com.service.tbterminal.receivable.receivableRoutes
 import com.service.tbterminal.purchasing.purchasingRoutes
+import com.service.tbterminal.analytics.analyticsRoutes
 
 fun Application.configureRouting() {
     routing {
@@ -28,5 +29,6 @@ fun Application.configureRouting() {
     salesRoutes()
     receivableRoutes()
     purchasingRoutes()
+    analyticsRoutes()
 }
 

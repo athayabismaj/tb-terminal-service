@@ -36,4 +36,8 @@ val appModule = module {
     // Purchasing Module
     single<PurchasingRepository> { PurchasingRepositoryImpl() }
     single { PurchasingService(get(), get()) } // get() = PurchasingRepository, get() = InventoryRepository
+
+    // Analytics Module
+    single { com.service.tbterminal.analytics.AnalyticsRepository() }
+    single { com.service.tbterminal.analytics.AnalyticsService(get()) }
 }
