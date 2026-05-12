@@ -35,7 +35,32 @@ interface PurchasingRepository {
     ): PaginatedResponse<PurchaseSummary>
 
     suspend fun getPurchaseById(id: UUID): PurchaseResponse?
+
+    // Payables
+    suspend fun getPaginatedPayables(
+        page: Int, limit: Int, supplierId: UUID?, status: PayableStatus?
+    ): PaginatedResponse<PayableResponse>
+    suspend fun getPayableById(id: UUID): PayableResponse?
+    suspend fun getPayableForUpdate(id: UUID): PayableForUpdateRow?
+
+    // Supplier Payments
+    suspend fun insertPaymentAndUpdatePayable(
+        payableId: UUID, userId: UUID,
+        paymentAmount: java.math.BigDecimal, method: PurchasePaymentMethod,
+        reference: String?, notes: String?,
+        newPaidAmount: java.math.BigDecimal, newStatus: PayableStatus
+    ): SupplierPaymentResponse
 }
+
+// Data class internal untuk menyimpan data hutang yang di-lock (FOR UPDATE)
+data class PayableForUpdateRow(
+    val id: UUID,
+    val supplierId: UUID,
+    val purchaseId: UUID,
+    val amount: java.math.BigDecimal,
+    val paidAmount: java.math.BigDecimal,
+    val status: PayableStatus
+)
 
 // Data class internal untuk membawa data produk yang sudah di-resolve
 data class ResolvedPurchaseItem(
@@ -300,6 +325,137 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     }
 
     // ==========================================
+    // PAYABLES
+    // ==========================================
+
+    override suspend fun getPaginatedPayables(
+        page: Int, limit: Int, supplierId: UUID?, status: PayableStatus?
+    ): PaginatedResponse<PayableResponse> = transaction {
+        val offset = ((page - 1) * limit).toLong()
+
+        var query = SupplierPayablesTable.innerJoin(SuppliersTable).selectAll()
+
+        if (supplierId != null) {
+            query = query.andWhere { SupplierPayablesTable.supplierId eq supplierId }
+        }
+        if (status != null) {
+            query = query.andWhere { SupplierPayablesTable.status eq status }
+        }
+
+        val totalCount = query.count()
+        val totalPages = kotlin.math.ceil(totalCount.toDouble() / limit).toInt()
+
+        val data = query
+            .orderBy(SupplierPayablesTable.createdAt, SortOrder.DESC)
+            .limit(limit, offset)
+            .map { row ->
+                val amount = row[SupplierPayablesTable.amount]
+                val paidAmount = row[SupplierPayablesTable.paidAmount]
+                PayableResponse(
+                    id = row[SupplierPayablesTable.id].toString(),
+                    supplierId = row[SupplierPayablesTable.supplierId].toString(),
+                    supplierName = row[SuppliersTable.name],
+                    purchaseId = row[SupplierPayablesTable.purchaseId].toString(),
+                    amount = amount,
+                    paidAmount = paidAmount,
+                    remainingAmount = amount.subtract(paidAmount),
+                    dueDate = row[SupplierPayablesTable.dueDate].toString(),
+                    status = row[SupplierPayablesTable.status].dbValue,
+                    createdAt = row[SupplierPayablesTable.createdAt].toString()
+                )
+            }
+
+        PaginatedResponse(
+            data = data,
+            total = totalCount,
+            page = page,
+            limit = limit,
+            totalPages = totalPages
+        )
+    }
+
+    override suspend fun getPayableById(id: UUID): PayableResponse? = transaction {
+        SupplierPayablesTable.innerJoin(SuppliersTable)
+            .select { SupplierPayablesTable.id eq id }
+            .singleOrNull()?.let { row ->
+                val amount = row[SupplierPayablesTable.amount]
+                val paidAmount = row[SupplierPayablesTable.paidAmount]
+                PayableResponse(
+                    id = row[SupplierPayablesTable.id].toString(),
+                    supplierId = row[SupplierPayablesTable.supplierId].toString(),
+                    supplierName = row[SuppliersTable.name],
+                    purchaseId = row[SupplierPayablesTable.purchaseId].toString(),
+                    amount = amount,
+                    paidAmount = paidAmount,
+                    remainingAmount = amount.subtract(paidAmount),
+                    dueDate = row[SupplierPayablesTable.dueDate].toString(),
+                    status = row[SupplierPayablesTable.status].dbValue,
+                    createdAt = row[SupplierPayablesTable.createdAt].toString()
+                )
+            }
+    }
+
+    override suspend fun getPayableForUpdate(id: UUID): PayableForUpdateRow? = transaction {
+        SupplierPayablesTable.select { SupplierPayablesTable.id eq id }
+            .forUpdate()
+            .singleOrNull()?.let { row ->
+                PayableForUpdateRow(
+                    id = row[SupplierPayablesTable.id],
+                    supplierId = row[SupplierPayablesTable.supplierId],
+                    purchaseId = row[SupplierPayablesTable.purchaseId],
+                    amount = row[SupplierPayablesTable.amount],
+                    paidAmount = row[SupplierPayablesTable.paidAmount],
+                    status = row[SupplierPayablesTable.status]
+                )
+            }
+    }
+
+    // ==========================================
+    // SUPPLIER PAYMENTS
+    // ==========================================
+
+    override suspend fun insertPaymentAndUpdatePayable(
+        payableId: UUID, userId: UUID,
+        paymentAmount: java.math.BigDecimal, method: PurchasePaymentMethod,
+        reference: String?, notes: String?,
+        newPaidAmount: java.math.BigDecimal, newStatus: PayableStatus
+    ): SupplierPaymentResponse = transaction {
+        // 1. INSERT payment
+        val paymentId = SupplierPaymentsTable.insert {
+            it[this.supplierPayableId] = payableId
+            it[this.userId] = userId
+            it[this.amount] = paymentAmount
+            it[this.method] = method
+            it[this.reference] = reference
+            it[this.notes] = notes
+        } get SupplierPaymentsTable.id
+
+        // 2. UPDATE payable paid_amount dan status
+        SupplierPayablesTable.update({ SupplierPayablesTable.id eq payableId }) {
+            it[this.paidAmount] = newPaidAmount
+            it[this.status] = newStatus
+            it[this.updatedAt] = Instant.now()
+        }
+
+        // 3. Baca payment yang baru dibuat untuk response
+        val paymentRow = SupplierPaymentsTable.select { SupplierPaymentsTable.id eq paymentId }.single()
+        val payableAmount = SupplierPayablesTable.select { SupplierPayablesTable.id eq payableId }.single()
+            .let { it[SupplierPayablesTable.amount] }
+
+        SupplierPaymentResponse(
+            id = paymentRow[SupplierPaymentsTable.id].toString(),
+            payableId = payableId.toString(),
+            amount = paymentRow[SupplierPaymentsTable.amount],
+            method = paymentRow[SupplierPaymentsTable.method].dbValue,
+            reference = paymentRow[SupplierPaymentsTable.reference],
+            notes = paymentRow[SupplierPaymentsTable.notes],
+            paidAt = paymentRow[SupplierPaymentsTable.paidAt].toString(),
+            payableStatus = newStatus.dbValue,
+            payableRemainingAmount = payableAmount.subtract(newPaidAmount)
+        )
+    }
+
+    // ==========================================
     // HELPERS
     // ==========================================
 
@@ -316,4 +472,3 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         )
     }
 }
-
