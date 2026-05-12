@@ -17,5 +17,8 @@ object UsersTable : Table("system.users") {
     val pinHash = varchar("pin_hash", 255)
     val isActive = bool("is_active")
     val lastLogin = timestamp("last_login").nullable()
+    val createdAt = timestamp("created_at")
+    val updatedAt = timestamp("updated_at")
+    
     override val primaryKey = PrimaryKey(id)
 }

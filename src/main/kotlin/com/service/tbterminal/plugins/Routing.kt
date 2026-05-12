@@ -18,9 +18,12 @@ fun Application.configureRouting() {
                 "version" to "1.0.0-SNAPSHOT"
             ))
         }
+        
+        // Modules that extend Route
+        inventoryRoutes()
     }
     
-    // Register module routes
+    // Modules that extend Application
     systemRoutes()
     salesRoutes()
     receivableRoutes()
