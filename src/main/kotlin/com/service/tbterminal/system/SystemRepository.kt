@@ -141,5 +141,86 @@ class SystemRepository {
             }
         }
     }
+
+    // ==========================================
+    // STORE SETTINGS (Singleton)
+    // ==========================================
+
+    suspend fun getStoreSettings(): StoreSettingsResponse = newSuspendedTransaction(Dispatchers.IO) {
+        val row = StoreSettingsTable.selectAll().firstOrNull()
+
+        if (row != null) {
+            return@newSuspendedTransaction StoreSettingsResponse(
+                id = row[StoreSettingsTable.id].toString(),
+                storeName = row[StoreSettingsTable.storeName],
+                address = row[StoreSettingsTable.address],
+                phone = row[StoreSettingsTable.phone],
+                receiptHeader = row[StoreSettingsTable.receiptHeader],
+                receiptFooter = row[StoreSettingsTable.receiptFooter],
+                printerSize = row[StoreSettingsTable.printerSize].dbValue,
+                updatedAt = row[StoreSettingsTable.updatedAt].toString()
+            )
+        }
+
+        // Jika kosong, insert default row
+        val newId = StoreSettingsTable.insert {
+            it[storeName] = "Toko Bangunan Default"
+            it[printerSize] = PrinterSize.SIZE_80
+        } get StoreSettingsTable.id
+
+        val newRow = StoreSettingsTable.select { StoreSettingsTable.id eq newId }.single()
+        
+        StoreSettingsResponse(
+            id = newRow[StoreSettingsTable.id].toString(),
+            storeName = newRow[StoreSettingsTable.storeName],
+            address = newRow[StoreSettingsTable.address],
+            phone = newRow[StoreSettingsTable.phone],
+            receiptHeader = newRow[StoreSettingsTable.receiptHeader],
+            receiptFooter = newRow[StoreSettingsTable.receiptFooter],
+            printerSize = newRow[StoreSettingsTable.printerSize].dbValue,
+            updatedAt = newRow[StoreSettingsTable.updatedAt].toString()
+        )
+    }
+
+    suspend fun updateStoreSettings(
+        userId: UUID,
+        storeName: String,
+        address: String?,
+        phone: String?,
+        receiptHeader: String?,
+        receiptFooter: String?,
+        printerSize: PrinterSize
+    ): StoreSettingsResponse = newSuspendedTransaction(Dispatchers.IO) {
+        
+        // Memastikan row pertama ada, agar bisa di-update
+        val existing = StoreSettingsTable.selectAll().firstOrNull()
+        if (existing == null) {
+            getStoreSettings() // Akan membuat row default
+        }
+
+        StoreSettingsTable.update({ Op.TRUE }) {
+            it[this.storeName] = storeName
+            it[this.address] = address
+            it[this.phone] = phone
+            it[this.receiptHeader] = receiptHeader
+            it[this.receiptFooter] = receiptFooter
+            it[this.printerSize] = printerSize
+            it[this.updatedBy] = userId
+            it[this.updatedAt] = Instant.now()
+        }
+
+        val updatedRow = StoreSettingsTable.selectAll().first()
+        
+        StoreSettingsResponse(
+            id = updatedRow[StoreSettingsTable.id].toString(),
+            storeName = updatedRow[StoreSettingsTable.storeName],
+            address = updatedRow[StoreSettingsTable.address],
+            phone = updatedRow[StoreSettingsTable.phone],
+            receiptHeader = updatedRow[StoreSettingsTable.receiptHeader],
+            receiptFooter = updatedRow[StoreSettingsTable.receiptFooter],
+            printerSize = updatedRow[StoreSettingsTable.printerSize].dbValue,
+            updatedAt = updatedRow[StoreSettingsTable.updatedAt].toString()
+        )
+    }
 }
 

@@ -22,3 +22,26 @@ object UsersTable : Table("system.users") {
     
     override val primaryKey = PrimaryKey(id)
 }
+
+enum class PrinterSize(val dbValue: String) {
+    SIZE_58("58mm"),
+    SIZE_80("80mm")
+}
+
+object StoreSettingsTable : Table("system.store_settings") {
+    val id = uuid("id")
+    val storeName = varchar("store_name", 150).default("Toko Bangunan")
+    val address = text("address").nullable()
+    val phone = varchar("phone", 20).nullable()
+    val receiptHeader = text("receipt_header").nullable()
+    val receiptFooter = text("receipt_footer").nullable()
+    val printerSize = customEnumeration(
+        "printer_size", "system.printer_size",
+        fromDb = { PrinterSize.entries.first { e -> e.dbValue == it.toString() } },
+        toDb = { it.dbValue }
+    )
+    val updatedBy = uuid("updated_by").references(UsersTable.id).nullable()
+    val updatedAt = timestamp("updated_at")
+
+    override val primaryKey = PrimaryKey(id)
+}

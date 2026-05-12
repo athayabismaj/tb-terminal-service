@@ -90,3 +90,29 @@ data class ChangePinRequest(
     val oldPin: String,
     val newPin: String
 )
+
+// ==========================================
+// DTOs - Store Settings
+// ==========================================
+
+@Serializable
+data class StoreSettingsResponse(
+    val id: String,
+    val storeName: String,
+    val address: String?,
+    val phone: String?,
+    val receiptHeader: String?,
+    val receiptFooter: String?,
+    val printerSize: String,
+    val updatedAt: String
+)
+
+@Serializable
+data class StoreSettingsUpdateRequest(
+    val storeName: String,
+    val address: String? = null,
+    val phone: String? = null,
+    val receiptHeader: String? = null,
+    val receiptFooter: String? = null,
+    val printerSize: String
+)

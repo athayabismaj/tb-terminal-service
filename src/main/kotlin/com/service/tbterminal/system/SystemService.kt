@@ -148,4 +148,31 @@ class SystemService(private val repo: SystemRepository) {
             throw ValidationException("Format ID tidak valid")
         }
     }
+
+    // ==========================================
+    // STORE SETTINGS
+    // ==========================================
+
+    suspend fun getStoreSettings(): StoreSettingsResponse {
+        return repo.getStoreSettings()
+    }
+
+    suspend fun updateStoreSettings(userId: UUID, request: StoreSettingsUpdateRequest): StoreSettingsResponse {
+        if (request.storeName.isBlank()) {
+            throw ValidationException("Nama toko tidak boleh kosong")
+        }
+
+        val printerSize = PrinterSize.entries.firstOrNull { it.dbValue == request.printerSize }
+            ?: throw ValidationException("Ukuran printer tidak valid. Gunakan '58mm' atau '80mm'")
+
+        return repo.updateStoreSettings(
+            userId = userId,
+            storeName = request.storeName.trim(),
+            address = request.address?.trim(),
+            phone = request.phone?.trim(),
+            receiptHeader = request.receiptHeader?.trim(),
+            receiptFooter = request.receiptFooter?.trim(),
+            printerSize = printerSize
+        )
+    }
 }

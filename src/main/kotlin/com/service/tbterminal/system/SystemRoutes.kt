@@ -105,6 +105,26 @@ fun Application.systemRoutes() {
                         call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "User berhasil dihapus"))
                     }
                 }
+
+                // ==========================================
+                // STORE SETTINGS
+                // ==========================================
+                route("/settings") {
+                    // KASIR butuh untuk baca footer dan ukuran printer sebelum print struk
+                    get {
+                        val settings = service.getStoreSettings()
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(settings))
+                    }
+
+                    // Update hanya boleh ADMIN/OWNER
+                    put {
+                        call.requireRole(com.service.tbterminal.shared.Role.ADMIN, com.service.tbterminal.shared.Role.OWNER)
+                        val userId = call.getUserId()
+                        val request = call.receive<StoreSettingsUpdateRequest>()
+                        val updated = service.updateStoreSettings(userId, request)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(updated, "Pengaturan toko berhasil diperbarui"))
+                    }
+                }
             }
         }
     }
