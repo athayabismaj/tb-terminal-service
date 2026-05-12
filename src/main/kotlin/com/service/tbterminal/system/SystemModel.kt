@@ -6,6 +6,11 @@ import java.util.UUID
 @Serializable
 data class LoginRequest(
     val username: String,
+    val password: String
+)
+
+@Serializable
+data class UnlockRequest(
     val pin: String
 )
 
@@ -21,7 +26,8 @@ data class UserDto(
     val username: String,
     val name: String,
     val role: String,
-    val isActive: Boolean
+    val isActive: Boolean,
+    val email: String?
 ) {
     companion object {
         fun from(row: UserRow): UserDto {
@@ -30,7 +36,8 @@ data class UserDto(
                 username = row.username,
                 name = row.name,
                 role = row.roleName,
-                isActive = row.isActive
+                isActive = row.isActive,
+                email = row.email
             )
         }
     }
@@ -41,7 +48,9 @@ data class UserRow(
     val id: UUID,
     val username: String,
     val name: String,
+    val passwordHash: String,
     val pinHash: String,
+    val email: String?,
     val roleName: String,
     val isActive: Boolean
 )
@@ -63,6 +72,7 @@ data class UserResponse(
     val roleName: String,
     val name: String,
     val username: String,
+    val email: String?,
     val isActive: Boolean,
     val lastLogin: String?,
     val createdAt: String
@@ -72,7 +82,9 @@ data class UserResponse(
 data class UserCreateRequest(
     val name: String,
     val username: String,
+    val password: String,
     val pin: String,
+    val email: String? = null,
     val roleId: String
 )
 
@@ -82,13 +94,21 @@ data class UserUpdateRequest(
     val username: String,
     val isActive: Boolean,
     val roleId: String,
-    val newPin: String? = null // Optional if admin wants to reset Kasir's PIN
+    val email: String? = null,
+    val newPassword: String? = null,
+    val newPin: String? = null
 )
 
 @Serializable
 data class ChangePinRequest(
     val oldPin: String,
     val newPin: String
+)
+
+@Serializable
+data class ChangePasswordRequest(
+    val oldPassword: String,
+    val newPassword: String
 )
 
 // ==========================================

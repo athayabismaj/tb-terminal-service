@@ -16,7 +16,7 @@ class SystemService(private val repo: SystemRepository) {
         val user = repo.findUserByUsername(req.username)
         if (user == null) {
             println("LOGIN FAILED: User not found for username ${req.username}")
-            return ApiResponse.error("Username atau PIN salah", "UNAUTHORIZED")
+            return ApiResponse.error("Username atau Password salah", "UNAUTHORIZED")
         }
 
         if (!user.isActive) {
@@ -24,14 +24,14 @@ class SystemService(private val repo: SystemRepository) {
             return ApiResponse.error("Akun tidak aktif", "UNAUTHORIZED")
         }
 
-        // WAJIB: BCrypt di Dispatchers.IO — operasi berat, jangan blocking thread
+        // WAJIB: BCrypt di Dispatchers.IO
         val isValid = withContext(Dispatchers.IO) {
-            BCrypt.checkpw(req.pin, user.pinHash)
+            BCrypt.checkpw(req.password, user.passwordHash)
         }
 
         if (!isValid) {
-            println("LOGIN FAILED: Invalid PIN for user ${req.username}")
-            return ApiResponse.error("Username atau PIN salah", "UNAUTHORIZED")
+            println("LOGIN FAILED: Invalid Password for user ${req.username}")
+            return ApiResponse.error("Username atau Password salah", "UNAUTHORIZED")
         }
 
         repo.updateLastLogin(user.id)
@@ -41,6 +41,25 @@ class SystemService(private val repo: SystemRepository) {
             LoginResponse(token = token, user = UserDto.from(user)),
             "Login berhasil"
         )
+    }
+
+    suspend fun unlock(userId: UUID, request: UnlockRequest): ApiResponse<Unit> {
+        val userResponse = repo.getUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
+        val userRow = repo.findUserByUsername(userResponse.username) ?: throw NotFoundException("User tidak ditemukan")
+
+        if (!userRow.isActive) {
+            return ApiResponse.error("Akun tidak aktif", "UNAUTHORIZED")
+        }
+
+        val isValid = withContext(Dispatchers.IO) {
+            BCrypt.checkpw(request.pin, userRow.pinHash)
+        }
+
+        if (!isValid) {
+            return ApiResponse.error("PIN salah", "UNAUTHORIZED")
+        }
+
+        return ApiResponse.success(Unit, "Unlock berhasil")
     }
 
     suspend fun getRoles(): List<RoleResponse> {
@@ -61,6 +80,8 @@ class SystemService(private val repo: SystemRepository) {
     suspend fun createUser(request: UserCreateRequest): UserResponse {
         if (request.username.isBlank()) throw ValidationException("Username tidak boleh kosong")
         if (request.name.isBlank()) throw ValidationException("Nama tidak boleh kosong")
+        if (request.password.isBlank()) throw ValidationException("Password tidak boleh kosong")
+        if (request.password.length < 6) throw ValidationException("Password minimal 6 karakter")
         if (request.pin.isBlank()) throw ValidationException("PIN tidak boleh kosong")
         if (request.pin.length < 4) throw ValidationException("PIN minimal 4 karakter")
 
@@ -71,11 +92,15 @@ class SystemService(private val repo: SystemRepository) {
 
         val roleId = parseUUID(request.roleId)
         
+        val hashedPassword = withContext(Dispatchers.IO) {
+            BCrypt.hashpw(request.password, BCrypt.gensalt())
+        }
+
         val hashedPin = withContext(Dispatchers.IO) {
             BCrypt.hashpw(request.pin, BCrypt.gensalt())
         }
 
-        val newId = repo.createUser(request.name.trim(), request.username.trim(), hashedPin, roleId)
+        val newId = repo.createUser(request.name.trim(), request.username.trim(), hashedPassword, hashedPin, request.email?.trim(), roleId)
         return repo.getUserById(newId)!!
     }
 
@@ -96,6 +121,14 @@ class SystemService(private val repo: SystemRepository) {
 
         val roleId = parseUUID(request.roleId)
 
+        var newHashedPassword: String? = null
+        if (!request.newPassword.isNullOrBlank()) {
+            if (request.newPassword.length < 6) throw ValidationException("Password minimal 6 karakter")
+            newHashedPassword = withContext(Dispatchers.IO) {
+                BCrypt.hashpw(request.newPassword, BCrypt.gensalt())
+            }
+        }
+
         var newHashedPin: String? = null
         if (!request.newPin.isNullOrBlank()) {
             if (request.newPin.length < 4) throw ValidationException("PIN minimal 4 karakter")
@@ -104,14 +137,37 @@ class SystemService(private val repo: SystemRepository) {
             }
         }
 
-        repo.updateUser(uuid, request.name.trim(), request.username.trim(), roleId, request.isActive, newHashedPin)
+        repo.updateUser(uuid, request.name.trim(), request.username.trim(), roleId, request.isActive, request.email?.trim(), newHashedPassword, newHashedPin)
         return repo.getUserById(uuid)!!
     }
 
     suspend fun deleteUser(id: String) {
         val uuid = parseUUID(id)
-        val existingUser = repo.getUserById(uuid) ?: throw NotFoundException("User tidak ditemukan")
+        repo.getUserById(uuid) ?: throw NotFoundException("User tidak ditemukan")
         repo.softDeleteUser(uuid)
+    }
+
+    suspend fun changeMyPassword(userId: UUID, request: ChangePasswordRequest) {
+        if (request.newPassword.isBlank() || request.newPassword.length < 6) {
+            throw ValidationException("Password baru minimal 6 karakter")
+        }
+
+        val userResponse = repo.getUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
+        val userRow = repo.findUserByUsername(userResponse.username) ?: throw NotFoundException("User tidak ditemukan")
+
+        val isOldPasswordValid = withContext(Dispatchers.IO) {
+            BCrypt.checkpw(request.oldPassword, userRow.passwordHash)
+        }
+
+        if (!isOldPasswordValid) {
+            throw ValidationException("Password lama tidak valid")
+        }
+
+        val newHashedPassword = withContext(Dispatchers.IO) {
+            BCrypt.hashpw(request.newPassword, BCrypt.gensalt())
+        }
+
+        repo.updatePassword(userId, newHashedPassword)
     }
 
     suspend fun changeMyPin(userId: UUID, request: ChangePinRequest) {
@@ -119,10 +175,6 @@ class SystemService(private val repo: SystemRepository) {
             throw ValidationException("PIN baru minimal 4 karakter")
         }
 
-        // Ambil data user beserta pinHash-nya dari DB (bukan dari DTO yang tidak punya pinHash)
-        // Kita bisa panggil getUsername dari userId, tapi repository tidak punya getUserRowById.
-        // Mari kita buat getUserById di repo untuk DTO, tapi untuk verifikasi PIN butuh pinHash.
-        // Gini saja: ambil UserResponse, lalu findUserByUsername.
         val userResponse = repo.getUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
         val userRow = repo.findUserByUsername(userResponse.username) ?: throw NotFoundException("User tidak ditemukan")
 

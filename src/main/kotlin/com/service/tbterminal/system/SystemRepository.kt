@@ -45,6 +45,7 @@ class SystemRepository {
                     roleName = it[RolesTable.name],
                     name = it[UsersTable.name],
                     username = it[UsersTable.username],
+                    email = it[UsersTable.email],
                     isActive = it[UsersTable.isActive],
                     lastLogin = it[UsersTable.lastLogin]?.toString(),
                     createdAt = it[UsersTable.createdAt].toString()
@@ -70,6 +71,7 @@ class SystemRepository {
                     roleName = it[RolesTable.name],
                     name = it[UsersTable.name],
                     username = it[UsersTable.username],
+                    email = it[UsersTable.email],
                     isActive = it[UsersTable.isActive],
                     lastLogin = it[UsersTable.lastLogin]?.toString(),
                     createdAt = it[UsersTable.createdAt].toString()
@@ -87,30 +89,38 @@ class SystemRepository {
                         id = it[UsersTable.id],
                         username = it[UsersTable.username],
                         name = it[UsersTable.name],
+                        passwordHash = it[UsersTable.passwordHash],
                         pinHash = it[UsersTable.pinHash],
+                        email = it[UsersTable.email],
                         roleName = it[RolesTable.name],
                         isActive = it[UsersTable.isActive]
                     )
                 }
         }
 
-    suspend fun createUser(name: String, username: String, pinHash: String, roleId: UUID): UUID = newSuspendedTransaction(Dispatchers.IO) {
+    suspend fun createUser(name: String, username: String, passwordHash: String, pinHash: String, email: String?, roleId: UUID): UUID = newSuspendedTransaction(Dispatchers.IO) {
         UsersTable.insert {
             it[this.name] = name
             it[this.username] = username
+            it[this.passwordHash] = passwordHash
             it[this.pinHash] = pinHash
+            it[this.email] = email
             it[this.roleId] = roleId
             it[this.isActive] = true
         } get UsersTable.id
     }
 
-    suspend fun updateUser(id: UUID, name: String, username: String, roleId: UUID, isActive: Boolean, pinHash: String?): Boolean = newSuspendedTransaction(Dispatchers.IO) {
+    suspend fun updateUser(id: UUID, name: String, username: String, roleId: UUID, isActive: Boolean, email: String?, passwordHash: String?, pinHash: String?): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updated = UsersTable.update({ UsersTable.id eq id }) {
             it[this.name] = name
             it[this.username] = username
             it[this.roleId] = roleId
             it[this.isActive] = isActive
+            it[this.email] = email
             it[this.updatedAt] = Instant.now()
+            if (passwordHash != null) {
+                it[this.passwordHash] = passwordHash
+            }
             if (pinHash != null) {
                 it[this.pinHash] = pinHash
             }
@@ -121,6 +131,14 @@ class SystemRepository {
     suspend fun updatePin(id: UUID, pinHash: String): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updated = UsersTable.update({ UsersTable.id eq id }) {
             it[this.pinHash] = pinHash
+            it[this.updatedAt] = Instant.now()
+        }
+        updated > 0
+    }
+
+    suspend fun updatePassword(id: UUID, passwordHash: String): Boolean = newSuspendedTransaction(Dispatchers.IO) {
+        val updated = UsersTable.update({ UsersTable.id eq id }) {
+            it[this.passwordHash] = passwordHash
             it[this.updatedAt] = Instant.now()
         }
         updated > 0

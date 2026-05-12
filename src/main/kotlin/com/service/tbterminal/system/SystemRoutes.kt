@@ -32,6 +32,21 @@ fun Application.systemRoutes() {
             }
 
             authenticate("jwt-auth") {
+                post("/unlock") {
+                    try {
+                        val userId = call.getUserId()
+                        val req = call.receive<UnlockRequest>()
+                        val response = service.unlock(userId, req)
+                        if (response.success) {
+                            call.respond(HttpStatusCode.OK, response)
+                        } else {
+                            call.respond(HttpStatusCode.Unauthorized, response)
+                        }
+                    } catch (e: Exception) {
+                        call.respond(HttpStatusCode.BadRequest, ApiResponse.error<Unit>("Request tidak valid", "VALIDATION_ERROR"))
+                    }
+                }
+
                 get("/me") {
                     val principal = call.principal<JWTPrincipal>()
                     val username = principal?.payload?.getClaim("username")?.asString()
@@ -61,6 +76,14 @@ fun Application.systemRoutes() {
 
                 // USERS
                 route("/users") {
+                    // Update Password sendiri (bisa oleh Kasir, Admin, Owner)
+                    put("/me/password") {
+                        val userId = call.getUserId()
+                        val request = call.receive<ChangePasswordRequest>()
+                        service.changeMyPassword(userId, request)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Password berhasil diubah"))
+                    }
+
                     // Update PIN sendiri (bisa oleh Kasir, Admin, Owner)
                     put("/me/pin") {
                         val userId = call.getUserId()
