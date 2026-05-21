@@ -11,7 +11,17 @@ ktor:
       - com.service.tbterminal.plugins.StatusPagesKt.configureStatusPages
       - com.service.tbterminal.plugins.RoutingKt.configureRouting
 
-postgres:
-  url: jdbc:postgresql://localhost:5432/tb_terminal
-  user: postgres
-  password: "676767"
+# ─── Konfigurasi Environment ────────────────────────
+# Semua konfigurasi sensitif dikelola oleh EnvironmentConfig.kt
+# dengan pola hybrid: env var (production) → default (development).
+#
+# Default Development (langsung jalan tanpa set env var):
+#   DB_URL      = jdbc:postgresql://localhost:5432/tb_terminal_db
+#   DB_USER     = postgres
+#   DB_PASSWORD = postgres
+#   JWT_SECRET  = tb-terminal-dev-secret-key-min-32-chars!!
+#   JWT_ISSUER  = tb-terminal
+#   JWT_AUDIENCE= tb-terminal-client
+#
+# Production: Set environment variable di server/Docker untuk override.
+
