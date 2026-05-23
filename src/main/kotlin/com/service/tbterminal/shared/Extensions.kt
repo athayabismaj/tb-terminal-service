@@ -3,7 +3,6 @@ package com.service.tbterminal.shared
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
-import io.ktor.server.auth.jwt.*
 import io.ktor.server.response.*
 import java.util.UUID
 
@@ -12,15 +11,10 @@ import java.util.UUID
  * Melempar UnauthorizedException jika token tidak valid atau tidak ada.
  */
 fun ApplicationCall.getUserId(): UUID {
-    val principal = principal<JWTPrincipal>()
-    val idString = principal?.payload?.getClaim("id")?.asString() 
+    val principal = principal<AuthenticatedUserPrincipal>()
         ?: throw UnauthorizedException("Token tidak valid atau tidak ditemukan")
-    
-    return try {
-        UUID.fromString(idString)
-    } catch (e: IllegalArgumentException) {
-        throw UnauthorizedException("ID User dalam token tidak valid")
-    }
+
+    return principal.userId
 }
 
 /**
@@ -28,9 +22,9 @@ fun ApplicationCall.getUserId(): UUID {
  * Melempar ForbiddenException jika user tidak memiliki role yang diizinkan.
  */
 fun ApplicationCall.requireRole(vararg allowedRoles: String) {
-    val principal = principal<JWTPrincipal>()
-    val role = principal?.payload?.getClaim("role")?.asString() 
-        ?: throw UnauthorizedException("Role tidak ditemukan dalam token")
+    val principal = principal<AuthenticatedUserPrincipal>()
+        ?: throw UnauthorizedException("Role user tidak tersedia")
+    val role = principal.role
 
     if (role !in allowedRoles) {
         throw ForbiddenException("Akses ditolak: Membutuhkan role ${allowedRoles.joinToString(" atau ")}")
@@ -48,10 +42,10 @@ suspend fun ApplicationCall.respondError(exception: Throwable) {
         is ForbiddenException -> Triple(HttpStatusCode.Forbidden, "FORBIDDEN", exception.message ?: "Akses ditolak")
         is NotFoundException -> Triple(HttpStatusCode.NotFound, "NOT_FOUND", exception.message ?: "Data tidak ditemukan")
         is ValidationException -> Triple(HttpStatusCode.BadRequest, "VALIDATION_ERROR", exception.message ?: "Validasi gagal")
-        else -> Triple(HttpStatusCode.InternalServerError, "INTERNAL_ERROR", "Terjadi kesalahan sistem")
+        else -> Triple(HttpStatusCode.InternalServerError, "INTERNAL_SERVER_ERROR", "Terjadi kesalahan sistem")
     }
     
-    respond(status, ApiResponse.error<Unit>(message, code))
+    respond(status, ErrorResponse(code, message))
 }
 
 /**

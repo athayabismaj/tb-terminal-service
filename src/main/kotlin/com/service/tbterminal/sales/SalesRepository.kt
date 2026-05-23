@@ -1,17 +1,26 @@
 package com.service.tbterminal.sales
 
+import com.service.tbterminal.inventory.ProductsTable
+import com.service.tbterminal.receivable.CustomersTable
 import com.service.tbterminal.receivable.ReceivableStatus
 import com.service.tbterminal.receivable.ReceivablesTable
+import com.service.tbterminal.shared.CreditLimitExceededException
+import com.service.tbterminal.shared.NotFoundException
+import com.service.tbterminal.shared.SessionNotFoundException
+import com.service.tbterminal.shared.ValidationException
+import com.service.tbterminal.system.UsersTable
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.transactions.transaction
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.Instant
 import java.util.UUID
 
 interface SalesRepository {
     suspend fun getActiveSession(userId: UUID): CashSessionResponse?
     suspend fun getSessionById(sessionId: UUID): CashSessionResponse?
-    suspend fun openSession(userId: UUID, startingCash: java.math.BigDecimal): UUID
+    suspend fun openSession(userId: UUID, startingCash: java.math.BigDecimal): CashSessionResponse
     suspend fun closeSession(
         sessionId: UUID,
         closingCash: java.math.BigDecimal,
@@ -22,14 +31,11 @@ interface SalesRepository {
 
     // POS
     suspend fun executeCheckout(
-        sessionId: UUID,
         userId: UUID,
         customerId: UUID?,
-        resolvedItems: List<ResolvedItem>,
-        totalAmount: java.math.BigDecimal,
+        requestItems: List<CheckoutItemRequest>,
         paymentMethod: PaymentMethod,
         amountPaid: java.math.BigDecimal,
-        trxStatus: TrxStatus,
         notes: String?,
         dueDays: Int
     ): TransactionResponse
@@ -84,12 +90,38 @@ class SalesRepositoryImpl : SalesRepository {
             .singleOrNull()?.let { rowToResponse(it) }
     }
 
-    override suspend fun openSession(userId: UUID, startingCash: java.math.BigDecimal): UUID = transaction {
+    override suspend fun openSession(userId: UUID, startingCash: java.math.BigDecimal): CashSessionResponse = transaction {
+        val user = UsersTable.select { UsersTable.id eq userId }
+            .forUpdate()
+            .singleOrNull()
+            ?: throw NotFoundException("User pembuka sesi tidak ditemukan")
+
+        if (!user[UsersTable.isActive]) {
+            throw ValidationException("User pembuka sesi tidak aktif")
+        }
+
+        val activeSession = CashSessionsTable.select {
+            (CashSessionsTable.userId eq userId) and CashSessionsTable.closedAt.isNull()
+        }.forUpdate().singleOrNull()
+
+        if (activeSession != null) {
+            throw ValidationException(
+                "Anda masih memiliki sesi kasir yang belum ditutup (ID: ${activeSession[CashSessionsTable.id]}). " +
+                    "Tutup sesi tersebut sebelum membuka yang baru."
+            )
+        }
+
+        val sessionId = UUID.randomUUID()
         CashSessionsTable.insert {
+            it[this.id] = sessionId
             it[this.userId] = userId
             it[this.openingCash] = startingCash
-            it[this.systemCash] = startingCash // Initial system_cash = starting_cash
-        } get CashSessionsTable.id
+            it[this.systemCash] = startingCash
+        }
+
+        CashSessionsTable.select { CashSessionsTable.id eq sessionId }
+            .single()
+            .let(::rowToResponse)
     }
 
     override suspend fun closeSession(
@@ -130,23 +162,47 @@ class SalesRepositoryImpl : SalesRepository {
     // ==========================================
 
     override suspend fun executeCheckout(
-        sessionId: UUID,
         userId: UUID,
         customerId: UUID?,
-        resolvedItems: List<ResolvedItem>,
-        totalAmount: java.math.BigDecimal,
+        requestItems: List<CheckoutItemRequest>,
         paymentMethod: PaymentMethod,
         amountPaid: java.math.BigDecimal,
-        trxStatus: TrxStatus,
         notes: String?,
         dueDays: Int
     ): TransactionResponse = transaction {
-        // Tentukan dpAmount
+        val session = CashSessionsTable.select {
+            (CashSessionsTable.userId eq userId) and CashSessionsTable.closedAt.isNull()
+        }.forUpdate().singleOrNull()
+            ?: throw SessionNotFoundException("Buka sesi kasir terlebih dahulu sebelum bertransaksi")
+
+        val sessionId = session[CashSessionsTable.id]
+        val resolvedItems = requestItems.map(::resolveItemForCheckout)
+        val totalAmount = resolvedItems.fold(BigDecimal.ZERO) { total, item -> total.add(item.subtotal) }
+
+        if (amountPaid > totalAmount) {
+            throw ValidationException("Jumlah bayar tidak boleh melebihi total transaksi")
+        }
+
+        val trxStatus = when {
+            paymentMethod == PaymentMethod.HUTANG -> TrxStatus.HUTANG
+            paymentMethod == PaymentMethod.DP -> TrxStatus.DP
+            amountPaid < totalAmount -> TrxStatus.HUTANG
+            else -> TrxStatus.LUNAS
+        }
+        val receivableAmount = totalAmount.subtract(amountPaid)
+        val dueDate = if (trxStatus == TrxStatus.HUTANG || trxStatus == TrxStatus.DP) {
+            lockCustomerAndValidateCredit(customerId, receivableAmount, dueDays)
+        } else {
+            null
+        }
+
         val dpAmount = if (trxStatus == TrxStatus.DP) amountPaid else java.math.BigDecimal.ZERO
         val paidAmount = if (trxStatus == TrxStatus.LUNAS) totalAmount else amountPaid
 
         // 1. Insert transaksi utama
-        val trxId = TransactionsTable.insert {
+        val trxId = UUID.randomUUID()
+        TransactionsTable.insert {
+            it[this.id] = trxId
             it[this.sessionId] = sessionId
             it[this.userId] = userId
             it[this.customerId] = customerId
@@ -156,7 +212,7 @@ class SalesRepositoryImpl : SalesRepository {
             it[this.dpAmount] = dpAmount
             it[this.paidAmount] = paidAmount
             it[this.notes] = notes
-        } get TransactionsTable.id
+        }
 
         // 2. Loop insert transaction_items (trigger fn_sync_stock akan berjalan otomatis)
         resolvedItems.forEach { item ->
@@ -180,15 +236,21 @@ class SalesRepositoryImpl : SalesRepository {
         }
 
         // 4. Jika HUTANG/DP — insert ke receivable.receivables
-        if ((trxStatus == TrxStatus.HUTANG || trxStatus == TrxStatus.DP) && customerId != null) {
-            val sisaHutang = totalAmount.subtract(amountPaid)
+        if (dueDate != null && customerId != null) {
             ReceivablesTable.insert {
                 it[this.customerId] = customerId
                 it[this.transactionId] = trxId
-                it[this.amount] = sisaHutang
+                it[this.amount] = receivableAmount
                 it[this.paidAmount] = java.math.BigDecimal.ZERO
-                it[this.dueDate] = java.time.LocalDate.now().plusDays(dueDays.toLong())
+                it[this.dueDate] = dueDate
                 it[this.status] = ReceivableStatus.BELUM_LUNAS
+            }
+        }
+
+        if (paymentMethod == PaymentMethod.TUNAI && amountPaid > BigDecimal.ZERO) {
+            val currentSystemCash = session[CashSessionsTable.systemCash] ?: session[CashSessionsTable.openingCash]
+            CashSessionsTable.update({ CashSessionsTable.id eq sessionId }) {
+                it[this.systemCash] = currentSystemCash.add(amountPaid)
             }
         }
 
@@ -222,6 +284,81 @@ class SalesRepositoryImpl : SalesRepository {
             createdAt = trxRow[TransactionsTable.createdAt].toString(),
             items = items
         )
+    }
+
+    private fun resolveItemForCheckout(item: CheckoutItemRequest): ResolvedItem {
+        val productId = try {
+            UUID.fromString(item.productId)
+        } catch (e: IllegalArgumentException) {
+            throw ValidationException("Format Product ID tidak valid: ${item.productId}")
+        }
+
+        if (item.qty <= BigDecimal.ZERO) {
+            throw ValidationException("Quantity untuk produk ${item.productId} harus lebih dari 0")
+        }
+        if (item.discount < BigDecimal.ZERO) {
+            throw ValidationException("Diskon tidak boleh negatif")
+        }
+
+        val product = ProductsTable.select {
+            (ProductsTable.id eq productId) and (ProductsTable.isActive eq true)
+        }.forUpdate().singleOrNull()
+            ?: throw NotFoundException("Produk dengan ID ${item.productId} tidak ditemukan atau tidak aktif")
+
+        val price = product[ProductsTable.priceRetail]
+        if (item.discount > price) {
+            throw ValidationException("Diskon tidak boleh melebihi harga produk ${item.productId}")
+        }
+
+        val subtotal = price.subtract(item.discount)
+            .multiply(item.qty)
+            .setScale(2, RoundingMode.HALF_UP)
+
+        return ResolvedItem(
+            productId = productId,
+            unitId = product[ProductsTable.baseUnitId],
+            productName = product[ProductsTable.name],
+            qty = item.qty,
+            priceAtTransaction = price,
+            cogsAtTransaction = product[ProductsTable.priceBuy],
+            discount = item.discount,
+            subtotal = subtotal
+        )
+    }
+
+    private fun lockCustomerAndValidateCredit(
+        customerId: UUID?,
+        receivableAmount: BigDecimal,
+        dueDays: Int
+    ): java.time.LocalDate {
+        if (receivableAmount <= BigDecimal.ZERO) {
+            throw ValidationException("Transaksi hutang/DP harus memiliki sisa tagihan")
+        }
+
+        val lockedCustomerId = customerId
+            ?: throw ValidationException("Transaksi hutang/DP memerlukan Customer ID yang valid")
+
+        val customer = CustomersTable.select { CustomersTable.id eq lockedCustomerId }
+            .forUpdate()
+            .singleOrNull()
+            ?: throw NotFoundException("Pelanggan untuk transaksi kredit tidak ditemukan")
+
+        if (!customer[CustomersTable.isActive]) {
+            throw ValidationException("Pelanggan untuk transaksi kredit tidak aktif")
+        }
+
+        val existingOutstanding = ReceivablesTable.select { ReceivablesTable.customerId eq lockedCustomerId }
+            .sumOf { row -> row[ReceivablesTable.amount].subtract(row[ReceivablesTable.paidAmount]) }
+        val projectedOutstanding = existingOutstanding.add(receivableAmount)
+        val creditLimit = customer[CustomersTable.creditLimit]
+
+        if (creditLimit > BigDecimal.ZERO && projectedOutstanding > creditLimit) {
+            throw CreditLimitExceededException(
+                "Limit kredit pelanggan terlampaui. Outstanding setelah transaksi: ${projectedOutstanding.toPlainString()}"
+            )
+        }
+
+        return java.time.LocalDate.now().plusDays(dueDays.toLong())
     }
 
     override suspend fun getTransactionById(id: UUID): TransactionResponse? = transaction {
@@ -297,4 +434,3 @@ class SalesRepositoryImpl : SalesRepository {
         )
     }
 }
-

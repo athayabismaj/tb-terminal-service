@@ -1,5 +1,6 @@
 package com.service.tbterminal.plugins
 
+import com.service.tbterminal.shared.EnvironmentConfig
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import io.ktor.server.application.*
@@ -11,9 +12,9 @@ import org.flywaydb.core.Flyway
  * so that schemas and tables are ready before the application uses them.
  */
 fun Application.configureDatabase() {
-    val url = environment.config.property("postgres.url").getString()
-    val user = environment.config.property("postgres.user").getString()
-    val password = environment.config.property("postgres.password").getString()
+    val url = EnvironmentConfig.dbUrl
+    val user = EnvironmentConfig.dbUser
+    val password = EnvironmentConfig.dbPassword
 
     // Setup HikariCP DataSource
     val dataSource = HikariDataSource(HikariConfig().apply {

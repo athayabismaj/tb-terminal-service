@@ -14,12 +14,14 @@ import com.service.tbterminal.sales.SalesRepositoryImpl
 import com.service.tbterminal.sales.SalesService
 import com.service.tbterminal.system.SystemRepository
 import com.service.tbterminal.system.SystemService
+import com.service.tbterminal.system.UserSessionService
 import org.koin.dsl.module
 
 val appModule = module {
     // System Module
     single { SystemRepository() }
     single { SystemService(get()) }
+    single { UserSessionService(get()) }
 
     // Inventory Module
     single<InventoryRepository> { InventoryRepositoryImpl() }
@@ -27,7 +29,7 @@ val appModule = module {
 
     // Sales Module
     single<SalesRepository> { SalesRepositoryImpl() }
-    single { SalesService(get(), get()) } // get() = SalesRepository, get() = InventoryRepository
+    single { SalesService(get()) }
 
     // Receivable Module
     single<ReceivableRepository> { ReceivableRepositoryImpl() }

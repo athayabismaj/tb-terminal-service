@@ -8,6 +8,10 @@ import com.service.tbterminal.shared.ValidationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.mindrot.jbcrypt.BCrypt
+import java.time.Duration
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.UUID
 
 class SystemService(private val repo: SystemRepository) {
@@ -36,7 +40,7 @@ class SystemService(private val repo: SystemRepository) {
 
         repo.updateLastLogin(user.id)
 
-        val token = JwtHelper.generateToken(UserDto.from(user))
+        val token = JwtHelper.generateToken(user)
         return ApiResponse.success(
             LoginResponse(token = token, user = UserDto.from(user)),
             "Login berhasil"
@@ -70,6 +74,20 @@ class SystemService(private val repo: SystemRepository) {
         val safePage = if (page < 1) 1 else page
         val safeLimit = if (limit < 1) 20 else limit
         return repo.getPaginatedUsers(safePage, safeLimit, search)
+    }
+
+    suspend fun getAuditLogs(page: Int, limit: Int, action: String?, range: String?): PaginatedResponse<AuditLogResponse> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = limit.coerceIn(1, 100)
+        val auditAction = action
+            ?.takeIf { it.isNotBlank() }
+            ?.let { rawAction ->
+                runCatching { AuditAction.valueOf(rawAction.uppercase()) }
+                    .getOrElse { throw ValidationException("Tipe aktivitas tidak valid") }
+            }
+        val since = range.toAuditRangeStart()
+
+        return repo.getPaginatedAuditLogs(safePage, safeLimit, auditAction, since)
     }
 
     suspend fun getUserById(id: String): UserResponse {
@@ -201,6 +219,19 @@ class SystemService(private val repo: SystemRepository) {
         }
     }
 
+    private fun String?.toAuditRangeStart(): Instant? {
+        val value = this?.lowercase()?.takeIf(String::isNotBlank) ?: return null
+        val now = Instant.now()
+        val zone = ZoneId.systemDefault()
+
+        return when (value) {
+            "today" -> LocalDate.now(zone).atStartOfDay(zone).toInstant()
+            "7d" -> now.minus(Duration.ofDays(7))
+            "30d" -> now.minus(Duration.ofDays(30))
+            else -> throw ValidationException("Filter tanggal tidak valid")
+        }
+    }
+
     // ==========================================
     // STORE SETTINGS
     // ==========================================
@@ -225,6 +256,25 @@ class SystemService(private val repo: SystemRepository) {
             receiptHeader = request.receiptHeader?.trim(),
             receiptFooter = request.receiptFooter?.trim(),
             printerSize = printerSize
+        )
+    }
+
+    suspend fun recordAuditLog(
+        actorUserId: UUID?,
+        action: AuditAction,
+        schemaName: String,
+        tableName: String,
+        recordId: String?,
+        ipAddress: String?
+    ) {
+        val recordUuid = recordId?.let { parseUUID(it) }
+        repo.insertAuditLog(
+            actorUserId = actorUserId,
+            action = action,
+            schemaName = schemaName,
+            tableName = tableName,
+            recordId = recordUuid,
+            ipAddress = ipAddress
         )
     }
 }

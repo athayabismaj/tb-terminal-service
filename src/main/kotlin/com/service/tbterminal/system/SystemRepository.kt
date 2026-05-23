@@ -4,6 +4,9 @@ import com.service.tbterminal.inventory.PaginatedResponse
 import kotlinx.coroutines.Dispatchers
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import java.time.Instant
 import java.util.UUID
@@ -93,13 +96,32 @@ class SystemRepository {
                         pinHash = it[UsersTable.pinHash],
                         email = it[UsersTable.email],
                         roleName = it[RolesTable.name],
-                        isActive = it[UsersTable.isActive]
+                        isActive = it[UsersTable.isActive],
+                        tokenVersion = it[UsersTable.tokenVersion]
+                    )
+                }
+        }
+
+    suspend fun findAuthenticationUserById(id: UUID): AuthenticationUserState? =
+        newSuspendedTransaction(Dispatchers.IO) {
+            (UsersTable innerJoin RolesTable)
+                .select { UsersTable.id eq id }
+                .singleOrNull()
+                ?.let {
+                    AuthenticationUserState(
+                        id = it[UsersTable.id],
+                        username = it[UsersTable.username],
+                        roleName = it[RolesTable.name],
+                        isActive = it[UsersTable.isActive],
+                        tokenVersion = it[UsersTable.tokenVersion]
                     )
                 }
         }
 
     suspend fun createUser(name: String, username: String, passwordHash: String, pinHash: String, email: String?, roleId: UUID): UUID = newSuspendedTransaction(Dispatchers.IO) {
+        val newId = UUID.randomUUID()
         UsersTable.insert {
+            it[this.id] = newId
             it[this.name] = name
             it[this.username] = username
             it[this.passwordHash] = passwordHash
@@ -107,7 +129,8 @@ class SystemRepository {
             it[this.email] = email
             it[this.roleId] = roleId
             it[this.isActive] = true
-        } get UsersTable.id
+        }
+        newId
     }
 
     suspend fun updateUser(id: UUID, name: String, username: String, roleId: UUID, isActive: Boolean, email: String?, passwordHash: String?, pinHash: String?): Boolean = newSuspendedTransaction(Dispatchers.IO) {
@@ -160,6 +183,106 @@ class SystemRepository {
         }
     }
 
+    suspend fun incrementTokenVersion(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
+        UsersTable.update({ UsersTable.id eq id }) {
+            it[UsersTable.tokenVersion] = UsersTable.tokenVersion + 1
+            it[updatedAt] = Instant.now()
+        } > 0
+    }
+
+    suspend fun getPaginatedAuditLogs(
+        page: Int,
+        limit: Int,
+        action: AuditAction?,
+        since: Instant?
+    ): PaginatedResponse<AuditLogResponse> = newSuspendedTransaction(Dispatchers.IO) {
+        val offset = ((page - 1) * limit).toLong()
+        var query = AuditLogsTable.selectAll()
+
+        if (action != null) {
+            query = query.andWhere { AuditLogsTable.action eq action }
+        }
+
+        if (since != null) {
+            query = query.andWhere { AuditLogsTable.createdAt greaterEq since }
+        }
+
+        val totalCount = query.count()
+        val totalPages = kotlin.math.ceil(totalCount.toDouble() / limit).toInt()
+
+        val rows = query
+            .orderBy(AuditLogsTable.createdAt, SortOrder.DESC)
+            .limit(limit, offset)
+            .toList()
+
+        val actorIds = rows
+            .mapNotNull { row -> row[AuditLogsTable.userId] }
+            .distinct()
+
+        val actorsById = if (actorIds.isEmpty()) {
+            emptyMap()
+        } else {
+            (UsersTable innerJoin RolesTable)
+                .select { UsersTable.id inList actorIds }
+                .associate { row ->
+                    row[UsersTable.id] to AuditActorRow(
+                        name = row[UsersTable.name],
+                        roleName = row[RolesTable.name]
+                    )
+                }
+        }
+
+        val data = rows.map { row ->
+            val actorId = row[AuditLogsTable.userId]
+            val actor = actorId?.let(actorsById::get)
+            val action = row[AuditLogsTable.action]
+            val schemaName = row[AuditLogsTable.targetSchemaName]
+            val tableName = row[AuditLogsTable.targetTableName]
+
+            AuditLogResponse(
+                id = row[AuditLogsTable.id].toString(),
+                actorUserId = actorId?.toString(),
+                actorName = actor?.name,
+                actorRole = actor?.roleName,
+                action = action.name,
+                schemaName = schemaName,
+                tableName = tableName,
+                recordId = row[AuditLogsTable.recordId]?.toString(),
+                ipAddress = row[AuditLogsTable.ipAddress],
+                activityLabel = action.toActivityLabel(tableName),
+                createdAt = row[AuditLogsTable.createdAt].toString()
+            )
+        }
+
+        PaginatedResponse(
+            data = data,
+            total = totalCount,
+            page = page,
+            limit = limit,
+            totalPages = totalPages
+        )
+    }
+
+    suspend fun insertAuditLog(
+        actorUserId: UUID?,
+        action: AuditAction,
+        schemaName: String,
+        tableName: String,
+        recordId: UUID?,
+        ipAddress: String?
+    ) {
+        newSuspendedTransaction(Dispatchers.IO) {
+            AuditLogsTable.insert {
+                it[userId] = actorUserId
+                it[this.action] = action
+                it[targetSchemaName] = schemaName
+                it[targetTableName] = tableName
+                it[this.recordId] = recordId
+                it[this.ipAddress] = ipAddress?.take(45)
+            }
+        }
+    }
+
     // ==========================================
     // STORE SETTINGS (Singleton)
     // ==========================================
@@ -181,10 +304,12 @@ class SystemRepository {
         }
 
         // Jika kosong, insert default row
-        val newId = StoreSettingsTable.insert {
+        val newId = UUID.randomUUID()
+        StoreSettingsTable.insert {
+            it[this.id] = newId
             it[storeName] = "Toko Bangunan Default"
             it[printerSize] = PrinterSize.SIZE_80
-        } get StoreSettingsTable.id
+        }
 
         val newRow = StoreSettingsTable.select { StoreSettingsTable.id eq newId }.single()
         
@@ -242,3 +367,36 @@ class SystemRepository {
     }
 }
 
+private data class AuditActorRow(
+    val name: String,
+    val roleName: String
+)
+
+private fun AuditAction.toActivityLabel(tableName: String): String {
+    when (tableName.lowercase()) {
+        "user_pin" -> return "Ubah PIN"
+        "user_password" -> return "Ubah Password"
+        "user_credentials" -> return "Ubah Kredensial"
+    }
+
+    return when (this) {
+        AuditAction.INSERT -> "Tambah ${tableName.toDomainLabel()}"
+        AuditAction.UPDATE -> "Ubah ${tableName.toDomainLabel()}"
+        AuditAction.DELETE -> "Nonaktifkan ${tableName.toDomainLabel()}"
+    }
+}
+
+private fun String.toDomainLabel(): String {
+    return when (lowercase()) {
+        "users" -> "User"
+        "user_pin" -> "PIN"
+        "user_password" -> "Password"
+        "user_credentials" -> "Kredensial"
+        "store_settings" -> "Pengaturan Toko"
+        "products" -> "Produk"
+        "categories" -> "Kategori"
+        "customers" -> "Pelanggan"
+        "suppliers" -> "Supplier"
+        else -> replace('_', ' ').replaceFirstChar { first -> first.titlecase() }
+    }
+}

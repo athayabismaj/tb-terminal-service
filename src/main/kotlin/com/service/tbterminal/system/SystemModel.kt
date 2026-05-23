@@ -52,7 +52,16 @@ data class UserRow(
     val pinHash: String,
     val email: String?,
     val roleName: String,
-    val isActive: Boolean
+    val isActive: Boolean,
+    val tokenVersion: Int
+)
+
+data class AuthenticationUserState(
+    val id: UUID,
+    val username: String,
+    val roleName: String,
+    val isActive: Boolean,
+    val tokenVersion: Int
 )
 
 // ==========================================
@@ -97,6 +106,21 @@ data class UserUpdateRequest(
     val email: String? = null,
     val newPassword: String? = null,
     val newPin: String? = null
+)
+
+@Serializable
+data class AuditLogResponse(
+    val id: String,
+    val actorUserId: String? = null,
+    val actorName: String? = null,
+    val actorRole: String? = null,
+    val action: String,
+    val schemaName: String,
+    val tableName: String,
+    val recordId: String? = null,
+    val ipAddress: String? = null,
+    val activityLabel: String,
+    val createdAt: String
 )
 
 @Serializable

@@ -1,6 +1,7 @@
 package com.service.tbterminal.sales
 
 import com.service.tbterminal.shared.ApiResponse
+import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.requireRole
 import io.ktor.http.*
@@ -25,7 +26,7 @@ fun Application.salesRoutes() {
 
                     // GET sesi aktif milik user yang sedang login
                     get("/active") {
-                        call.requireRole("KASIR", "ADMIN", "OWNER")
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
                         val userId = call.getUserId()
                         val session = service.getActiveSession(userId)
                         if (session != null) {
@@ -37,7 +38,7 @@ fun Application.salesRoutes() {
 
                     // POST buka sesi kasir baru
                     post("/open") {
-                        call.requireRole("KASIR", "ADMIN", "OWNER")
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
                         val userId = call.getUserId()
                         val request = call.receive<OpenSessionRequest>()
                         val session = service.openSession(userId, request)
@@ -46,7 +47,7 @@ fun Application.salesRoutes() {
 
                     // POST tutup sesi kasir yang aktif
                     post("/close") {
-                        call.requireRole("KASIR", "ADMIN", "OWNER")
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
                         val userId = call.getUserId()
                         val request = call.receive<CloseSessionRequest>()
                         val session = service.closeSession(userId, request)
@@ -60,7 +61,7 @@ fun Application.salesRoutes() {
 
                 // POST checkout (transaksi baru)
                 post("/checkout") {
-                    call.requireRole("KASIR", "ADMIN", "OWNER")
+                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
                     val userId = call.getUserId()
                     val request = call.receive<CheckoutRequest>()
                     val transaction = service.checkout(userId, request)
@@ -69,7 +70,7 @@ fun Application.salesRoutes() {
 
                 // GET riwayat transaksi dengan pagination
                 get("/transactions") {
-                    call.requireRole("KASIR", "ADMIN", "OWNER")
+                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
                     val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                     val sessionId = call.request.queryParameters["sessionId"]
@@ -81,4 +82,3 @@ fun Application.salesRoutes() {
         }
     }
 }
-
