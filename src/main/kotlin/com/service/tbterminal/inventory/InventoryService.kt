@@ -2,8 +2,6 @@ package com.service.tbterminal.inventory
 
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.ValidationException
-import org.jetbrains.exposed.exceptions.ExposedSQLException
-import java.util.UUID
 
 class InventoryService(private val repository: InventoryRepository) {
 
@@ -16,7 +14,7 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun getCategoryById(id: String): CategoryResponse {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         return repository.getCategoryById(uuid) ?: throw NotFoundException("Kategori tidak ditemukan")
     }
 
@@ -32,7 +30,7 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun updateCategory(id: String, request: CategoryRequest): CategoryResponse {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         val name = request.name.trim()
         if (name.isEmpty()) throw ValidationException("Nama kategori tidak boleh kosong")
 
@@ -49,13 +47,13 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun deleteCategory(id: String) {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         val current = repository.getCategoryById(uuid) ?: throw NotFoundException("Kategori tidak ditemukan")
         
         try {
             repository.deleteCategory(uuid)
         } catch (e: Exception) {
-            handleDeleteConstraintViolation(e)
+            throwIfDeleteConstraintViolation(e)
             throw e // rethrow jika bukan violation constraint
         }
     }
@@ -69,7 +67,7 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun getUnitById(id: String): UnitResponse {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         return repository.getUnitById(uuid) ?: throw NotFoundException("Satuan tidak ditemukan")
     }
 
@@ -91,7 +89,7 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun updateUnit(id: String, request: UnitRequest): UnitResponse {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         val name = request.name.trim()
         val symbol = request.symbol.trim()
         
@@ -114,13 +112,13 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun deleteUnit(id: String) {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         val current = repository.getUnitById(uuid) ?: throw NotFoundException("Satuan tidak ditemukan")
         
         try {
             repository.deleteUnit(uuid)
         } catch (e: Exception) {
-            handleDeleteConstraintViolation(e)
+            throwIfDeleteConstraintViolation(e)
             throw e
         }
     }
@@ -136,72 +134,33 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun getProductById(id: String): ProductResponse {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         return repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
     }
 
     suspend fun createProduct(request: ProductCreateRequest): ProductResponse {
-        val sku = request.sku.trim()
-        val name = request.name.trim()
+        val draft = validateProductDraft(repository, request)
+        val existingSku = repository.getProductBySku(draft.sku, includeInactive = true)
 
-        if (sku.isEmpty()) throw ValidationException("SKU tidak boleh kosong")
-        if (name.isEmpty()) throw ValidationException("Nama produk tidak boleh kosong")
-
-        val categoryId = parseUUID(request.categoryId)
-        val unitId = parseUUID(request.baseUnitId)
-
-        // Verifikasi eksistensi Kategori dan Satuan
-        repository.getCategoryById(categoryId) ?: throw ValidationException("Kategori tidak valid atau tidak ditemukan")
-        repository.getUnitById(unitId) ?: throw ValidationException("Satuan tidak valid atau tidak ditemukan")
-
-        // Cek duplikasi SKU (mencakup produk yang tidak aktif)
-        val existingSku = repository.getProductBySku(sku, includeInactive = true)
-
-        if (existingSku != null) {
-            if (existingSku.isActive) {
-                throw ValidationException("Produk dengan SKU '$sku' sudah ada dan aktif")
-            } else {
-                // Restore & Overwrite jika SKU ada tapi tidak aktif
-                val existingUuid = UUID.fromString(existingSku.id)
-                repository.restoreProductAndOverwrite(
-                    id = existingUuid,
-                    categoryId = categoryId,
-                    baseUnitId = unitId,
-                    name = name,
-                    priceBuy = request.priceBuy,
-                    priceRetail = request.priceRetail,
-                    priceContractor = request.priceContractor,
-                    minStock = request.minStock,
-                    photoFilename = request.photoFilename
-                )
-                return repository.getProductById(existingUuid)!!
-            }
+        if (existingSku?.isActive == true) {
+            throw ValidationException("Produk dengan SKU '${draft.sku}' sudah ada dan aktif")
         }
 
-        // Jika benar-benar baru, buat dan inisialisasi stok
-        val newId = repository.createProductAndInitStock(
-            categoryId = categoryId,
-            baseUnitId = unitId,
-            sku = sku,
-            name = name,
-            priceBuy = request.priceBuy,
-            priceRetail = request.priceRetail,
-            priceContractor = request.priceContractor,
-            minStock = request.minStock,
-            photoFilename = request.photoFilename
-        )
+        if (existingSku != null) {
+            return restoreInactiveProduct(repository, existingSku.id, draft, request)
+        }
 
-        return repository.getProductById(newId)!!
+        return createNewProduct(repository, draft, request)
     }
 
     suspend fun updateProduct(id: String, request: ProductUpdateRequest): ProductResponse {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         val name = request.name.trim()
 
         if (name.isEmpty()) throw ValidationException("Nama produk tidak boleh kosong")
 
-        val categoryId = parseUUID(request.categoryId)
-        val unitId = parseUUID(request.baseUnitId)
+        val categoryId = parseInventoryUUID(request.categoryId)
+        val unitId = parseInventoryUUID(request.baseUnitId)
 
         // Verifikasi Produk, Kategori dan Satuan
         repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
@@ -224,7 +183,7 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun deleteProduct(id: String) {
-        val uuid = parseUUID(id)
+        val uuid = parseInventoryUUID(id)
         // Pastikan produk ada dan aktif
         repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau sudah dihapus")
         
@@ -244,8 +203,8 @@ class InventoryService(private val repository: InventoryRepository) {
     }
 
     suspend fun executeOpname(userId: String, request: StockOpnameRequest) {
-        val productId = parseUUID(request.productId)
-        val userUuid = parseUUID(userId)
+        val productId = parseInventoryUUID(request.productId)
+        val userUuid = parseInventoryUUID(userId)
         
         // Verifikasi Produk
         repository.getProductById(productId) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
@@ -288,27 +247,6 @@ class InventoryService(private val repository: InventoryRepository) {
             if (!success) {
                 throw NotFoundException("Gagal melakukan opname pada stok ini")
             }
-        }
-    }
-
-
-    // ==========================================
-    // HELPERS
-    // ==========================================
-
-    private fun parseUUID(id: String): UUID {
-        return try {
-            UUID.fromString(id)
-        } catch (e: IllegalArgumentException) {
-            throw ValidationException("Format ID tidak valid")
-        }
-    }
-
-    private fun handleDeleteConstraintViolation(e: Exception) {
-        val message = e.message ?: ""
-        // Check for PostgreSQL foreign key violation (23503)
-        if (e is ExposedSQLException && e.sqlState == "23503" || message.contains("foreign key constraint") || message.contains("violates foreign key constraint")) {
-            throw ValidationException("Data tidak dapat dihapus karena sedang digunakan")
         }
     }
 }
