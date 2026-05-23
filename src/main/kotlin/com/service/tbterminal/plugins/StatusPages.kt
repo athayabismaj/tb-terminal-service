@@ -5,40 +5,94 @@ import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.plugins.statuspages.*
 import io.ktor.server.response.*
+import org.jetbrains.exposed.exceptions.ExposedSQLException
 
 fun Application.configureStatusPages() {
     install(StatusPages) {
         exception<NotFoundException> { call, cause ->
-            call.respond(HttpStatusCode.NotFound, ApiResponse.error<Unit>(cause.message ?: "Data tidak ditemukan", "NOT_FOUND"))
+            call.respond(
+                HttpStatusCode.NotFound,
+                ErrorResponse("NOT_FOUND", cause.message ?: "Data tidak ditemukan")
+            )
         }
         exception<UnauthorizedException> { call, cause ->
-            call.respond(HttpStatusCode.Unauthorized, ApiResponse.error<Unit>(cause.message ?: "Sesi tidak valid", "UNAUTHORIZED"))
+            call.respond(
+                HttpStatusCode.Unauthorized,
+                ErrorResponse("UNAUTHORIZED", cause.message ?: "Sesi tidak valid")
+            )
         }
         exception<ForbiddenException> { call, cause ->
-            call.respond(HttpStatusCode.Forbidden, ApiResponse.error<Unit>(cause.message ?: "Akses ditolak", "FORBIDDEN"))
+            call.respond(
+                HttpStatusCode.Forbidden,
+                ErrorResponse("FORBIDDEN", cause.message ?: "Akses ditolak")
+            )
         }
         exception<ValidationException> { call, cause ->
-            call.respond(HttpStatusCode.UnprocessableEntity, ApiResponse.error<Unit>(cause.message ?: "Validasi gagal", "VALIDATION_ERROR"))
+            call.respond(
+                HttpStatusCode.BadRequest,
+                ErrorResponse("VALIDATION_ERROR", cause.message ?: "Validasi gagal")
+            )
         }
         exception<StockInsufficientException> { call, cause ->
-            call.respond(HttpStatusCode.UnprocessableEntity, ApiResponse.error<Unit>(cause.message ?: "Stok tidak mencukupi", "STOCK_INSUFFICIENT"))
+            call.respond(
+                HttpStatusCode.UnprocessableEntity,
+                ErrorResponse("STOCK_INSUFFICIENT", cause.message ?: "Stok tidak mencukupi")
+            )
         }
         exception<CreditLimitExceededException> { call, cause ->
-            call.respond(HttpStatusCode.UnprocessableEntity, ApiResponse.error<Unit>(cause.message ?: "Limit kredit terlampaui", "CREDIT_LIMIT_EXCEEDED"))
+            call.respond(
+                HttpStatusCode.UnprocessableEntity,
+                ErrorResponse("CREDIT_LIMIT_EXCEEDED", cause.message ?: "Limit kredit terlampaui")
+            )
         }
         exception<UsernameTakenException> { call, cause ->
-            call.respond(HttpStatusCode.Conflict, ApiResponse.error<Unit>(cause.message ?: "Username sudah digunakan", "USERNAME_TAKEN"))
+            call.respond(
+                HttpStatusCode.Conflict,
+                ErrorResponse("USERNAME_TAKEN", cause.message ?: "Username sudah digunakan")
+            )
         }
         exception<SkuDuplicateException> { call, cause ->
-            call.respond(HttpStatusCode.Conflict, ApiResponse.error<Unit>(cause.message ?: "SKU sudah digunakan", "SKU_DUPLICATE"))
+            call.respond(
+                HttpStatusCode.Conflict,
+                ErrorResponse("SKU_DUPLICATE", cause.message ?: "SKU sudah digunakan")
+            )
         }
         exception<SessionNotFoundException> { call, cause ->
-            call.respond(HttpStatusCode.NotFound, ApiResponse.error<Unit>(cause.message ?: "Sesi kasir tidak aktif", "SESSION_NOT_FOUND"))
+            call.respond(
+                HttpStatusCode.Conflict,
+                ErrorResponse("SESSION_NOT_FOUND", cause.message ?: "Sesi kasir tidak aktif")
+            )
         }
-        // Catch-all: jangan bocorkan stack trace ke client
+        exception<ExposedSQLException> { call, cause ->
+            when (cause.sqlState) {
+                "23505" -> call.respond(
+                    HttpStatusCode.Conflict,
+                    ErrorResponse("DUPLICATE_DATA", "Data sudah ada")
+                )
+
+                "23514" -> call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorResponse(
+                        "FINANCIAL_CONSTRAINT_VIOLATION",
+                        "Data melanggar batasan finansial"
+                    )
+                )
+
+                else -> {
+                    call.application.log.error("Unhandled database exception", cause)
+                    call.respond(
+                        HttpStatusCode.InternalServerError,
+                        ErrorResponse("INTERNAL_SERVER_ERROR", "Terjadi kesalahan pada server")
+                    )
+                }
+            }
+        }
         exception<Throwable> { call, cause ->
             call.application.log.error("Unhandled exception", cause)
-            call.respond(HttpStatusCode.InternalServerError, ApiResponse.error<Unit>("Terjadi kesalahan pada server", "INTERNAL_ERROR"))
+            call.respond(
+                HttpStatusCode.InternalServerError,
+                ErrorResponse("INTERNAL_SERVER_ERROR", "Terjadi kesalahan pada server")
+            )
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.service.tbterminal.receivable
 
 import com.service.tbterminal.shared.ApiResponse
+import com.service.tbterminal.shared.ErrorResponse
 import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.requireRole
@@ -39,7 +40,10 @@ fun Application.receivableRoutes() {
                     get("/{id}") {
                         call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
                         val id = call.parameters["id"]
-                            ?: return@get call.respond(HttpStatusCode.BadRequest, ApiResponse.error<Unit>("ID tidak ditemukan"))
+                            ?: return@get call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
+                            )
                         val customer = service.getCustomerById(id)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(customer))
                     }
@@ -56,7 +60,10 @@ fun Application.receivableRoutes() {
                     put("/{id}") {
                         call.requireRole(Role.ADMIN, Role.OWNER)
                         val id = call.parameters["id"]
-                            ?: return@put call.respond(HttpStatusCode.BadRequest, ApiResponse.error<Unit>("ID tidak ditemukan"))
+                            ?: return@put call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
+                            )
                         val request = call.receive<CustomerRequest>()
                         val customer = service.updateCustomer(id, request)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(customer, "Pelanggan berhasil diperbarui"))
@@ -66,7 +73,10 @@ fun Application.receivableRoutes() {
                     delete("/{id}") {
                         call.requireRole(Role.ADMIN, Role.OWNER)
                         val id = call.parameters["id"]
-                            ?: return@delete call.respond(HttpStatusCode.BadRequest, ApiResponse.error<Unit>("ID tidak ditemukan"))
+                            ?: return@delete call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
+                            )
                         service.deleteCustomer(id)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Pelanggan berhasil dihapus"))
                     }
@@ -93,7 +103,10 @@ fun Application.receivableRoutes() {
                     get("/{id}") {
                         call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
                         val id = call.parameters["id"]
-                            ?: return@get call.respond(HttpStatusCode.BadRequest, ApiResponse.error<Unit>("ID tidak ditemukan"))
+                            ?: return@get call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
+                            )
                         val receivable = service.getReceivableById(id)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(receivable))
                     }
@@ -117,4 +130,3 @@ fun Application.receivableRoutes() {
         }
     }
 }
-
