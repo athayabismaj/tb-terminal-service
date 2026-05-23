@@ -28,7 +28,7 @@ enum class RecPaymentMethod(val dbValue: String) {
 // ==========================================
 
 object CustomersTable : Table("receivable.customers") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val name = varchar("name", 150)
     val phone = varchar("phone", 20).nullable()
     val address = text("address").nullable()
@@ -36,15 +36,15 @@ object CustomersTable : Table("receivable.customers") {
     val creditLimit = decimal("credit_limit", 15, 2)
     val paymentTermDays = integer("payment_term_days").default(0)
     val isActive = bool("is_active").default(true)
-    val createdAt = timestamp("created_at")
-    val updatedAt = timestamp("updated_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
+    val updatedAt = timestamp("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
 
 // Dipindahkan dari SalesModels.kt (SalesReceivablesTable) dan diperluas
 object ReceivablesTable : Table("receivable.receivables") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val customerId = uuid("customer_id").references(CustomersTable.id)
     val transactionId = uuid("transaction_id") // FK ke sales.transactions (cross-schema, diatur di V11)
     val amount = decimal("amount", 15, 2)
@@ -55,14 +55,14 @@ object ReceivablesTable : Table("receivable.receivables") {
         fromDb = { ReceivableStatus.entries.first { e -> e.dbValue == it.toString() } },
         toDb = { it.dbValue }
     )
-    val createdAt = timestamp("created_at")
-    val updatedAt = timestamp("updated_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
+    val updatedAt = timestamp("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
 
 object ReceivablePaymentsTable : Table("receivable.receivable_payments") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val receivableId = uuid("receivable_id").references(ReceivablesTable.id)
     val userId = uuid("user_id") // FK ke system.users (cross-schema, diatur di V11)
     val amount = decimal("amount", 15, 2)
@@ -73,7 +73,7 @@ object ReceivablePaymentsTable : Table("receivable.receivable_payments") {
     )
     val reference = varchar("reference", 100).nullable()
     val notes = text("notes").nullable()
-    val paidAt = timestamp("paid_at")
+    val paidAt = timestamp("paid_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }

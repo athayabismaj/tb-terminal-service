@@ -28,33 +28,33 @@ enum class PurchasePaymentMethod(val dbValue: String) {
 // ==========================================
 
 object SuppliersTable : Table("purchasing.suppliers") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val name = varchar("name", 150)
     val phone = varchar("phone", 20).nullable()
     val address = text("address").nullable()
     val paymentTermDays = integer("payment_term_days").default(30)
     val isActive = bool("is_active").default(true)
-    val createdAt = timestamp("created_at")
-    val updatedAt = timestamp("updated_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
+    val updatedAt = timestamp("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
 
 object PurchasesTable : Table("purchasing.purchases") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val supplierId = uuid("supplier_id").references(SuppliersTable.id)
     val userId = uuid("user_id")
     val invoiceNo = varchar("invoice_no", 100).nullable()
     val total = decimal("total", 15, 2)
-    val receivedAt = timestamp("received_at")
+    val receivedAt = timestamp("received_at").databaseGenerated()
     val notes = text("notes").nullable()
-    val createdAt = timestamp("created_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
 
 object PurchaseItemsTable : Table("purchasing.purchase_items") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val purchaseId = uuid("purchase_id").references(PurchasesTable.id)
     val productId = uuid("product_id")
     val unitId = uuid("unit_id")
@@ -67,7 +67,7 @@ object PurchaseItemsTable : Table("purchasing.purchase_items") {
 }
 
 object SupplierPayablesTable : Table("purchasing.supplier_payables") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val supplierId = uuid("supplier_id").references(SuppliersTable.id)
     val purchaseId = uuid("purchase_id").references(PurchasesTable.id)
     val amount = decimal("amount", 15, 2)
@@ -78,8 +78,8 @@ object SupplierPayablesTable : Table("purchasing.supplier_payables") {
         fromDb = { PayableStatus.entries.first { e -> e.dbValue == it.toString() } },
         toDb = { it.dbValue }
     )
-    val createdAt = timestamp("created_at")
-    val updatedAt = timestamp("updated_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
+    val updatedAt = timestamp("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -180,7 +180,7 @@ data class PurchaseSummary(
 // ==========================================
 
 object SupplierPaymentsTable : Table("purchasing.supplier_payments") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val supplierPayableId = uuid("supplier_payable_id").references(SupplierPayablesTable.id)
     val userId = uuid("user_id")
     val amount = decimal("amount", 15, 2)
@@ -191,7 +191,7 @@ object SupplierPaymentsTable : Table("purchasing.supplier_payments") {
     )
     val reference = varchar("reference", 100).nullable()
     val notes = text("notes").nullable()
-    val paidAt = timestamp("paid_at")
+    val paidAt = timestamp("paid_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }

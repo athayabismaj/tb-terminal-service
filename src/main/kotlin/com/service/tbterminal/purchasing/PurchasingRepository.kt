@@ -123,12 +123,15 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     override suspend fun createSupplier(
         name: String, phone: String?, address: String?, paymentTermDays: Int
     ): UUID = transaction {
+        val supplierId = UUID.randomUUID()
         SuppliersTable.insert {
+            it[this.id] = supplierId
             it[this.name] = name
             it[this.phone] = phone
             it[this.address] = address
             it[this.paymentTermDays] = paymentTermDays
-        } get SuppliersTable.id
+        }
+        supplierId
     }
 
     override suspend fun updateSupplier(
@@ -169,13 +172,15 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     ): PurchaseResponse = transaction {
 
         // 1. Insert ke purchases
-        val purchaseId = PurchasesTable.insert {
+        val purchaseId = UUID.randomUUID()
+        PurchasesTable.insert {
+            it[this.id] = purchaseId
             it[this.supplierId] = supplierId
             it[this.userId] = userId
             it[this.invoiceNo] = invoiceNo
             it[this.total] = calculatedTotal
             it[this.notes] = notes
-        } get PurchasesTable.id
+        }
 
         // 2. Loop insert purchase_items + update HPP di products
         resolvedItems.forEach { item ->
@@ -421,14 +426,16 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         newPaidAmount: java.math.BigDecimal, newStatus: PayableStatus
     ): SupplierPaymentResponse = transaction {
         // 1. INSERT payment
-        val paymentId = SupplierPaymentsTable.insert {
+        val paymentId = UUID.randomUUID()
+        SupplierPaymentsTable.insert {
+            it[this.id] = paymentId
             it[this.supplierPayableId] = payableId
             it[this.userId] = userId
             it[this.amount] = paymentAmount
             it[this.method] = method
             it[this.reference] = reference
             it[this.notes] = notes
-        } get SupplierPaymentsTable.id
+        }
 
         // 2. UPDATE payable paid_amount dan status
         SupplierPayablesTable.update({ SupplierPayablesTable.id eq payableId }) {

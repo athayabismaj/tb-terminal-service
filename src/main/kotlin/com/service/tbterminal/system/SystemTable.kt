@@ -2,15 +2,16 @@ package com.service.tbterminal.system
 
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestamp
+import org.postgresql.util.PGobject
 
 object RolesTable : Table("system.roles") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val name = varchar("name", 50)
     override val primaryKey = PrimaryKey(id)
 }
 
 object UsersTable : Table("system.users") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val roleId = uuid("role_id").references(RolesTable.id)
     val name = varchar("name", 100)
     val username = varchar("username", 50)
@@ -18,10 +19,40 @@ object UsersTable : Table("system.users") {
     val pinHash = varchar("pin_hash", 255)
     val email = varchar("email", 150).nullable()
     val isActive = bool("is_active")
+    val tokenVersion = integer("token_version").default(0)
     val lastLogin = timestamp("last_login").nullable()
-    val createdAt = timestamp("created_at")
-    val updatedAt = timestamp("updated_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
+    val updatedAt = timestamp("updated_at").databaseGenerated()
     
+    override val primaryKey = PrimaryKey(id)
+}
+
+enum class AuditAction {
+    INSERT,
+    UPDATE,
+    DELETE
+}
+
+object AuditLogsTable : Table("system.audit_logs") {
+    val id = uuid("id").databaseGenerated()
+    val userId = uuid("user_id").references(UsersTable.id).nullable()
+    val action = customEnumeration(
+        name = "action",
+        sql = "system.audit_action",
+        fromDb = { value -> AuditAction.valueOf(value.toString().uppercase()) },
+        toDb = { value ->
+            PGobject().apply {
+                type = "system.audit_action"
+                this.value = value.name
+            }
+        }
+    )
+    val targetSchemaName = varchar("schema_name", 50)
+    val targetTableName = varchar("table_name", 100)
+    val recordId = uuid("record_id").nullable()
+    val ipAddress = varchar("ip_address", 45).nullable()
+    val createdAt = timestamp("created_at").databaseGenerated()
+
     override val primaryKey = PrimaryKey(id)
 }
 
@@ -31,7 +62,7 @@ enum class PrinterSize(val dbValue: String) {
 }
 
 object StoreSettingsTable : Table("system.store_settings") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val storeName = varchar("store_name", 150).default("Toko Bangunan")
     val address = text("address").nullable()
     val phone = varchar("phone", 20).nullable()
@@ -43,7 +74,7 @@ object StoreSettingsTable : Table("system.store_settings") {
         toDb = { it.dbValue }
     )
     val updatedBy = uuid("updated_by").references(UsersTable.id).nullable()
-    val updatedAt = timestamp("updated_at")
+    val updatedAt = timestamp("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }

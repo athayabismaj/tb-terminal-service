@@ -99,14 +99,17 @@ class ReceivableRepositoryImpl : ReceivableRepository {
         name: String, phone: String?, address: String?,
         isContractor: Boolean, creditLimit: java.math.BigDecimal, paymentTermDays: Int
     ): UUID = transaction {
+        val customerId = UUID.randomUUID()
         CustomersTable.insert {
+            it[this.id] = customerId
             it[this.name] = name
             it[this.phone] = phone
             it[this.address] = address
             it[this.isContractor] = isContractor
             it[this.creditLimit] = creditLimit
             it[this.paymentTermDays] = paymentTermDays
-        } get CustomersTable.id
+        }
+        customerId
     }
 
     override suspend fun updateCustomer(
@@ -231,14 +234,16 @@ class ReceivableRepositoryImpl : ReceivableRepository {
         newPaidAmount: java.math.BigDecimal, newStatus: ReceivableStatus
     ): PaymentResponse = transaction {
         // 1. INSERT payment
-        val paymentId = ReceivablePaymentsTable.insert {
+        val paymentId = UUID.randomUUID()
+        ReceivablePaymentsTable.insert {
+            it[this.id] = paymentId
             it[this.receivableId] = receivableId
             it[this.userId] = userId
             it[this.amount] = paymentAmount
             it[this.method] = method
             it[this.reference] = reference
             it[this.notes] = notes
-        } get ReceivablePaymentsTable.id
+        }
 
         // 2. UPDATE receivable paid_amount dan status
         ReceivablesTable.update({ ReceivablesTable.id eq receivableId }) {
@@ -284,4 +289,3 @@ class ReceivableRepositoryImpl : ReceivableRepository {
         )
     }
 }
-

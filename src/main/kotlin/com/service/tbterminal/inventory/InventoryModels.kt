@@ -3,24 +3,25 @@ package com.service.tbterminal.inventory
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestamp
+import org.postgresql.util.PGobject
 
 // ==========================================
 // EXPOSED TABLES (Mapping Database)
 // ==========================================
 
 object CategoriesTable : Table("inventory.categories") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val name = varchar("name", 100)
-    val createdAt = timestamp("created_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
     
     override val primaryKey = PrimaryKey(id)
 }
 
 object UnitsTable : Table("inventory.units") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val name = varchar("name", 50)
     val symbol = varchar("symbol", 20)
-    val createdAt = timestamp("created_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -56,7 +57,7 @@ data class UnitRequest(
 )
 
 object ProductsTable : Table("inventory.products") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val categoryId = uuid("category_id").references(CategoriesTable.id)
     val baseUnitId = uuid("base_unit_id").references(UnitsTable.id)
     val sku = varchar("sku", 50)
@@ -67,18 +68,18 @@ object ProductsTable : Table("inventory.products") {
     val minStock = decimal("min_stock", 10, 2)
     val photoFilename = varchar("photo_filename", 255).nullable()
     val isActive = bool("is_active").default(true)
-    val createdAt = timestamp("created_at")
-    val updatedAt = timestamp("updated_at")
+    val createdAt = timestamp("created_at").databaseGenerated()
+    val updatedAt = timestamp("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
 
 object StockTable : Table("inventory.stock") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val productId = uuid("product_id").references(ProductsTable.id)
     val unitId = uuid("unit_id").references(UnitsTable.id)
     val quantity = decimal("quantity", 10, 2)
-    val updatedAt = timestamp("updated_at")
+    val updatedAt = timestamp("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -132,23 +133,37 @@ data class PaginatedResponse<T>(
     val totalPages: Int
 )
 
-enum class AdjType { OPNAME, CORRECTION, DAMAGE }
+enum class AdjType(val dbValue: String) {
+    OPNAME("opname"),
+    CORRECTION("koreksi"),
+    DAMAGE("retur_supplier");
+
+    companion object {
+        fun fromDb(value: String): AdjType {
+            return entries.first { it.dbValue == value }
+        }
+    }
+}
 
 object StockAdjustmentsTable : Table("inventory.stock_adjustments") {
-    val id = uuid("id")
+    val id = uuid("id").databaseGenerated()
     val productId = uuid("product_id").references(ProductsTable.id)
     val userId = uuid("user_id") // References system.users (we don't have the table mapped here, so just UUID)
     val adjType = customEnumeration(
-        name = "adj_type",
+        name = "type",
         sql = "system.adj_type",
-        fromDb = { value -> AdjType.valueOf(value.toString().uppercase()) },
-        toDb = { it.name.lowercase() }
+        fromDb = { value -> AdjType.fromDb(value.toString()) },
+        toDb = { value ->
+            PGobject().apply {
+                type = "system.adj_type"
+                this.value = value.dbValue
+            }
+        }
     )
-    val qtySystem = decimal("qty_system", 10, 2)
-    val qtyActual = decimal("qty_actual", 10, 2)
-    val qtyDiff = decimal("qty_diff", 10, 2)
-    val notes = text("notes").nullable()
-    val createdAt = timestamp("created_at")
+    val qtyBefore = decimal("qty_before", 10, 2)
+    val qtyAfter = decimal("qty_after", 10, 2)
+    val reason = text("reason")
+    val createdAt = timestamp("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
