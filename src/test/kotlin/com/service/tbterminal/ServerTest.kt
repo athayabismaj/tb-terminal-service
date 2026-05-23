@@ -1,5 +1,10 @@
 package com.service.tbterminal
 
+import com.service.tbterminal.plugins.configureDI
+import com.service.tbterminal.plugins.configureRouting
+import com.service.tbterminal.plugins.configureSecurity
+import com.service.tbterminal.plugins.configureSerialization
+import com.service.tbterminal.plugins.configureStatusPages
 import io.ktor.client.request.get
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
@@ -9,10 +14,15 @@ class ServerTest {
 
     @Test
     fun `test root endpoint`() = testApplication {
-        // loads default configuration
-        configure()
-        // verify server root returns 200
-        assertEquals(HttpStatusCode.OK, client.get("/").status)
+        application {
+            configureDI()
+            configureSerialization()
+            configureSecurity()
+            configureStatusPages()
+            configureRouting()
+        }
+
+        assertEquals(HttpStatusCode.OK, client.get("/health").status)
     }
 
 }

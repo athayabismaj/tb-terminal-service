@@ -40,5 +40,14 @@ dependencies {
     implementation(libs.jbcrypt)
 
     testImplementation(kotlin("test"))
+    testImplementation(kotlin("test-junit5"))
     testImplementation(ktorLibs.server.testHost)
+    testImplementation("org.testcontainers:postgresql:1.20.4")
+}
+
+tasks.test {
+    useJUnitPlatform()
+    environment("JWT_SECRET", "integration-test-jwt-secret-that-is-not-used-outside-tests")
+    environment("JWT_ISSUER", "tb-terminal-integration-tests")
+    environment("JWT_AUDIENCE", "tb-terminal-integration-tests")
 }
