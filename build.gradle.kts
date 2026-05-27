@@ -9,7 +9,7 @@ group = "com.service.tbterminal"
 version = "1.0.0-SNAPSHOT"
 
 application {
-    mainClass = "io.ktor.server.netty.EngineMain"
+    mainClass = "com.service.tbterminal.ApplicationKt"
 }
 
 kotlin {

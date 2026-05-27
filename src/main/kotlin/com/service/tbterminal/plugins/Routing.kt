@@ -12,6 +12,13 @@ import com.service.tbterminal.analytics.analyticsRoutes
 
 fun Application.configureRouting() {
     routing {
+        get("/") {
+            call.respond(mapOf(
+                "status" to "running",
+                "service" to "tb-terminal-service"
+            ))
+        }
+
         get("/health") {
             call.respond(mapOf(
                 "status" to "running",

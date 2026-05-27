@@ -8,7 +8,7 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
-import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.UUID
 
 class SystemRepository {
@@ -97,7 +97,9 @@ class SystemRepository {
                         email = it[UsersTable.email],
                         roleName = it[RolesTable.name],
                         isActive = it[UsersTable.isActive],
-                        tokenVersion = it[UsersTable.tokenVersion]
+                        tokenVersion = it[UsersTable.tokenVersion],
+                        createdAt = it[UsersTable.createdAt],
+                        lastLoginAt = it[UsersTable.lastLogin]
                     )
                 }
         }
@@ -140,7 +142,7 @@ class SystemRepository {
             it[this.roleId] = roleId
             it[this.isActive] = isActive
             it[this.email] = email
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
             if (passwordHash != null) {
                 it[this.passwordHash] = passwordHash
             }
@@ -154,7 +156,7 @@ class SystemRepository {
     suspend fun updatePin(id: UUID, pinHash: String): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updated = UsersTable.update({ UsersTable.id eq id }) {
             it[this.pinHash] = pinHash
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
         }
         updated > 0
     }
@@ -162,7 +164,7 @@ class SystemRepository {
     suspend fun updatePassword(id: UUID, passwordHash: String): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updated = UsersTable.update({ UsersTable.id eq id }) {
             it[this.passwordHash] = passwordHash
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
         }
         updated > 0
     }
@@ -170,7 +172,7 @@ class SystemRepository {
     suspend fun softDeleteUser(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updated = UsersTable.update({ UsersTable.id eq id }) {
             it[this.isActive] = false
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
         }
         updated > 0
     }
@@ -178,7 +180,7 @@ class SystemRepository {
     suspend fun updateLastLogin(id: UUID) {
         newSuspendedTransaction(Dispatchers.IO) {
             UsersTable.update({ UsersTable.id eq id }) {
-                it[lastLogin] = Instant.now()
+                it[lastLogin] = OffsetDateTime.now()
             }
         }
     }
@@ -186,7 +188,7 @@ class SystemRepository {
     suspend fun incrementTokenVersion(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         UsersTable.update({ UsersTable.id eq id }) {
             it[UsersTable.tokenVersion] = UsersTable.tokenVersion + 1
-            it[updatedAt] = Instant.now()
+            it[updatedAt] = OffsetDateTime.now()
         } > 0
     }
 
@@ -194,7 +196,7 @@ class SystemRepository {
         page: Int,
         limit: Int,
         action: AuditAction?,
-        since: Instant?
+        since: OffsetDateTime?
     ): PaginatedResponse<AuditLogResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val offset = ((page - 1) * limit).toLong()
         var query = AuditLogsTable.selectAll()
@@ -349,7 +351,7 @@ class SystemRepository {
             it[this.receiptFooter] = receiptFooter
             it[this.printerSize] = printerSize
             it[this.updatedBy] = userId
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
         }
 
         val updatedRow = StoreSettingsTable.selectAll().first()

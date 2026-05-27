@@ -44,6 +44,7 @@ internal suspend fun restoreInactiveProduct(
         priceBuy = request.priceBuy,
         priceRetail = request.priceRetail,
         priceContractor = request.priceContractor,
+        discount = request.discount,
         minStock = request.minStock,
         photoFilename = request.photoFilename
     )
@@ -63,8 +64,10 @@ internal suspend fun createNewProduct(
         priceBuy = request.priceBuy,
         priceRetail = request.priceRetail,
         priceContractor = request.priceContractor,
+        discount = request.discount,
         minStock = request.minStock,
         photoFilename = request.photoFilename
     )
     return repository.getProductById(newId)!!
 }
+

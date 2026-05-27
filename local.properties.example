@@ -1,0 +1,6 @@
+DB_URL=jdbc:postgresql://localhost:5432/tbterminal_backend
+DB_USER=postgres
+DB_PASSWORD=change-me
+JWT_SECRET=tb-terminal-dev-secret-key-min-32-chars!!
+JWT_ISSUER=tb-terminal
+JWT_AUDIENCE=tb-terminal-client

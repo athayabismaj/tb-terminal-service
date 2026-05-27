@@ -9,8 +9,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.mindrot.jbcrypt.BCrypt
 import java.time.Duration
-import java.time.Instant
 import java.time.LocalDate
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.util.UUID
 
@@ -219,13 +219,13 @@ class SystemService(private val repo: SystemRepository) {
         }
     }
 
-    private fun String?.toAuditRangeStart(): Instant? {
+    private fun String?.toAuditRangeStart(): OffsetDateTime? {
         val value = this?.lowercase()?.takeIf(String::isNotBlank) ?: return null
-        val now = Instant.now()
+        val now = OffsetDateTime.now()
         val zone = ZoneId.systemDefault()
 
         return when (value) {
-            "today" -> LocalDate.now(zone).atStartOfDay(zone).toInstant()
+            "today" -> LocalDate.now(zone).atStartOfDay(zone).toOffsetDateTime()
             "7d" -> now.minus(Duration.ofDays(7))
             "30d" -> now.minus(Duration.ofDays(30))
             else -> throw ValidationException("Filter tanggal tidak valid")

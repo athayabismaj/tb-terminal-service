@@ -29,6 +29,12 @@ internal class InventoryProductRepository {
             ?.let(::toProductResponse)
     }
 
+    suspend fun getProductByIdIncludingInactive(id: UUID): ProductResponse? = transaction {
+        ProductsTable.select { ProductsTable.id eq id }
+            .singleOrNull()
+            ?.let(::toProductResponse)
+    }
+
     suspend fun getBySku(sku: String, includeInactive: Boolean): ProductResponse? = transaction {
         ProductsTable.select { ProductsTable.sku eq sku }
             .apply { if (!includeInactive) andWhere { ProductsTable.isActive eq true } }
@@ -44,10 +50,11 @@ internal class InventoryProductRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
     ): UUID = transaction {
-        val productId = insertProduct(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, minStock, photoFilename)
+        val productId = insertProduct(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
         StockTable.insert {
             it[this.productId] = productId
             it[unitId] = baseUnitId
@@ -64,10 +71,11 @@ internal class InventoryProductRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
     ): Boolean = transaction {
-        updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, minStock, photoFilename) > 0
+        updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
     }
 
     suspend fun restoreProductAndOverwrite(
@@ -78,15 +86,20 @@ internal class InventoryProductRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
     ): Boolean = transaction {
         ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = true }
-        updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, minStock, photoFilename) > 0
+        updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
     }
 
     suspend fun softDeleteProduct(id: UUID): Boolean = transaction {
         ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = false } > 0
+    }
+
+    suspend fun activateProduct(id: UUID): Boolean = transaction {
+        ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = true } > 0
     }
 
     private fun insertProduct(
@@ -97,6 +110,7 @@ internal class InventoryProductRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
     ): UUID {
@@ -110,6 +124,7 @@ internal class InventoryProductRepository {
             it[this.priceBuy] = priceBuy
             it[this.priceRetail] = priceRetail
             it[this.priceContractor] = priceContractor
+            it[this.discount] = discount
             it[this.minStock] = minStock
             it[this.photoFilename] = photoFilename
             it[isActive] = true
@@ -125,6 +140,7 @@ internal class InventoryProductRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
     ): Int {
@@ -135,6 +151,7 @@ internal class InventoryProductRepository {
             it[this.priceBuy] = priceBuy
             it[this.priceRetail] = priceRetail
             it[this.priceContractor] = priceContractor
+            it[this.discount] = discount
             it[this.minStock] = minStock
             if (photoFilename != null) it[this.photoFilename] = photoFilename
         }
@@ -158,6 +175,7 @@ internal class InventoryProductRepository {
             priceBuy = row[ProductsTable.priceBuy],
             priceRetail = row[ProductsTable.priceRetail],
             priceContractor = row[ProductsTable.priceContractor],
+            discount = row[ProductsTable.discount],
             minStock = row[ProductsTable.minStock],
             photoFilename = row[ProductsTable.photoFilename],
             isActive = row[ProductsTable.isActive]
@@ -168,3 +186,4 @@ internal class InventoryProductRepository {
         return ceil(total.toDouble() / limit).toInt()
     }
 }
+

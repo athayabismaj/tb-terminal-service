@@ -5,7 +5,7 @@ import com.service.tbterminal.inventory.ProductsTable
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.transactions.transaction
-import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.UUID
 
 interface PurchasingRepository {
@@ -142,7 +142,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             it[this.phone] = phone
             it[this.address] = address
             it[this.paymentTermDays] = paymentTermDays
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
         }
         updatedRows > 0
     }
@@ -150,7 +150,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     override suspend fun softDeleteSupplier(id: UUID): Boolean = transaction {
         val updatedRows = SuppliersTable.update({ SuppliersTable.id eq id }) {
             it[isActive] = false
-            it[updatedAt] = Instant.now()
+            it[updatedAt] = OffsetDateTime.now()
         }
         updatedRows > 0
     }
@@ -199,7 +199,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             // Trigger fn_log_price_history akan mencatat riwayat secara otomatis
             ProductsTable.update({ ProductsTable.id eq item.productId }) {
                 it[this.priceBuy] = item.priceAtTransaction
-                it[this.updatedAt] = Instant.now()
+                it[this.updatedAt] = OffsetDateTime.now()
             }
         }
 
@@ -441,7 +441,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         SupplierPayablesTable.update({ SupplierPayablesTable.id eq payableId }) {
             it[this.paidAmount] = newPaidAmount
             it[this.status] = newStatus
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
         }
 
         // 3. Baca payment yang baru dibuat untuk response

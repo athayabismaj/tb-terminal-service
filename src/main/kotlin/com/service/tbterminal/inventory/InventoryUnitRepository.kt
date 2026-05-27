@@ -2,18 +2,33 @@ package com.service.tbterminal.inventory
 
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.like
+import org.jetbrains.exposed.sql.andWhere
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.lowerCase
 import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import java.util.UUID
+import kotlin.math.ceil
 
 internal class InventoryUnitRepository {
     suspend fun getAllUnits(): List<UnitResponse> = transaction {
         UnitsTable.selectAll().map(::toUnitResponse)
+    }
+
+    suspend fun getUnits(
+        limit: Int,
+        offset: Int,
+        search: String?
+    ): PaginatedResponse<UnitResponse> = transaction {
+        val query = UnitsTable.selectAll().applySearch(search)
+        val totalCount = query.count()
+        val data = query.limit(limit, offset.toLong()).map(::toUnitResponse)
+        PaginatedResponse(data, totalCount, (offset / limit) + 1, limit, totalPages(totalCount, limit))
     }
 
     suspend fun getUnitById(id: UUID): UnitResponse? = transaction {
@@ -54,5 +69,17 @@ internal class InventoryUnitRepository {
             symbol = row[UnitsTable.symbol],
             createdAt = row[UnitsTable.createdAt].toString()
         )
+    }
+
+    private fun org.jetbrains.exposed.sql.Query.applySearch(search: String?): org.jetbrains.exposed.sql.Query {
+        if (search.isNullOrBlank()) return this
+        val searchTerm = "%${search.lowercase()}%"
+        return andWhere {
+            (UnitsTable.name.lowerCase() like searchTerm) or (UnitsTable.symbol.lowerCase() like searchTerm)
+        }
+    }
+
+    private fun totalPages(total: Long, limit: Int): Int {
+        return ceil(total.toDouble() / limit).toInt()
     }
 }

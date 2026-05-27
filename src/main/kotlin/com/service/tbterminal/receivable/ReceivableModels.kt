@@ -3,7 +3,8 @@ package com.service.tbterminal.receivable
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.date
-import org.jetbrains.exposed.sql.javatime.timestamp
+import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
+import org.postgresql.util.PGobject
 
 // ==========================================
 // ENUMS — Sesuai ENUM PostgreSQL di V5 (lowercase DB values)
@@ -36,8 +37,8 @@ object CustomersTable : Table("receivable.customers") {
     val creditLimit = decimal("credit_limit", 15, 2)
     val paymentTermDays = integer("payment_term_days").default(0)
     val isActive = bool("is_active").default(true)
-    val createdAt = timestamp("created_at").databaseGenerated()
-    val updatedAt = timestamp("updated_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -53,10 +54,10 @@ object ReceivablesTable : Table("receivable.receivables") {
     val status = customEnumeration(
         "status", "system.receivable_status",
         fromDb = { ReceivableStatus.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
+        toDb = { value -> postgresEnum("system.receivable_status", value.dbValue) }
     )
-    val createdAt = timestamp("created_at").databaseGenerated()
-    val updatedAt = timestamp("updated_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -69,11 +70,11 @@ object ReceivablePaymentsTable : Table("receivable.receivable_payments") {
     val method = customEnumeration(
         "method", "system.payment_method",
         fromDb = { RecPaymentMethod.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
+        toDb = { value -> postgresEnum("system.payment_method", value.dbValue) }
     )
     val reference = varchar("reference", 100).nullable()
     val notes = text("notes").nullable()
-    val paidAt = timestamp("paid_at").databaseGenerated()
+    val paidAt = timestampWithTimeZone("paid_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -154,3 +155,10 @@ data class PaymentResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val receivableRemainingAmount: java.math.BigDecimal
 )
+
+private fun postgresEnum(type: String, value: String): PGobject {
+    return PGobject().apply {
+        this.type = type
+        this.value = value
+    }
+}

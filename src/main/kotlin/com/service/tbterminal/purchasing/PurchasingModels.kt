@@ -3,7 +3,8 @@ package com.service.tbterminal.purchasing
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.date
-import org.jetbrains.exposed.sql.javatime.timestamp
+import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
+import org.postgresql.util.PGobject
 
 // ==========================================
 // ENUMS
@@ -34,8 +35,8 @@ object SuppliersTable : Table("purchasing.suppliers") {
     val address = text("address").nullable()
     val paymentTermDays = integer("payment_term_days").default(30)
     val isActive = bool("is_active").default(true)
-    val createdAt = timestamp("created_at").databaseGenerated()
-    val updatedAt = timestamp("updated_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -46,9 +47,9 @@ object PurchasesTable : Table("purchasing.purchases") {
     val userId = uuid("user_id")
     val invoiceNo = varchar("invoice_no", 100).nullable()
     val total = decimal("total", 15, 2)
-    val receivedAt = timestamp("received_at").databaseGenerated()
+    val receivedAt = timestampWithTimeZone("received_at").databaseGenerated()
     val notes = text("notes").nullable()
-    val createdAt = timestamp("created_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -74,12 +75,13 @@ object SupplierPayablesTable : Table("purchasing.supplier_payables") {
     val paidAmount = decimal("paid_amount", 15, 2)
     val dueDate = date("due_date")
     val status = customEnumeration(
-        "status", "system.payable_status",
-        fromDb = { PayableStatus.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
+        name = "status",
+        sql = "system.payable_status",
+        fromDb = { value -> PayableStatus.entries.first { e -> e.dbValue == value.toString() } },
+        toDb = { value -> postgresEnum("system.payable_status", value.dbValue) }
     )
-    val createdAt = timestamp("created_at").databaseGenerated()
-    val updatedAt = timestamp("updated_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -185,13 +187,14 @@ object SupplierPaymentsTable : Table("purchasing.supplier_payments") {
     val userId = uuid("user_id")
     val amount = decimal("amount", 15, 2)
     val method = customEnumeration(
-        "method", "system.payment_method",
-        fromDb = { PurchasePaymentMethod.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
+        name = "method",
+        sql = "system.payment_method",
+        fromDb = { value -> PurchasePaymentMethod.entries.first { e -> e.dbValue == value.toString() } },
+        toDb = { value -> postgresEnum("system.payment_method", value.dbValue) }
     )
     val reference = varchar("reference", 100).nullable()
     val notes = text("notes").nullable()
-    val paidAt = timestamp("paid_at").databaseGenerated()
+    val paidAt = timestampWithTimeZone("paid_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -242,3 +245,10 @@ data class SupplierPaymentResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val payableRemainingAmount: java.math.BigDecimal
 )
+
+private fun postgresEnum(type: String, value: String): PGobject {
+    return PGobject().apply {
+        this.type = type
+        this.value = value
+    }
+}

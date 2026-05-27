@@ -21,6 +21,18 @@ internal fun Route.stockRoutes(service: InventoryService) {
             call.respond(HttpStatusCode.OK, ApiResponse.success(stock))
         }
 
+        get("/adjustments") {
+            val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+            val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+            val adjustments = service.getStockAdjustments(
+                page = page,
+                limit = limit,
+                search = call.request.queryParameters["search"],
+                type = call.request.queryParameters["type"]
+            )
+            call.respond(HttpStatusCode.OK, ApiResponse.success(adjustments))
+        }
+
         post("/opname") {
             call.requireRole(Role.OWNER, Role.ADMIN)
             service.executeOpname(call.getUserId().toString(), call.receive())

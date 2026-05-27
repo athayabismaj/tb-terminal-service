@@ -4,7 +4,7 @@ import com.service.tbterminal.inventory.PaginatedResponse
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.transactions.transaction
-import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.UUID
 
 interface ReceivableRepository {
@@ -57,20 +57,10 @@ class ReceivableRepositoryImpl : ReceivableRepository {
     override suspend fun getPaginatedCustomers(page: Int, limit: Int, search: String?): PaginatedResponse<CustomerResponse> = transaction {
         val offset = ((page - 1) * limit).toLong()
 
-        var query = CustomersTable.select { CustomersTable.isActive eq true }
-
-        if (!search.isNullOrBlank()) {
-            val searchTerm = "%${search.lowercase()}%"
-            query = query.andWhere {
-                (CustomersTable.name.lowerCase() like searchTerm) or
-                (CustomersTable.phone.lowerCase() like searchTerm)
-            }
-        }
-
-        val totalCount = query.count()
+        val totalCount = customerQuery(search).count()
         val totalPages = kotlin.math.ceil(totalCount.toDouble() / limit).toInt()
 
-        val data = query
+        val data = customerQuery(search)
             .orderBy(CustomersTable.name, SortOrder.ASC)
             .limit(limit, offset)
             .map { rowToCustomerResponse(it) }
@@ -123,7 +113,7 @@ class ReceivableRepositoryImpl : ReceivableRepository {
             it[this.isContractor] = isContractor
             it[this.creditLimit] = creditLimit
             it[this.paymentTermDays] = paymentTermDays
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
         }
         updatedRows > 0
     }
@@ -131,7 +121,7 @@ class ReceivableRepositoryImpl : ReceivableRepository {
     override suspend fun softDeleteCustomer(id: UUID): Boolean = transaction {
         val updatedRows = CustomersTable.update({ CustomersTable.id eq id }) {
             it[isActive] = false
-            it[updatedAt] = Instant.now()
+            it[updatedAt] = OffsetDateTime.now()
         }
         updatedRows > 0
     }
@@ -146,19 +136,10 @@ class ReceivableRepositoryImpl : ReceivableRepository {
         val offset = ((page - 1) * limit).toLong()
 
         // JOIN receivables ← customers untuk ambil nama pelanggan
-        var query = ReceivablesTable.innerJoin(CustomersTable).selectAll()
-
-        if (customerId != null) {
-            query = query.andWhere { ReceivablesTable.customerId eq customerId }
-        }
-        if (status != null) {
-            query = query.andWhere { ReceivablesTable.status eq status }
-        }
-
-        val totalCount = query.count()
+        val totalCount = receivableQuery(customerId, status).count()
         val totalPages = kotlin.math.ceil(totalCount.toDouble() / limit).toInt()
 
-        val data = query
+        val data = receivableQuery(customerId, status)
             .orderBy(ReceivablesTable.createdAt, SortOrder.DESC)
             .limit(limit, offset)
             .map { row ->
@@ -249,7 +230,7 @@ class ReceivableRepositoryImpl : ReceivableRepository {
         ReceivablesTable.update({ ReceivablesTable.id eq receivableId }) {
             it[this.paidAmount] = newPaidAmount
             it[this.status] = newStatus
-            it[this.updatedAt] = Instant.now()
+            it[this.updatedAt] = OffsetDateTime.now()
         }
 
         // 3. Baca payment yang baru dibuat untuk response
@@ -273,6 +254,33 @@ class ReceivableRepositoryImpl : ReceivableRepository {
     // ==========================================
     // HELPERS
     // ==========================================
+
+    private fun customerQuery(search: String?): Query {
+        var query = CustomersTable.select { CustomersTable.isActive eq true }
+
+        if (!search.isNullOrBlank()) {
+            val searchTerm = "%${search.lowercase()}%"
+            query = query.andWhere {
+                (CustomersTable.name.lowerCase() like searchTerm) or
+                    (CustomersTable.phone.lowerCase() like searchTerm)
+            }
+        }
+
+        return query
+    }
+
+    private fun receivableQuery(customerId: UUID?, status: ReceivableStatus?): Query {
+        var query = ReceivablesTable.innerJoin(CustomersTable).selectAll()
+
+        if (customerId != null) {
+            query = query.andWhere { ReceivablesTable.customerId eq customerId }
+        }
+        if (status != null) {
+            query = query.andWhere { ReceivablesTable.status eq status }
+        }
+
+        return query
+    }
 
     private fun rowToCustomerResponse(row: ResultRow): CustomerResponse {
         return CustomerResponse(

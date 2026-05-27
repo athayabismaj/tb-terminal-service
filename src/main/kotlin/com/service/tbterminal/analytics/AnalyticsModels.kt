@@ -3,7 +3,6 @@ package com.service.tbterminal.analytics
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.date
-import org.jetbrains.exposed.sql.javatime.timestamp
 
 // ==========================================
 // EXPOSED TABLES (Mapping Database Views)
@@ -23,7 +22,7 @@ object VReceivablesActiveView : Table("receivable.v_receivables_active") {
     val totalDebt = decimal("total_debt", 15, 2)
     val paidAmount = decimal("paid_amount", 15, 2)
     val remainingDebt = decimal("remaining_debt", 15, 2)
-    val dueDate = timestamp("due_date")
+    val dueDate = date("due_date")
     val status = varchar("status", 50)
 }
 

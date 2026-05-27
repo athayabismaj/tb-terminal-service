@@ -1,6 +1,7 @@
 package com.service.tbterminal.system
 
 import kotlinx.serialization.Serializable
+import java.time.OffsetDateTime
 import java.util.UUID
 
 @Serializable
@@ -27,7 +28,9 @@ data class UserDto(
     val name: String,
     val role: String,
     val isActive: Boolean,
-    val email: String?
+    val email: String?,
+    val joinedAt: String,
+    val lastLoginAt: String?
 ) {
     companion object {
         fun from(row: UserRow): UserDto {
@@ -37,7 +40,9 @@ data class UserDto(
                 name = row.name,
                 role = row.roleName,
                 isActive = row.isActive,
-                email = row.email
+                email = row.email,
+                joinedAt = row.createdAt.toString(),
+                lastLoginAt = row.lastLoginAt?.toString()
             )
         }
     }
@@ -53,7 +58,9 @@ data class UserRow(
     val email: String?,
     val roleName: String,
     val isActive: Boolean,
-    val tokenVersion: Int
+    val tokenVersion: Int,
+    val createdAt: OffsetDateTime,
+    val lastLoginAt: OffsetDateTime?
 )
 
 data class AuthenticationUserState(

@@ -1,7 +1,7 @@
 package com.service.tbterminal.system
 
 import org.jetbrains.exposed.sql.Table
-import org.jetbrains.exposed.sql.javatime.timestamp
+import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
 import org.postgresql.util.PGobject
 
 object RolesTable : Table("system.roles") {
@@ -20,9 +20,9 @@ object UsersTable : Table("system.users") {
     val email = varchar("email", 150).nullable()
     val isActive = bool("is_active")
     val tokenVersion = integer("token_version").default(0)
-    val lastLogin = timestamp("last_login").nullable()
-    val createdAt = timestamp("created_at").databaseGenerated()
-    val updatedAt = timestamp("updated_at").databaseGenerated()
+    val lastLogin = timestampWithTimeZone("last_login").nullable()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
     
     override val primaryKey = PrimaryKey(id)
 }
@@ -51,7 +51,7 @@ object AuditLogsTable : Table("system.audit_logs") {
     val targetTableName = varchar("table_name", 100)
     val recordId = uuid("record_id").nullable()
     val ipAddress = varchar("ip_address", 45).nullable()
-    val createdAt = timestamp("created_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -69,12 +69,20 @@ object StoreSettingsTable : Table("system.store_settings") {
     val receiptHeader = text("receipt_header").nullable()
     val receiptFooter = text("receipt_footer").nullable()
     val printerSize = customEnumeration(
-        "printer_size", "system.printer_size",
+        name = "printer_size",
+        sql = "system.printer_size",
         fromDb = { PrinterSize.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
+        toDb = { value -> postgresEnum("system.printer_size", value.dbValue) }
     )
     val updatedBy = uuid("updated_by").references(UsersTable.id).nullable()
-    val updatedAt = timestamp("updated_at").databaseGenerated()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
+}
+
+private fun postgresEnum(type: String, value: String): PGobject {
+    return PGobject().apply {
+        this.type = type
+        this.value = value
+    }
 }

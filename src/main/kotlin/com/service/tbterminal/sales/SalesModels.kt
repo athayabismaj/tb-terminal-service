@@ -2,7 +2,8 @@ package com.service.tbterminal.sales
 
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
-import org.jetbrains.exposed.sql.javatime.timestamp
+import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
+import org.postgresql.util.PGobject
 
 // ==========================================
 // ENUM
@@ -17,14 +18,25 @@ enum class SessionStatus { OPEN, CLOSED }
 object CashSessionsTable : Table("sales.cash_sessions") {
     val id = uuid("id").databaseGenerated()
     val userId = uuid("user_id")
-    val openedAt = timestamp("opened_at").databaseGenerated()
-    val closedAt = timestamp("closed_at").nullable()
+    val openedAt = timestampWithTimeZone("opened_at").databaseGenerated()
+    val closedAt = timestampWithTimeZone("closed_at").nullable()
     val openingCash = decimal("opening_cash", 15, 2)
     val closingCash = decimal("closing_cash", 15, 2).nullable()
     val systemCash = decimal("system_cash", 15, 2).nullable()
     val difference = decimal("difference", 15, 2).nullable()
     val notes = text("notes").nullable()
-    val createdAt = timestamp("created_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+object CashExpensesTable : Table("sales.cash_expenses") {
+    val id = uuid("id").databaseGenerated()
+    val sessionId = uuid("session_id").references(CashSessionsTable.id)
+    val userId = uuid("user_id")
+    val amount = decimal("amount", 15, 2)
+    val description = text("description")
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -47,6 +59,31 @@ data class CloseSessionRequest(
 )
 
 @Serializable
+data class CashExpenseRequest(
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val description: String
+)
+
+@Serializable
+data class PayDebtRequest(
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val method: String // "tunai", "transfer", "qris"
+)
+
+@Serializable
+data class CashExpenseResponse(
+    val id: String,
+    val sessionId: String,
+    val userId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val description: String,
+    val createdAt: String
+)
+
+@Serializable
 data class CashSessionResponse(
     val id: String,
     val userId: String,
@@ -60,6 +97,8 @@ data class CashSessionResponse(
     val systemCash: java.math.BigDecimal?,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val difference: java.math.BigDecimal?,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val totalExpenses: java.math.BigDecimal,
     val notes: String?,
     val status: String   // "OPEN" | "CLOSED"
 )
@@ -99,18 +138,18 @@ object TransactionsTable : Table("sales.transactions") {
     val type = customEnumeration(
         "type", "system.trx_type",
         fromDb = { TrxType.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
+        toDb = { value -> postgresEnum("system.trx_type", value.dbValue) }
     )
     val status = customEnumeration(
         "status", "system.trx_status",
         fromDb = { TrxStatus.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
+        toDb = { value -> postgresEnum("system.trx_status", value.dbValue) }
     )
     val total = decimal("total", 15, 2)
     val dpAmount = decimal("dp_amount", 15, 2)
     val paidAmount = decimal("paid_amount", 15, 2)
     val notes = text("notes").nullable()
-    val createdAt = timestamp("created_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -119,6 +158,7 @@ object TransactionItemsTable : Table("sales.transaction_items") {
     val id = uuid("id").databaseGenerated()
     val transactionId = uuid("transaction_id").references(TransactionsTable.id)
     val productId = uuid("product_id")
+    val productName = varchar("product_name", 255)
     val unitId = uuid("unit_id")
     val quantity = decimal("quantity", 10, 2)
     val priceAtTransaction = decimal("price_at_transaction", 15, 2)
@@ -135,11 +175,11 @@ object PaymentsTable : Table("sales.payments") {
     val method = customEnumeration(
         "method", "system.payment_method",
         fromDb = { PaymentMethod.entries.first { e -> e.dbValue == it.toString() } },
-        toDb = { it.dbValue }
+        toDb = { value -> postgresEnum("system.payment_method", value.dbValue) }
     )
     val amount = decimal("amount", 15, 2)
     val reference = varchar("reference", 100).nullable()
-    val paidAt = timestamp("paid_at").databaseGenerated()
+    val paidAt = timestampWithTimeZone("paid_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -188,8 +228,10 @@ data class TransactionItemResponse(
 @Serializable
 data class TransactionResponse(
     val id: String,
+    val receiptId: String,
     val sessionId: String,
     val customerId: String?,
+    val customerName: String?,
     val userId: String,
     val type: String,
     val status: String,
@@ -203,3 +245,10 @@ data class TransactionResponse(
     val createdAt: String,
     val items: List<TransactionItemResponse>
 )
+
+private fun postgresEnum(type: String, value: String): PGobject {
+    return PGobject().apply {
+        this.type = type
+        this.value = value
+    }
+}

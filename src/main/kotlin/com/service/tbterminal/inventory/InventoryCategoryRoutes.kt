@@ -16,7 +16,18 @@ import io.ktor.server.routing.route
 internal fun Route.categoryRoutes(service: InventoryService) {
     route("/categories") {
         get {
-            call.respond(HttpStatusCode.OK, ApiResponse.success(service.getAllCategories()))
+            val page = call.request.queryParameters["page"]?.toIntOrNull()
+            val limit = call.request.queryParameters["limit"]?.toIntOrNull()
+            val search = call.request.queryParameters["search"]
+
+            if (page != null || limit != null || !search.isNullOrBlank()) {
+                call.respond(
+                    HttpStatusCode.OK,
+                    ApiResponse.success(service.getCategories(page ?: 1, limit ?: 10, search))
+                )
+            } else {
+                call.respond(HttpStatusCode.OK, ApiResponse.success(service.getAllCategories()))
+            }
         }
 
         get("/{id}") {

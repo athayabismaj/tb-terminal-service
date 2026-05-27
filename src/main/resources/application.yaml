@@ -17,7 +17,7 @@ ktor:
 # dengan pola hybrid: env var (production) → default (development).
 #
 # Default Development (langsung jalan tanpa set env var):
-#   DB_URL      = jdbc:postgresql://localhost:5432/tb_terminal_db
+#   DB_URL      = jdbc:postgresql://localhost:5432/tbterminal_backend
 #   DB_USER     = postgres
 #   DB_PASSWORD = postgres
 #   JWT_SECRET  = tb-terminal-dev-secret-key-min-32-chars!!
@@ -25,4 +25,3 @@ ktor:
 #   JWT_AUDIENCE= tb-terminal-client
 #
 # Production: Set environment variable di server/Docker untuk override.
-

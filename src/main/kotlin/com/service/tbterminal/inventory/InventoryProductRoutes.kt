@@ -9,6 +9,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
+import io.ktor.server.routing.patch
 import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.route
@@ -45,6 +46,13 @@ internal fun Route.productRoutes(service: InventoryService) {
             val id = call.parameters["id"] ?: return@delete call.respond(HttpStatusCode.BadRequest)
             service.deleteProduct(id)
             call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Produk berhasil dihapus"))
+        }
+
+        patch("/{id}/activate") {
+            call.requireRole(Role.OWNER, Role.ADMIN)
+            val id = call.parameters["id"] ?: return@patch call.respond(HttpStatusCode.BadRequest)
+            val product = service.activateProduct(id)
+            call.respond(HttpStatusCode.OK, ApiResponse.success(product, "Produk berhasil diaktifkan kembali"))
         }
     }
 }

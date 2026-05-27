@@ -14,7 +14,7 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.math.BigDecimal
 import java.math.RoundingMode
-import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.UUID
 
 interface SalesRepository {
@@ -43,10 +43,20 @@ interface SalesRepository {
     suspend fun getPaginatedTransactions(
         page: Int,
         limit: Int,
-        sessionId: UUID? = null
+        sessionId: UUID? = null,
+        search: String? = null,
+        status: String? = null,
+        startDate: String? = null,
+        endDate: String? = null
     ): com.service.tbterminal.inventory.PaginatedResponse<TransactionSummary>
 
     suspend fun getTransactionById(id: UUID): TransactionResponse?
+
+    // KAS HARIAN (PETTY CASH)
+    suspend fun addExpense(userId: UUID, request: CashExpenseRequest): CashExpenseResponse
+    suspend fun getExpenses(sessionId: UUID): List<CashExpenseResponse>
+    
+    suspend fun payTransactionDebt(userId: UUID, transactionId: UUID, request: PayDebtRequest): TransactionResponse
 }
 
 // Data class internal untuk membawa data produk yang sudah di-resolve dari DB
@@ -64,8 +74,10 @@ data class ResolvedItem(
 @kotlinx.serialization.Serializable
 data class TransactionSummary(
     val id: String,
+    val receiptId: String,
     val sessionId: String,
     val customerId: String?,
+    val customerName: String?,
     val type: String,
     val status: String,
     @kotlinx.serialization.Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
@@ -132,7 +144,7 @@ class SalesRepositoryImpl : SalesRepository {
         notes: String?
     ): Boolean = transaction {
         val updatedRows = CashSessionsTable.update({ CashSessionsTable.id eq sessionId }) {
-            it[this.closedAt] = Instant.now()
+            it[this.closedAt] = OffsetDateTime.now()
             it[this.closingCash] = closingCash
             it[this.systemCash] = systemCash
             it[this.difference] = difference
@@ -142,9 +154,14 @@ class SalesRepositoryImpl : SalesRepository {
     }
 
     private fun rowToResponse(row: ResultRow): CashSessionResponse {
+        val sessionId = row[CashSessionsTable.id]
+        val totalExpenses = CashExpensesTable.select { CashExpensesTable.sessionId eq sessionId }
+            .map { it[CashExpensesTable.amount] }
+            .fold(BigDecimal.ZERO, BigDecimal::add)
+
         val isClosed = row[CashSessionsTable.closedAt] != null
         return CashSessionResponse(
-            id = row[CashSessionsTable.id].toString(),
+            id = sessionId.toString(),
             userId = row[CashSessionsTable.userId].toString(),
             openedAt = row[CashSessionsTable.openedAt].toString(),
             closedAt = row[CashSessionsTable.closedAt]?.toString(),
@@ -152,8 +169,50 @@ class SalesRepositoryImpl : SalesRepository {
             closingCash = row[CashSessionsTable.closingCash],
             systemCash = row[CashSessionsTable.systemCash],
             difference = row[CashSessionsTable.difference],
+            totalExpenses = totalExpenses,
             notes = row[CashSessionsTable.notes],
             status = if (isClosed) SessionStatus.CLOSED.name else SessionStatus.OPEN.name
+        )
+    }
+
+    // ==========================================
+    // PETTY CASH (PENGELUARAN KASIR)
+    // ==========================================
+
+    override suspend fun addExpense(userId: UUID, request: CashExpenseRequest): CashExpenseResponse = transaction {
+        val session = CashSessionsTable.select {
+            (CashSessionsTable.userId eq userId) and CashSessionsTable.closedAt.isNull()
+        }.forUpdate().singleOrNull()
+            ?: throw SessionNotFoundException("Buka sesi kasir terlebih dahulu sebelum mencatat pengeluaran")
+
+        if (request.amount <= BigDecimal.ZERO) {
+            throw ValidationException("Nominal pengeluaran harus lebih dari 0")
+        }
+
+        val sessionId = session[CashSessionsTable.id]
+        val expenseId = UUID.randomUUID()
+        CashExpensesTable.insert {
+            it[this.id] = expenseId
+            it[this.sessionId] = sessionId
+            it[this.userId] = userId
+            it[this.amount] = request.amount
+            it[this.description] = request.description
+        }
+
+        // Update kas sistem
+        val currentSystemCash = session[CashSessionsTable.systemCash] ?: session[CashSessionsTable.openingCash]
+        CashSessionsTable.update({ CashSessionsTable.id eq sessionId }) {
+            it[this.systemCash] = currentSystemCash.subtract(request.amount)
+        }
+
+        val row = CashExpensesTable.select { CashExpensesTable.id eq expenseId }.single()
+        CashExpenseResponse(
+            id = row[CashExpensesTable.id].toString(),
+            sessionId = row[CashExpensesTable.sessionId].toString(),
+            userId = row[CashExpensesTable.userId].toString(),
+            amount = row[CashExpensesTable.amount],
+            description = row[CashExpensesTable.description],
+            createdAt = row[CashExpensesTable.createdAt].toString()
         )
     }
 
@@ -219,6 +278,7 @@ class SalesRepositoryImpl : SalesRepository {
             TransactionItemsTable.insert {
                 it[this.transactionId] = trxId
                 it[this.productId] = item.productId
+                it[this.productName] = item.productName
                 it[this.unitId] = item.unitId
                 it[this.quantity] = item.qty
                 it[this.priceAtTransaction] = item.priceAtTransaction
@@ -270,10 +330,16 @@ class SalesRepositoryImpl : SalesRepository {
                 )
             }
 
+        val customerName = trxRow[TransactionsTable.customerId]?.let { cid ->
+            CustomersTable.select { CustomersTable.id eq cid }.singleOrNull()?.get(CustomersTable.name)
+        }
+
         TransactionResponse(
             id = trxRow[TransactionsTable.id].toString(),
+            receiptId = "TRX-${trxRow[TransactionsTable.id].toString().substring(0, 8).uppercase()}",
             sessionId = trxRow[TransactionsTable.sessionId].toString(),
             customerId = trxRow[TransactionsTable.customerId]?.toString(),
+            customerName = customerName,
             userId = trxRow[TransactionsTable.userId].toString(),
             type = trxRow[TransactionsTable.type].dbValue,
             status = trxRow[TransactionsTable.status].dbValue,
@@ -362,14 +428,16 @@ class SalesRepositoryImpl : SalesRepository {
     }
 
     override suspend fun getTransactionById(id: UUID): TransactionResponse? = transaction {
-        val trxRow = TransactionsTable.select { TransactionsTable.id eq id }.singleOrNull()
+        val trxRow = TransactionsTable.leftJoin(CustomersTable, { TransactionsTable.customerId }, { CustomersTable.id })
+            .select { TransactionsTable.id eq id }
+            .singleOrNull()
             ?: return@transaction null
 
         val items = TransactionItemsTable.select { TransactionItemsTable.transactionId eq id }
             .map { row ->
                 TransactionItemResponse(
                     productId = row[TransactionItemsTable.productId].toString(),
-                    productName = "", // join ke inventory tidak dilakukan (snapshot sudah ada)
+                    productName = row[TransactionItemsTable.productName],
                     unitId = row[TransactionItemsTable.unitId].toString(),
                     quantity = row[TransactionItemsTable.quantity],
                     priceAtTransaction = row[TransactionItemsTable.priceAtTransaction],
@@ -379,10 +447,14 @@ class SalesRepositoryImpl : SalesRepository {
                 )
             }
 
+        val customerName = trxRow.getOrNull(CustomersTable.name)
+
         TransactionResponse(
             id = trxRow[TransactionsTable.id].toString(),
+            receiptId = "TRX-${trxRow[TransactionsTable.id].toString().substring(0, 8).uppercase()}",
             sessionId = trxRow[TransactionsTable.sessionId].toString(),
             customerId = trxRow[TransactionsTable.customerId]?.toString(),
+            customerName = customerName,
             userId = trxRow[TransactionsTable.userId].toString(),
             type = trxRow[TransactionsTable.type].dbValue,
             status = trxRow[TransactionsTable.status].dbValue,
@@ -398,13 +470,53 @@ class SalesRepositoryImpl : SalesRepository {
     override suspend fun getPaginatedTransactions(
         page: Int,
         limit: Int,
-        sessionId: UUID?
+        sessionId: UUID?,
+        search: String?,
+        status: String?,
+        startDate: String?,
+        endDate: String?
     ): com.service.tbterminal.inventory.PaginatedResponse<TransactionSummary> = transaction {
         val offset = ((page - 1) * limit).toLong()
 
-        var query = TransactionsTable.selectAll()
+        var query = TransactionsTable.leftJoin(CustomersTable, { TransactionsTable.customerId }, { CustomersTable.id }).selectAll()
         if (sessionId != null) {
             query = query.andWhere { TransactionsTable.sessionId eq sessionId }
+        }
+        
+        if (!status.isNullOrBlank() && status != "Semua") {
+            try {
+                val dbStatus = when (status.uppercase()) {
+                    "LUNAS" -> TrxStatus.LUNAS
+                    "DP" -> TrxStatus.DP
+                    "HUTANG" -> TrxStatus.HUTANG
+                    else -> null
+                }
+                if (dbStatus != null) {
+                    query = query.andWhere { TransactionsTable.status eq dbStatus }
+                }
+            } catch (e: Exception) {}
+        }
+        
+        if (!startDate.isNullOrBlank()) {
+            try {
+                val sd = java.time.LocalDate.parse(startDate).atStartOfDay(java.time.ZoneId.of("Asia/Jakarta")).toOffsetDateTime()
+                query = query.andWhere { TransactionsTable.createdAt greaterEq sd }
+            } catch (e: Exception) {}
+        }
+        
+        if (!endDate.isNullOrBlank()) {
+            try {
+                val ed = java.time.LocalDate.parse(endDate).plusDays(1).atStartOfDay(java.time.ZoneId.of("Asia/Jakarta")).toOffsetDateTime()
+                query = query.andWhere { TransactionsTable.createdAt less ed }
+            } catch (e: Exception) {}
+        }
+        
+        if (!search.isNullOrBlank()) {
+            val searchStr = search.replace("TRX-", "", ignoreCase = true).lowercase()
+            query = query.andWhere { 
+                (TransactionsTable.id.castTo<String>(org.jetbrains.exposed.sql.VarCharColumnType(36)).lowerCase() like "%${searchStr}%") or
+                (CustomersTable.name.lowerCase() like "%${search.lowercase()}%")
+            }
         }
 
         val total = query.count()
@@ -415,8 +527,10 @@ class SalesRepositoryImpl : SalesRepository {
             .map { row ->
                 TransactionSummary(
                     id = row[TransactionsTable.id].toString(),
+                    receiptId = "TRX-${row[TransactionsTable.id].toString().substring(0, 8).uppercase()}",
                     sessionId = row[TransactionsTable.sessionId].toString(),
                     customerId = row[TransactionsTable.customerId]?.toString(),
+                    customerName = row[CustomersTable.name],
                     type = row[TransactionsTable.type].dbValue,
                     status = row[TransactionsTable.status].dbValue,
                     total = row[TransactionsTable.total],
@@ -432,5 +546,112 @@ class SalesRepositoryImpl : SalesRepository {
             limit = limit,
             totalPages = totalPages
         )
+    }
+
+    // ==========================================
+    // PELUNASAN PIUTANG (DEBT SETTLEMENT)
+    // ==========================================
+
+    override suspend fun getExpenses(sessionId: UUID): List<CashExpenseResponse> = transaction {
+        CashExpensesTable.select { CashExpensesTable.sessionId eq sessionId }
+            .orderBy(CashExpensesTable.createdAt to SortOrder.DESC)
+            .map { row ->
+                CashExpenseResponse(
+                    id = row[CashExpensesTable.id].toString(),
+                    sessionId = row[CashExpensesTable.sessionId].toString(),
+                    userId = row[CashExpensesTable.userId].toString(),
+                    amount = row[CashExpensesTable.amount],
+                    description = row[CashExpensesTable.description],
+                    createdAt = row[CashExpensesTable.createdAt].toString()
+                )
+            }
+    }
+
+    override suspend fun payTransactionDebt(
+        userId: UUID,
+        transactionId: UUID,
+        request: PayDebtRequest
+    ): TransactionResponse {
+        transaction {
+            val trxRow = TransactionsTable.select { TransactionsTable.id eq transactionId }
+            .forUpdate().singleOrNull()
+            ?: throw NotFoundException("Transaksi tidak ditemukan")
+
+        val currentPaid = trxRow[TransactionsTable.paidAmount]
+        val total = trxRow[TransactionsTable.total]
+        val status = trxRow[TransactionsTable.status]
+
+        if (status == TrxStatus.LUNAS || currentPaid >= total) {
+            throw ValidationException("Transaksi ini sudah lunas")
+        }
+        if (request.amount <= BigDecimal.ZERO) {
+            throw ValidationException("Nominal pelunasan harus lebih dari 0")
+        }
+
+        val remainingDebt = total.subtract(currentPaid)
+        if (request.amount > remainingDebt) {
+            throw ValidationException("Nominal bayar melebihi sisa hutang (Sisa: $remainingDebt)")
+        }
+
+        val newPaidAmount = currentPaid.add(request.amount)
+        val newStatus = if (newPaidAmount >= total) TrxStatus.LUNAS else status
+
+        val methodEnum = try {
+            PaymentMethod.entries.first { it.dbValue.equals(request.method, ignoreCase = true) }
+        } catch (e: NoSuchElementException) {
+            PaymentMethod.TUNAI
+        }
+
+        // 1. Tambah Payment Record
+        PaymentsTable.insert {
+            it[this.transactionId] = transactionId
+            it[this.method] = methodEnum
+            it[this.amount] = request.amount
+        }
+
+        // 2. Update status Transaksi
+        TransactionsTable.update({ TransactionsTable.id eq transactionId }) {
+            it[this.paidAmount] = newPaidAmount
+            it[this.status] = newStatus
+        }
+
+        // 3. Jika hutang ke pelanggan, update ReceivablesTable
+        val customerId = trxRow[TransactionsTable.customerId]
+        if (customerId != null) {
+            val recRow = ReceivablesTable.select { ReceivablesTable.transactionId eq transactionId }
+                .forUpdate().singleOrNull()
+            
+            if (recRow != null) {
+                val currentRecPaid = recRow[ReceivablesTable.paidAmount]
+                val newRecPaid = currentRecPaid.add(request.amount)
+                val totalRec = recRow[ReceivablesTable.amount]
+                
+                ReceivablesTable.update({ ReceivablesTable.transactionId eq transactionId }) {
+                    it[this.paidAmount] = newRecPaid
+                    if (newRecPaid >= totalRec) {
+                        it[this.status] = ReceivableStatus.LUNAS
+                    }
+                }
+            }
+        }
+
+        // 4. Tambah kas sistem jika menggunakan tunai dan ada sesi aktif
+        if (methodEnum == PaymentMethod.TUNAI) {
+            val session = CashSessionsTable.select {
+                (CashSessionsTable.userId eq userId) and CashSessionsTable.closedAt.isNull()
+            }.forUpdate().singleOrNull()
+
+            if (session != null) {
+                val sessionId = session[CashSessionsTable.id]
+                val currentSystemCash = session[CashSessionsTable.systemCash] ?: session[CashSessionsTable.openingCash]
+                CashSessionsTable.update({ CashSessionsTable.id eq sessionId }) {
+                    it[this.systemCash] = currentSystemCash.add(request.amount)
+                }
+            }
+            }
+        }
+
+        // Return updated transaction outside the transaction block
+        return getTransactionById(transactionId)!!
     }
 }

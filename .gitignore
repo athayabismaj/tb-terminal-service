@@ -19,3 +19,4 @@ out/
 
 ### Env ###
 .env
+local.properties

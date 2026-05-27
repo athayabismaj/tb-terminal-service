@@ -16,6 +16,8 @@ fun Application.configureDatabase() {
     val user = EnvironmentConfig.dbUser
     val password = EnvironmentConfig.dbPassword
 
+    log.info("Database: connecting to $url as $user")
+
     // Setup HikariCP DataSource
     val dataSource = HikariDataSource(HikariConfig().apply {
         jdbcUrl = url

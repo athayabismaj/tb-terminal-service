@@ -13,6 +13,12 @@ class InventoryService(private val repository: InventoryRepository) {
         return repository.getAllCategories()
     }
 
+    suspend fun getCategories(page: Int, limit: Int, search: String?): PaginatedResponse<CategoryResponse> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = if (limit < 1) 10 else limit.coerceAtMost(50)
+        return repository.getCategories(safePage, safeLimit, search)
+    }
+
     suspend fun getCategoryById(id: String): CategoryResponse {
         val uuid = parseInventoryUUID(id)
         return repository.getCategoryById(uuid) ?: throw NotFoundException("Kategori tidak ditemukan")
@@ -64,6 +70,12 @@ class InventoryService(private val repository: InventoryRepository) {
 
     suspend fun getAllUnits(): List<UnitResponse> {
         return repository.getAllUnits()
+    }
+
+    suspend fun getUnits(page: Int, limit: Int, search: String?): PaginatedResponse<UnitResponse> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = if (limit < 1) 10 else limit.coerceAtMost(50)
+        return repository.getUnits(safePage, safeLimit, search)
     }
 
     suspend fun getUnitById(id: String): UnitResponse {
@@ -135,7 +147,7 @@ class InventoryService(private val repository: InventoryRepository) {
 
     suspend fun getProductById(id: String): ProductResponse {
         val uuid = parseInventoryUUID(id)
-        return repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
+        return repository.getProductByIdIncludingInactive(uuid) ?: throw NotFoundException("Produk tidak ditemukan")
     }
 
     suspend fun createProduct(request: ProductCreateRequest): ProductResponse {
@@ -175,6 +187,7 @@ class InventoryService(private val repository: InventoryRepository) {
             priceBuy = request.priceBuy,
             priceRetail = request.priceRetail,
             priceContractor = request.priceContractor,
+            discount = request.discount,
             minStock = request.minStock,
             photoFilename = request.photoFilename
         )
@@ -191,6 +204,18 @@ class InventoryService(private val repository: InventoryRepository) {
         repository.softDeleteProduct(uuid)
     }
 
+    suspend fun activateProduct(id: String): ProductResponse {
+        val uuid = parseInventoryUUID(id)
+        val product = repository.getProductByIdIncludingInactive(uuid)
+            ?: throw NotFoundException("Produk tidak ditemukan")
+
+        if (!product.isActive) {
+            repository.activateProduct(uuid)
+        }
+
+        return repository.getProductByIdIncludingInactive(uuid)!!
+    }
+
     // ==========================================
     // STOCK MANAGEMENT
     // ==========================================
@@ -200,6 +225,17 @@ class InventoryService(private val repository: InventoryRepository) {
         val safeLimit = if (limit < 1) 20 else limit
         val offset = (safePage - 1) * safeLimit
         return repository.getPaginatedStockDetail(safeLimit, offset, search)
+    }
+
+    suspend fun getStockAdjustments(
+        page: Int,
+        limit: Int,
+        search: String?,
+        type: String?
+    ): PaginatedResponse<StockAdjustmentResponse> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = if (limit < 1) 20 else limit.coerceAtMost(200)
+        return repository.getStockAdjustments(safePage, safeLimit, search, type)
     }
 
     suspend fun executeOpname(userId: String, request: StockOpnameRequest) {

@@ -1,0 +1,2 @@
+ALTER TABLE inventory.products
+ADD COLUMN discount DECIMAL(15,2) NOT NULL DEFAULT 0.00;

@@ -97,7 +97,15 @@ class SalesService(private val repository: SalesRepository) {
         }
     }
 
-    suspend fun getTransactions(page: Int, limit: Int, sessionId: String?): PaginatedResponse<TransactionSummary> {
+    suspend fun getTransactions(
+        page: Int,
+        limit: Int,
+        sessionId: String?,
+        search: String? = null,
+        status: String? = null,
+        startDate: String? = null,
+        endDate: String? = null
+    ): PaginatedResponse<TransactionSummary> {
         val safePage = if (page < 1) 1 else page
         val safeLimit = if (limit < 1) 20 else limit
         val sessionUuid = sessionId?.let {
@@ -105,6 +113,26 @@ class SalesService(private val repository: SalesRepository) {
                 throw ValidationException("Format Session ID tidak valid")
             }
         }
-        return repository.getPaginatedTransactions(safePage, safeLimit, sessionUuid)
+        return repository.getPaginatedTransactions(safePage, safeLimit, sessionUuid, search, status, startDate, endDate)
+    }
+
+    suspend fun getTransactionById(id: String): TransactionResponse {
+        val trxId = try { UUID.fromString(id) } catch (e: IllegalArgumentException) {
+            throw ValidationException("Format Transaction ID tidak valid")
+        }
+        return repository.getTransactionById(trxId)
+            ?: throw NotFoundException("Transaksi dengan ID $id tidak ditemukan")
+    }
+
+    suspend fun addExpense(userId: UUID, request: CashExpenseRequest): CashExpenseResponse {
+        return repository.addExpense(userId, request)
+    }
+
+    suspend fun getExpenses(sessionId: String): List<CashExpenseResponse> {
+        return repository.getExpenses(UUID.fromString(sessionId))
+    }
+
+    suspend fun payTransactionDebt(userId: UUID, transactionId: String, request: PayDebtRequest): TransactionResponse {
+        return repository.payTransactionDebt(userId, UUID.fromString(transactionId), request)
     }
 }

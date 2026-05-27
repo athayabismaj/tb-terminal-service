@@ -2,7 +2,7 @@ package com.service.tbterminal.inventory
 
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
-import org.jetbrains.exposed.sql.javatime.timestamp
+import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
 import org.postgresql.util.PGobject
 
 // ==========================================
@@ -12,7 +12,7 @@ import org.postgresql.util.PGobject
 object CategoriesTable : Table("inventory.categories") {
     val id = uuid("id").databaseGenerated()
     val name = varchar("name", 100)
-    val createdAt = timestamp("created_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
     
     override val primaryKey = PrimaryKey(id)
 }
@@ -21,7 +21,7 @@ object UnitsTable : Table("inventory.units") {
     val id = uuid("id").databaseGenerated()
     val name = varchar("name", 50)
     val symbol = varchar("symbol", 20)
-    val createdAt = timestamp("created_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -65,11 +65,12 @@ object ProductsTable : Table("inventory.products") {
     val priceBuy = decimal("price_buy", 15, 2)
     val priceRetail = decimal("price_retail", 15, 2)
     val priceContractor = decimal("price_contractor", 15, 2)
+    val discount = decimal("discount", 15, 2).default(java.math.BigDecimal.ZERO)
     val minStock = decimal("min_stock", 10, 2)
     val photoFilename = varchar("photo_filename", 255).nullable()
     val isActive = bool("is_active").default(true)
-    val createdAt = timestamp("created_at").databaseGenerated()
-    val updatedAt = timestamp("updated_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -79,7 +80,7 @@ object StockTable : Table("inventory.stock") {
     val productId = uuid("product_id").references(ProductsTable.id)
     val unitId = uuid("unit_id").references(UnitsTable.id)
     val quantity = decimal("quantity", 10, 2)
-    val updatedAt = timestamp("updated_at").databaseGenerated()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -94,6 +95,7 @@ data class ProductResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceBuy: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceRetail: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceContractor: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val minStock: java.math.BigDecimal,
     val photoFilename: String?,
     val isActive: Boolean
@@ -108,6 +110,7 @@ data class ProductCreateRequest(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceBuy: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceRetail: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceContractor: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val minStock: java.math.BigDecimal,
     val photoFilename: String? = null
 )
@@ -120,6 +123,7 @@ data class ProductUpdateRequest(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceBuy: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceRetail: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceContractor: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val minStock: java.math.BigDecimal,
     val photoFilename: String? = null
 )
@@ -163,7 +167,7 @@ object StockAdjustmentsTable : Table("inventory.stock_adjustments") {
     val qtyBefore = decimal("qty_before", 10, 2)
     val qtyAfter = decimal("qty_after", 10, 2)
     val reason = text("reason")
-    val createdAt = timestamp("created_at").databaseGenerated()
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -179,6 +183,7 @@ object VStockDetailView : Table("inventory.v_stock_detail") {
     val priceBuy = decimal("price_buy", 15, 2)
     val priceRetail = decimal("price_retail", 15, 2)
     val priceContractor = decimal("price_contractor", 15, 2)
+    val discount = decimal("discount", 15, 2).default(java.math.BigDecimal.ZERO)
     val isActive = bool("is_active")
 }
 
@@ -194,7 +199,26 @@ data class StockDetailResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceBuy: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceRetail: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceContractor: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     val isActive: Boolean
+)
+
+@Serializable
+data class StockAdjustmentResponse(
+    val id: String,
+    val productId: String,
+    val sku: String,
+    val productName: String,
+    val categoryName: String,
+    val unitName: String,
+    val adjustmentType: String,
+    val adjustmentTypeLabel: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val qtyBefore: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val qtyAfter: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val difference: java.math.BigDecimal,
+    val reason: String,
+    val userId: String,
+    val createdAt: String
 )
 
 @Serializable

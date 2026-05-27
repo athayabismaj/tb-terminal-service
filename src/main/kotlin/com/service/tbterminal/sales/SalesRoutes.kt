@@ -53,6 +53,22 @@ fun Application.salesRoutes() {
                         val session = service.closeSession(userId, request)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(session, "Sesi kasir berhasil ditutup"))
                     }
+
+                    // POST catat pengeluaran kasir
+                    post("/expenses") {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val userId = call.getUserId()
+                        val request = call.receive<CashExpenseRequest>()
+                        val expense = service.addExpense(userId, request)
+                        call.respond(HttpStatusCode.Created, ApiResponse.success(expense, "Pengeluaran berhasil dicatat"))
+                    }
+
+                    // GET daftar pengeluaran kasir per sesi
+                    get("/{sessionId}/expenses") {
+                        val sessionId = call.parameters["sessionId"] ?: throw IllegalArgumentException("Missing sessionId")
+                        val expenses = service.getExpenses(sessionId)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(expenses))
+                    }
                 }
 
                 // ==========================================
@@ -74,9 +90,38 @@ fun Application.salesRoutes() {
                     val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                     val sessionId = call.request.queryParameters["sessionId"]
+                    val search = call.request.queryParameters["search"]
+                    val status = call.request.queryParameters["status"]
+                    val startDate = call.request.queryParameters["startDate"]
+                    val endDate = call.request.queryParameters["endDate"]
 
-                    val transactions = service.getTransactions(page, limit, sessionId)
+                    val transactions = service.getTransactions(page, limit, sessionId, search, status, startDate, endDate)
                     call.respond(HttpStatusCode.OK, ApiResponse.success(transactions))
+                }
+
+                get("/transactions/{id}") {
+                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                    val id = call.parameters["id"] ?: return@get call.respond(
+                        HttpStatusCode.BadRequest,
+                        ApiResponse.error<Unit>("ID Transaksi harus diisi")
+                    )
+                    
+                    val transaction = service.getTransactionById(id)
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(transaction))
+                }
+
+                // POST pelunasan piutang (bayar hutang transaksi)
+                post("/transactions/{id}/pay") {
+                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                    val id = call.parameters["id"] ?: return@post call.respond(
+                        HttpStatusCode.BadRequest,
+                        ApiResponse.error<Unit>("ID Transaksi harus diisi")
+                    )
+                    val userId = call.getUserId()
+                    val request = call.receive<PayDebtRequest>()
+                    
+                    val transaction = service.payTransactionDebt(userId, id, request)
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(transaction, "Pembayaran berhasil dicatat"))
                 }
             }
         }

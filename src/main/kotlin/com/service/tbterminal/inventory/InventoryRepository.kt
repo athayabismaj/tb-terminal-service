@@ -5,6 +5,7 @@ import java.util.UUID
 
 interface InventoryRepository {
     suspend fun getAllCategories(): List<CategoryResponse>
+    suspend fun getCategories(page: Int, limit: Int, search: String?): PaginatedResponse<CategoryResponse>
     suspend fun getCategoryById(id: UUID): CategoryResponse?
     suspend fun getCategoryByName(name: String): CategoryResponse?
     suspend fun createCategory(name: String): UUID
@@ -12,6 +13,7 @@ interface InventoryRepository {
     suspend fun deleteCategory(id: UUID): Boolean
 
     suspend fun getAllUnits(): List<UnitResponse>
+    suspend fun getUnits(page: Int, limit: Int, search: String?): PaginatedResponse<UnitResponse>
     suspend fun getUnitById(id: UUID): UnitResponse?
     suspend fun getUnitByNameOrSymbol(name: String, symbol: String): UnitResponse?
     suspend fun createUnit(name: String, symbol: String): UUID
@@ -20,6 +22,7 @@ interface InventoryRepository {
 
     suspend fun getProducts(page: Int, limit: Int, search: String?): PaginatedResponse<ProductResponse>
     suspend fun getProductById(id: UUID): ProductResponse?
+    suspend fun getProductByIdIncludingInactive(id: UUID): ProductResponse?
     suspend fun getProductBySku(sku: String, includeInactive: Boolean = false): ProductResponse?
     suspend fun createProductAndInitStock(
         categoryId: UUID,
@@ -29,6 +32,7 @@ interface InventoryRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
     ): UUID
@@ -41,6 +45,7 @@ interface InventoryRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
     ): Boolean
@@ -53,16 +58,25 @@ interface InventoryRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
     ): Boolean
 
     suspend fun softDeleteProduct(id: UUID): Boolean
+    suspend fun activateProduct(id: UUID): Boolean
     suspend fun getPaginatedStockDetail(
         limit: Int,
         offset: Int,
         search: String?
     ): PaginatedResponse<StockDetailResponse>
+
+    suspend fun getStockAdjustments(
+        page: Int,
+        limit: Int,
+        search: String?,
+        type: String?
+    ): PaginatedResponse<StockAdjustmentResponse>
 
     suspend fun getCurrentStockForUpdate(productId: UUID): BigDecimal?
     suspend fun executeOpname(
@@ -82,6 +96,9 @@ class InventoryRepositoryImpl : InventoryRepository {
     private val units = InventoryUnitRepository()
 
     override suspend fun getAllCategories() = categories.getAllCategories()
+    override suspend fun getCategories(page: Int, limit: Int, search: String?) =
+        categories.getCategories(limit = limit, offset = (page - 1) * limit, search = search)
+
     override suspend fun getCategoryById(id: UUID) = categories.getCategoryById(id)
     override suspend fun getCategoryByName(name: String) = categories.getCategoryByName(name)
     override suspend fun createCategory(name: String) = categories.createCategory(name)
@@ -89,6 +106,9 @@ class InventoryRepositoryImpl : InventoryRepository {
     override suspend fun deleteCategory(id: UUID) = categories.deleteCategory(id)
 
     override suspend fun getAllUnits() = units.getAllUnits()
+    override suspend fun getUnits(page: Int, limit: Int, search: String?) =
+        units.getUnits(limit = limit, offset = (page - 1) * limit, search = search)
+
     override suspend fun getUnitById(id: UUID) = units.getUnitById(id)
     override suspend fun getUnitByNameOrSymbol(name: String, symbol: String) = units.getByNameOrSymbol(name, symbol)
     override suspend fun createUnit(name: String, symbol: String) = units.createUnit(name, symbol)
@@ -97,6 +117,7 @@ class InventoryRepositoryImpl : InventoryRepository {
 
     override suspend fun getProducts(page: Int, limit: Int, search: String?) = products.getProducts(page, limit, search)
     override suspend fun getProductById(id: UUID) = products.getProductById(id)
+    override suspend fun getProductByIdIncludingInactive(id: UUID) = products.getProductByIdIncludingInactive(id)
     override suspend fun getProductBySku(sku: String, includeInactive: Boolean) = products.getBySku(sku, includeInactive)
 
     override suspend fun createProductAndInitStock(
@@ -107,9 +128,10 @@ class InventoryRepositoryImpl : InventoryRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
-    ) = products.createProductAndInitStock(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, minStock, photoFilename)
+    ) = products.createProductAndInitStock(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
 
     override suspend fun updateProduct(
         id: UUID,
@@ -119,9 +141,10 @@ class InventoryRepositoryImpl : InventoryRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
-    ) = products.updateProduct(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, minStock, photoFilename)
+    ) = products.updateProduct(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
 
     override suspend fun restoreProductAndOverwrite(
         id: UUID,
@@ -131,13 +154,18 @@ class InventoryRepositoryImpl : InventoryRepository {
         priceBuy: BigDecimal,
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
+        discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
-    ) = products.restoreProductAndOverwrite(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, minStock, photoFilename)
+    ) = products.restoreProductAndOverwrite(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
 
     override suspend fun softDeleteProduct(id: UUID) = products.softDeleteProduct(id)
+    override suspend fun activateProduct(id: UUID) = products.activateProduct(id)
     override suspend fun getPaginatedStockDetail(limit: Int, offset: Int, search: String?) =
         stock.getPaginatedStockDetail(limit, offset, search)
+
+    override suspend fun getStockAdjustments(page: Int, limit: Int, search: String?, type: String?) =
+        stock.getStockAdjustments(page = page, limit = limit, search = search, type = type)
 
     override suspend fun getCurrentStockForUpdate(productId: UUID) = stock.getCurrentStockForUpdate(productId)
     override suspend fun executeOpname(
@@ -149,3 +177,4 @@ class InventoryRepositoryImpl : InventoryRepository {
         notes: String?
     ) = stock.executeOpname(productId, oldQty, newQty, userId, adjType, notes)
 }
+

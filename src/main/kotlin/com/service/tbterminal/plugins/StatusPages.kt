@@ -82,7 +82,11 @@ fun Application.configureStatusPages() {
                     call.application.log.error("Unhandled database exception", cause)
                     call.respond(
                         HttpStatusCode.InternalServerError,
-                        ErrorResponse("INTERNAL_SERVER_ERROR", "Terjadi kesalahan pada server")
+                        ErrorResponse(
+                            code = "INTERNAL_SERVER_ERROR",
+                            message = "Terjadi kesalahan pada server",
+                            details = call.application.developmentErrorDetails(cause)
+                        )
                     )
                 }
             }
@@ -91,8 +95,23 @@ fun Application.configureStatusPages() {
             call.application.log.error("Unhandled exception", cause)
             call.respond(
                 HttpStatusCode.InternalServerError,
-                ErrorResponse("INTERNAL_SERVER_ERROR", "Terjadi kesalahan pada server")
+                ErrorResponse(
+                    code = "INTERNAL_SERVER_ERROR",
+                    message = "Terjadi kesalahan pada server",
+                    details = call.application.developmentErrorDetails(cause)
+                )
             )
+        }
+    }
+}
+
+private fun Application.developmentErrorDetails(cause: Throwable): String? {
+    if (!developmentMode) return null
+    return buildString {
+        append(cause::class.qualifiedName ?: cause::class.simpleName ?: "Throwable")
+        cause.message?.let { message ->
+            append(": ")
+            append(message)
         }
     }
 }
