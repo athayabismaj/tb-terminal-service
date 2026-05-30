@@ -41,6 +41,7 @@ interface PurchasingRepository {
         page: Int, limit: Int, supplierId: UUID?, status: PayableStatus?
     ): PaginatedResponse<PayableResponse>
     suspend fun getPayableById(id: UUID): PayableResponse?
+    suspend fun getPayableByPurchaseId(purchaseId: UUID): PayableResponse?
     suspend fun getPayableForUpdate(id: UUID): PayableForUpdateRow?
 
     // Supplier Payments
@@ -382,6 +383,29 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     override suspend fun getPayableById(id: UUID): PayableResponse? = transaction {
         SupplierPayablesTable.innerJoin(SuppliersTable)
             .select { SupplierPayablesTable.id eq id }
+            .singleOrNull()?.let { row ->
+                val amount = row[SupplierPayablesTable.amount]
+                val paidAmount = row[SupplierPayablesTable.paidAmount]
+                PayableResponse(
+                    id = row[SupplierPayablesTable.id].toString(),
+                    supplierId = row[SupplierPayablesTable.supplierId].toString(),
+                    supplierName = row[SuppliersTable.name],
+                    purchaseId = row[SupplierPayablesTable.purchaseId].toString(),
+                    amount = amount,
+                    paidAmount = paidAmount,
+                    remainingAmount = amount.subtract(paidAmount),
+                    dueDate = row[SupplierPayablesTable.dueDate].toString(),
+                    status = row[SupplierPayablesTable.status].dbValue,
+                    createdAt = row[SupplierPayablesTable.createdAt].toString()
+                )
+            }
+    }
+
+    override suspend fun getPayableByPurchaseId(purchaseId: UUID): PayableResponse? = transaction {
+        SupplierPayablesTable.innerJoin(SuppliersTable)
+            .select { SupplierPayablesTable.purchaseId eq purchaseId }
+            .orderBy(SupplierPayablesTable.createdAt, SortOrder.DESC)
+            .limit(1)
             .singleOrNull()?.let { row ->
                 val amount = row[SupplierPayablesTable.amount]
                 val paidAmount = row[SupplierPayablesTable.paidAmount]

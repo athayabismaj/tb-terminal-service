@@ -205,6 +205,11 @@ class PurchasingService(
             ?: throw NotFoundException("Data hutang tidak ditemukan")
     }
 
+    suspend fun getPayableByPurchaseId(purchaseId: String): PayableResponse? {
+        val uuid = parseUUID(purchaseId)
+        return repository.getPayableByPurchaseId(uuid)
+    }
+
     // ==========================================
     // SUPPLIER PAYMENT ENGINE
     // ==========================================
@@ -296,4 +301,3 @@ class PurchasingService(
         }
     }
 }
-
