@@ -79,3 +79,70 @@ data class DashboardMetrics(
     val lowStockCount: Long,
     val lowStockItems: List<StockLowSummary>
 )
+
+@Serializable
+data class SalesReportResponse(
+    val range: SalesReportRange,
+    val totals: SalesReportTotals,
+    val paymentMethods: List<PaymentMethodSummary>,
+    val transactionStatuses: List<TransactionStatusSummary>,
+    val topProducts: List<TopProductSalesSummary>,
+    val cashiers: List<CashierSalesSummary>,
+    val receivables: SalesReceivableSummary
+)
+
+@Serializable
+data class SalesReportRange(
+    val startDate: String,
+    val endDate: String
+)
+
+@Serializable
+data class SalesReportTotals(
+    val transactionCount: Long,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossRevenue: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val paidAmount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val outstandingAmount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossProfit: java.math.BigDecimal
+)
+
+@Serializable
+data class PaymentMethodSummary(
+    val method: String,
+    val paymentCount: Long,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val amount: java.math.BigDecimal
+)
+
+@Serializable
+data class TransactionStatusSummary(
+    val status: String,
+    val transactionCount: Long,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val revenue: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val paidAmount: java.math.BigDecimal
+)
+
+@Serializable
+data class TopProductSalesSummary(
+    val productId: String,
+    val productName: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val qtySold: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val revenue: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossProfit: java.math.BigDecimal
+)
+
+@Serializable
+data class CashierSalesSummary(
+    val userId: String,
+    val cashierName: String,
+    val transactionCount: Long,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val revenue: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossProfit: java.math.BigDecimal
+)
+
+@Serializable
+data class SalesReceivableSummary(
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val createdReceivableAmount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val paidAmount: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val remainingAmount: java.math.BigDecimal,
+    val receivableCount: Long
+)
