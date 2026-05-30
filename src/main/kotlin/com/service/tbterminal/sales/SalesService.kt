@@ -124,6 +124,13 @@ class SalesService(private val repository: SalesRepository) {
             ?: throw NotFoundException("Transaksi dengan ID $id tidak ditemukan")
     }
 
+    suspend fun getReceivableIdByTransactionId(transactionId: String): String? {
+        val trxId = try { UUID.fromString(transactionId) } catch (e: IllegalArgumentException) {
+            throw ValidationException("Format Transaction ID tidak valid")
+        }
+        return repository.getReceivableIdByTransactionId(trxId)?.toString()
+    }
+
     suspend fun addExpense(userId: UUID, request: CashExpenseRequest): CashExpenseResponse {
         return repository.addExpense(userId, request)
     }

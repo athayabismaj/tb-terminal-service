@@ -4,16 +4,22 @@ import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.system.AuditAction
+import com.service.tbterminal.system.SystemService
+import com.service.tbterminal.system.recordOperationalAudit
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.CancellationException
 import org.koin.ktor.ext.inject
+import java.util.UUID
 
 fun Application.salesRoutes() {
     val service by inject<SalesService>()
+    val systemService by inject<SystemService>()
 
     routing {
         authenticate("jwt-auth") {
@@ -42,6 +48,14 @@ fun Application.salesRoutes() {
                         val userId = call.getUserId()
                         val request = call.receive<OpenSessionRequest>()
                         val session = service.openSession(userId, request)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = userId,
+                            action = AuditAction.INSERT,
+                            schemaName = "sales",
+                            tableName = "cash_sessions",
+                            recordId = session.id
+                        )
                         call.respond(HttpStatusCode.Created, ApiResponse.success(session, "Sesi kasir berhasil dibuka"))
                     }
 
@@ -51,6 +65,14 @@ fun Application.salesRoutes() {
                         val userId = call.getUserId()
                         val request = call.receive<CloseSessionRequest>()
                         val session = service.closeSession(userId, request)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = userId,
+                            action = AuditAction.UPDATE,
+                            schemaName = "sales",
+                            tableName = "cash_sessions",
+                            recordId = session.id
+                        )
                         call.respond(HttpStatusCode.OK, ApiResponse.success(session, "Sesi kasir berhasil ditutup"))
                     }
 
@@ -60,6 +82,14 @@ fun Application.salesRoutes() {
                         val userId = call.getUserId()
                         val request = call.receive<CashExpenseRequest>()
                         val expense = service.addExpense(userId, request)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = userId,
+                            action = AuditAction.INSERT,
+                            schemaName = "sales",
+                            tableName = "cash_expenses",
+                            recordId = expense.id
+                        )
                         call.respond(HttpStatusCode.Created, ApiResponse.success(expense, "Pengeluaran berhasil dicatat"))
                     }
 
@@ -81,6 +111,21 @@ fun Application.salesRoutes() {
                     val userId = call.getUserId()
                     val request = call.receive<CheckoutRequest>()
                     val transaction = service.checkout(userId, request)
+                    systemService.recordOperationalAudit(
+                        call = call,
+                        actorUserId = userId,
+                        action = AuditAction.INSERT,
+                        schemaName = "sales",
+                        tableName = "transactions",
+                        recordId = transaction.id
+                    )
+                    recordCheckoutReceivableAudit(
+                        call = call,
+                        service = service,
+                        systemService = systemService,
+                        actorUserId = userId,
+                        transactionId = transaction.id
+                    )
                     call.respond(HttpStatusCode.Created, ApiResponse.success(transaction, "Transaksi berhasil diproses"))
                 }
 
@@ -121,9 +166,72 @@ fun Application.salesRoutes() {
                     val request = call.receive<PayDebtRequest>()
                     
                     val transaction = service.payTransactionDebt(userId, id, request)
+                    systemService.recordOperationalAudit(
+                        call = call,
+                        actorUserId = userId,
+                        action = AuditAction.UPDATE,
+                        schemaName = "sales",
+                        tableName = "transactions",
+                        recordId = transaction.id
+                    )
+                    recordTransactionDebtPaymentReceivableAudit(
+                        call = call,
+                        service = service,
+                        systemService = systemService,
+                        actorUserId = userId,
+                        transactionId = transaction.id
+                    )
                     call.respond(HttpStatusCode.OK, ApiResponse.success(transaction, "Pembayaran berhasil dicatat"))
                 }
             }
         }
+    }
+}
+
+private suspend fun recordCheckoutReceivableAudit(
+    call: ApplicationCall,
+    service: SalesService,
+    systemService: SystemService,
+    actorUserId: UUID,
+    transactionId: String
+) {
+    try {
+        val receivableId = service.getReceivableIdByTransactionId(transactionId) ?: return
+        systemService.recordOperationalAudit(
+            call = call,
+            actorUserId = actorUserId,
+            action = AuditAction.INSERT,
+            schemaName = "receivable",
+            tableName = "receivables",
+            recordId = receivableId
+        )
+    } catch (cause: CancellationException) {
+        throw cause
+    } catch (cause: Exception) {
+        call.application.log.error("Checkout receivable audit lookup failed: transactionId=$transactionId", cause)
+    }
+}
+
+private suspend fun recordTransactionDebtPaymentReceivableAudit(
+    call: ApplicationCall,
+    service: SalesService,
+    systemService: SystemService,
+    actorUserId: UUID,
+    transactionId: String
+) {
+    try {
+        val receivableId = service.getReceivableIdByTransactionId(transactionId) ?: return
+        systemService.recordOperationalAudit(
+            call = call,
+            actorUserId = actorUserId,
+            action = AuditAction.UPDATE,
+            schemaName = "receivable",
+            tableName = "receivables",
+            recordId = receivableId
+        )
+    } catch (cause: CancellationException) {
+        throw cause
+    } catch (cause: Exception) {
+        call.application.log.error("Transaction debt receivable audit lookup failed: transactionId=$transactionId", cause)
     }
 }

@@ -51,6 +51,7 @@ interface SalesRepository {
     ): com.service.tbterminal.inventory.PaginatedResponse<TransactionSummary>
 
     suspend fun getTransactionById(id: UUID): TransactionResponse?
+    suspend fun getReceivableIdByTransactionId(transactionId: UUID): UUID?
 
     // KAS HARIAN (PETTY CASH)
     suspend fun addExpense(userId: UUID, request: CashExpenseRequest): CashExpenseResponse
@@ -467,6 +468,13 @@ class SalesRepositoryImpl : SalesRepository {
         )
     }
 
+    override suspend fun getReceivableIdByTransactionId(transactionId: UUID): UUID? = transaction {
+        ReceivablesTable
+            .select { ReceivablesTable.transactionId eq transactionId }
+            .singleOrNull()
+            ?.get(ReceivablesTable.id)
+    }
+
     override suspend fun getPaginatedTransactions(
         page: Int,
         limit: Int,
@@ -499,14 +507,22 @@ class SalesRepositoryImpl : SalesRepository {
         
         if (!startDate.isNullOrBlank()) {
             try {
-                val sd = java.time.LocalDate.parse(startDate).atStartOfDay(java.time.ZoneId.of("Asia/Jakarta")).toOffsetDateTime()
+                val sd = try {
+                    java.time.OffsetDateTime.parse(startDate)
+                } catch (e: Exception) {
+                    java.time.LocalDate.parse(startDate).atStartOfDay(java.time.ZoneId.systemDefault()).toOffsetDateTime()
+                }
                 query = query.andWhere { TransactionsTable.createdAt greaterEq sd }
             } catch (e: Exception) {}
         }
         
         if (!endDate.isNullOrBlank()) {
             try {
-                val ed = java.time.LocalDate.parse(endDate).plusDays(1).atStartOfDay(java.time.ZoneId.of("Asia/Jakarta")).toOffsetDateTime()
+                val ed = try {
+                    java.time.OffsetDateTime.parse(endDate)
+                } catch (e: Exception) {
+                    java.time.LocalDate.parse(endDate).plusDays(1).atStartOfDay(java.time.ZoneId.systemDefault()).toOffsetDateTime()
+                }
                 query = query.andWhere { TransactionsTable.createdAt less ed }
             } catch (e: Exception) {}
         }
