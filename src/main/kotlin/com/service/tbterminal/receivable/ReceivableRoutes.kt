@@ -5,6 +5,9 @@ import com.service.tbterminal.shared.ErrorResponse
 import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.system.AuditAction
+import com.service.tbterminal.system.SystemService
+import com.service.tbterminal.system.recordOperationalAudit
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
@@ -15,6 +18,7 @@ import org.koin.ktor.ext.inject
 
 fun Application.receivableRoutes() {
     val service by inject<ReceivableService>()
+    val systemService by inject<SystemService>()
 
     routing {
         authenticate("jwt-auth") {
@@ -51,33 +55,60 @@ fun Application.receivableRoutes() {
                     // POST buat pelanggan baru — hanya ADMIN/OWNER
                     post {
                         call.requireRole(Role.ADMIN, Role.OWNER)
+                        val actorUserId = call.getUserId()
                         val request = call.receive<CustomerRequest>()
                         val customer = service.createCustomer(request)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = actorUserId,
+                            action = AuditAction.INSERT,
+                            schemaName = "receivable",
+                            tableName = "customers",
+                            recordId = customer.id
+                        )
                         call.respond(HttpStatusCode.Created, ApiResponse.success(customer, "Pelanggan berhasil ditambahkan"))
                     }
 
                     // PUT update pelanggan — hanya ADMIN/OWNER
                     put("/{id}") {
                         call.requireRole(Role.ADMIN, Role.OWNER)
+                        val actorUserId = call.getUserId()
                         val id = call.parameters["id"]
                             ?: return@put call.respond(
                                 HttpStatusCode.BadRequest,
                                 ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
-                            )
+                        )
                         val request = call.receive<CustomerRequest>()
                         val customer = service.updateCustomer(id, request)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = actorUserId,
+                            action = AuditAction.UPDATE,
+                            schemaName = "receivable",
+                            tableName = "customers",
+                            recordId = customer.id
+                        )
                         call.respond(HttpStatusCode.OK, ApiResponse.success(customer, "Pelanggan berhasil diperbarui"))
                     }
 
                     // DELETE soft delete pelanggan — hanya ADMIN/OWNER
                     delete("/{id}") {
                         call.requireRole(Role.ADMIN, Role.OWNER)
+                        val actorUserId = call.getUserId()
                         val id = call.parameters["id"]
                             ?: return@delete call.respond(
                                 HttpStatusCode.BadRequest,
                                 ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
                             )
                         service.deleteCustomer(id)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = actorUserId,
+                            action = AuditAction.DELETE,
+                            schemaName = "receivable",
+                            tableName = "customers",
+                            recordId = id
+                        )
                         call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Pelanggan berhasil dihapus"))
                     }
                 }
@@ -123,6 +154,22 @@ fun Application.receivableRoutes() {
                         val userId = call.getUserId()
                         val request = call.receive<PaymentRequest>()
                         val payment = service.pay(userId, request)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = userId,
+                            action = AuditAction.INSERT,
+                            schemaName = "receivable",
+                            tableName = "receivable_payments",
+                            recordId = payment.id
+                        )
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = userId,
+                            action = AuditAction.UPDATE,
+                            schemaName = "receivable",
+                            tableName = "receivables",
+                            recordId = payment.receivableId
+                        )
                         call.respond(HttpStatusCode.Created, ApiResponse.success(payment, "Pembayaran berhasil dicatat"))
                     }
                 }
