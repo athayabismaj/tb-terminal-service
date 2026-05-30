@@ -2,7 +2,11 @@ package com.service.tbterminal.inventory
 
 import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.Role
+import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.system.AuditAction
+import com.service.tbterminal.system.SystemService
+import com.service.tbterminal.system.recordOperationalAudit
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
@@ -13,7 +17,7 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 
-internal fun Route.categoryRoutes(service: InventoryService) {
+internal fun Route.categoryRoutes(service: InventoryService, systemService: SystemService) {
     route("/categories") {
         get {
             val page = call.request.queryParameters["page"]?.toIntOrNull()
@@ -37,21 +41,48 @@ internal fun Route.categoryRoutes(service: InventoryService) {
 
         post {
             call.requireRole(Role.OWNER, Role.ADMIN)
+            val actorUserId = call.getUserId()
             val category = service.createCategory(call.receive())
+            systemService.recordOperationalAudit(
+                call = call,
+                actorUserId = actorUserId,
+                action = AuditAction.INSERT,
+                schemaName = "inventory",
+                tableName = "categories",
+                recordId = category.id
+            )
             call.respond(HttpStatusCode.Created, ApiResponse.success(category, "Kategori berhasil ditambahkan"))
         }
 
         put("/{id}") {
             call.requireRole(Role.OWNER, Role.ADMIN)
             val id = call.parameters["id"] ?: return@put call.respond(HttpStatusCode.BadRequest)
+            val actorUserId = call.getUserId()
             val category = service.updateCategory(id, call.receive())
+            systemService.recordOperationalAudit(
+                call = call,
+                actorUserId = actorUserId,
+                action = AuditAction.UPDATE,
+                schemaName = "inventory",
+                tableName = "categories",
+                recordId = category.id
+            )
             call.respond(HttpStatusCode.OK, ApiResponse.success(category, "Kategori berhasil diperbarui"))
         }
 
         delete("/{id}") {
             call.requireRole(Role.OWNER, Role.ADMIN)
             val id = call.parameters["id"] ?: return@delete call.respond(HttpStatusCode.BadRequest)
+            val actorUserId = call.getUserId()
             service.deleteCategory(id)
+            systemService.recordOperationalAudit(
+                call = call,
+                actorUserId = actorUserId,
+                action = AuditAction.DELETE,
+                schemaName = "inventory",
+                tableName = "categories",
+                recordId = id
+            )
             call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Kategori berhasil dihapus"))
         }
     }
