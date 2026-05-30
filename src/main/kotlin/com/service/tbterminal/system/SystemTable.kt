@@ -1,5 +1,6 @@
 package com.service.tbterminal.system
 
+import com.service.tbterminal.shared.jsonb
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
 import org.postgresql.util.PGobject
@@ -50,6 +51,8 @@ object AuditLogsTable : Table("system.audit_logs") {
     val targetSchemaName = varchar("schema_name", 50)
     val targetTableName = varchar("table_name", 100)
     val recordId = uuid("record_id").nullable()
+    val oldData = jsonb("old_data").nullable()
+    val newData = jsonb("new_data").nullable()
     val ipAddress = varchar("ip_address", 45).nullable()
     val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
 

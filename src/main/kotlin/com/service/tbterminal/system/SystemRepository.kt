@@ -251,6 +251,8 @@ class SystemRepository {
                 tableName = tableName,
                 recordId = row[AuditLogsTable.recordId]?.toString(),
                 ipAddress = row[AuditLogsTable.ipAddress],
+                oldData = row[AuditLogsTable.oldData],
+                newData = row[AuditLogsTable.newData],
                 activityLabel = action.toActivityLabel(tableName),
                 createdAt = row[AuditLogsTable.createdAt].toString()
             )
@@ -379,6 +381,10 @@ private fun AuditAction.toActivityLabel(tableName: String): String {
         "user_pin" -> return "Ubah PIN"
         "user_password" -> return "Ubah Password"
         "user_credentials" -> return "Ubah Kredensial"
+        "products_price" -> return "Ubah Harga Produk"
+        "stock_opname" -> return "Stok Opname"
+        "stock_correction" -> return "Koreksi Stok"
+        "stock_damage" -> return "Retur/Rusak Stok"
     }
 
     return when (this) {
@@ -396,9 +402,22 @@ private fun String.toDomainLabel(): String {
         "user_credentials" -> "Kredensial"
         "store_settings" -> "Pengaturan Toko"
         "products" -> "Produk"
+        "products_price" -> "Harga Produk"
         "categories" -> "Kategori"
+        "units" -> "Satuan"
+        "stock_opname" -> "Stok Opname"
+        "stock_correction" -> "Koreksi Stok"
+        "stock_damage" -> "Retur/Rusak Stok"
+        "purchases" -> "Barang Masuk"
+        "supplier_payables" -> "Utang Supplier"
+        "supplier_payments" -> "Pembayaran Utang Supplier"
         "customers" -> "Pelanggan"
+        "receivables" -> "Piutang"
+        "receivable_payments" -> "Pembayaran Piutang"
         "suppliers" -> "Supplier"
+        "cash_sessions" -> "Kas Harian"
+        "cash_expenses" -> "Pengeluaran Kas"
+        "transactions" -> "Transaksi"
         else -> replace('_', ' ').replaceFirstChar { first -> first.titlecase() }
     }
 }

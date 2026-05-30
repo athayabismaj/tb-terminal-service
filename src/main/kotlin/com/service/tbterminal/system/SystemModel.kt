@@ -126,6 +126,8 @@ data class AuditLogResponse(
     val tableName: String,
     val recordId: String? = null,
     val ipAddress: String? = null,
+    val oldData: String? = null,
+    val newData: String? = null,
     val activityLabel: String,
     val createdAt: String
 )
