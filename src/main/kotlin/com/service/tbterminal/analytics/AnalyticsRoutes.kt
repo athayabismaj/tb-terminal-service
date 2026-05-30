@@ -40,6 +40,23 @@ fun Application.analyticsRoutes() {
                     val sales = service.getDailySales(startDate, endDate)
                     call.respond(HttpStatusCode.OK, ApiResponse.success(sales))
                 }
+
+                // ==========================================
+                // SALES REPORT AGGREGATE
+                // ==========================================
+                get("/sales/report") {
+                    // MUTLAK: Hanya ADMIN dan OWNER
+                    call.requireRole(Role.ADMIN, Role.OWNER)
+
+                    val report = service.getSalesReport(
+                        startDateStr = call.request.queryParameters["startDate"],
+                        endDateStr = call.request.queryParameters["endDate"],
+                        cashierIdStr = call.request.queryParameters["cashierId"],
+                        sessionIdStr = call.request.queryParameters["sessionId"],
+                        topProductsLimitStr = call.request.queryParameters["topProductsLimit"]
+                    )
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(report))
+                }
             }
         }
     }
