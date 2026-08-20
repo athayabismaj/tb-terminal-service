@@ -4,6 +4,9 @@ import com.service.tbterminal.inventory.PaginatedResponse
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.ValidationException
 import org.jetbrains.exposed.exceptions.ExposedSQLException
+import java.math.BigDecimal
+import java.time.LocalDate
+import java.time.format.DateTimeParseException
 import java.util.UUID
 
 class ReceivableService(private val repository: ReceivableRepository) {
@@ -93,20 +96,34 @@ class ReceivableService(private val repository: ReceivableRepository) {
     // ==========================================
 
     suspend fun getReceivables(
-        page: Int, limit: Int, customerId: String?, status: String?
+        page: Int, limit: Int, customerId: String?, status: String?,
+        dueFilter: String?, dueFrom: String?, dueTo: String?
     ): PaginatedResponse<ReceivableResponse> {
         val safePage = if (page < 1) 1 else page
-        val safeLimit = if (limit < 1) 20 else limit
+        val safeLimit = limit.coerceIn(1, 100)
 
         val customerUuid = customerId?.let { parseUUID(it) }
         val receivableStatus = status?.let {
-            ReceivableStatus.entries.firstOrNull { e -> e.dbValue == it.lowercase() }
+            ReceivableStatus.entries.firstOrNull { e ->
+                e.name.equals(it, ignoreCase = true) || e.dbValue.equals(it, ignoreCase = true)
+            }
                 ?: throw ValidationException(
-                    "Status '$it' tidak valid. Gunakan: belum_lunas, sebagian, atau lunas"
+                    "Status '$it' tidak valid. Gunakan: UNPAID, PARTIAL, atau PAID"
                 )
         }
+        val parsedDueFilter = dueFilter?.let {
+            ReceivableDueFilter.entries.firstOrNull { value -> value.name.equals(it, ignoreCase = true) }
+                ?: throw ValidationException("Filter jatuh tempo tidak valid")
+        } ?: ReceivableDueFilter.ALL
+        val fromDate = dueFrom?.let { parseDate(it, "dueFrom") }
+        val toDate = dueTo?.let { parseDate(it, "dueTo") }
+        if (fromDate != null && toDate != null && fromDate > toDate) {
+            throw ValidationException("dueFrom tidak boleh setelah dueTo")
+        }
 
-        return repository.getPaginatedReceivables(safePage, safeLimit, customerUuid, receivableStatus)
+        return repository.getPaginatedReceivables(
+            safePage, safeLimit, customerUuid, receivableStatus, parsedDueFilter, fromDate, toDate
+        )
     }
 
     suspend fun getReceivableById(id: String): ReceivableResponse {
@@ -115,73 +132,110 @@ class ReceivableService(private val repository: ReceivableRepository) {
             ?: throw NotFoundException("Piutang tidak ditemukan")
     }
 
+    suspend fun createStandaloneReceivable(
+        userId: UUID,
+        request: CreateStandaloneReceivableRequest
+    ): ReceivableResponse {
+        val validated = validateStandaloneReceivableRequest(request)
+
+        return repository.createStandaloneReceivable(
+            userId = userId,
+            customerId = parseUUID(request.customerId),
+            amount = validated.amount,
+            debtDate = validated.debtDate,
+            dueDate = validated.dueDate,
+            legacyInvoiceNumber = validated.legacyInvoiceNumber,
+            source = validated.source,
+            notes = validated.notes
+        )
+    }
+
+    suspend fun getCustomerSummaries(
+        page: Int,
+        limit: Int,
+        dueFilter: String?
+    ): PaginatedResponse<CustomerReceivableSummaryResponse> {
+        val parsedDueFilter = dueFilter?.let {
+            ReceivableDueFilter.entries.firstOrNull { value -> value.name.equals(it, ignoreCase = true) }
+                ?: throw ValidationException("Filter jatuh tempo tidak valid")
+        } ?: ReceivableDueFilter.ALL
+        return repository.getCustomerSummaries(page.coerceAtLeast(1), limit.coerceIn(1, 100), parsedDueFilter)
+    }
+
     // ==========================================
     // PAYMENT ENGINE
     // ==========================================
 
+    suspend fun getPayments(
+        page: Int,
+        limit: Int,
+        receivableId: String? = null,
+        customerId: String? = null,
+        method: String? = null,
+        userId: String? = null,
+        customerSearch: String? = null,
+        receiverSearch: String? = null,
+        status: String? = null,
+        dateFrom: String? = null,
+        dateTo: String? = null
+    ): PaginatedResponse<PaymentHistoryResponse> {
+        val safePage = if (page < 1) 1 else page
+        val safeLimit = limit.coerceIn(1, 100)
+        val parsedMethod = method?.let { raw ->
+            RecPaymentMethod.entries.firstOrNull { it.dbValue.equals(raw, ignoreCase = true) }
+                ?.takeIf { it in setOf(RecPaymentMethod.TUNAI, RecPaymentMethod.TRANSFER, RecPaymentMethod.QRIS) }
+                ?: throw ValidationException("Metode filter harus tunai, transfer, atau qris")
+        }
+        val parsedStatus = status?.let(::parseReceivableStatus)
+        val parsedFrom = dateFrom?.let { parseDate(it, "dateFrom") }
+        val parsedTo = dateTo?.let { parseDate(it, "dateTo") }
+        if (parsedFrom != null && parsedTo != null && parsedFrom > parsedTo) {
+            throw ValidationException("dateFrom tidak boleh setelah dateTo")
+        }
+        return repository.getPaginatedPayments(
+            page = safePage,
+            limit = safeLimit,
+            receivableId = receivableId?.let(::parseUUID),
+            customerId = customerId?.let(::parseUUID),
+            method = parsedMethod,
+            userId = userId?.let(::parseUUID),
+            customerSearch = customerSearch?.trim()?.takeIf(String::isNotBlank),
+            receiverSearch = receiverSearch?.trim()?.takeIf(String::isNotBlank),
+            status = parsedStatus,
+            dateFrom = parsedFrom,
+            dateTo = parsedTo
+        )
+    }
+
+    suspend fun getPaymentReceipt(paymentId: String): PaymentHistoryResponse =
+        repository.getPaymentReceipt(parseUUID(paymentId))
+            ?: throw NotFoundException("Bukti pembayaran tidak ditemukan")
+
     suspend fun pay(userId: UUID, request: PaymentRequest): PaymentResponse {
-        // 1. Validasi amount > 0
-        if (request.amount <= java.math.BigDecimal.ZERO) {
-            throw ValidationException("Jumlah pembayaran harus lebih dari nol")
-        }
+        val validated = validateReceivablePaymentRequest(request)
+        return repository.insertPaymentAndUpdateReceivable(
+            receivableId = validated.receivableId,
+            userId = userId,
+            paymentAmount = validated.amount,
+            method = validated.method,
+            reference = validated.reference,
+            notes = validated.notes,
+            idempotencyKey = validated.idempotencyKey
+        )
+    }
 
-        // 2. Parse receivableId
-        val receivableId = parseUUID(request.receivableId)
-
-        // 3. Parse method
-        val method = RecPaymentMethod.entries.firstOrNull { it.dbValue == request.method.lowercase() }
-            ?: throw ValidationException(
-                "Metode pembayaran '${request.method}' tidak valid. " +
-                "Gunakan: tunai, transfer, atau qris"
-            )
-
-        // 4-10. Eksekusi dalam satu transaksi atomik dengan FOR UPDATE lock
-        return org.jetbrains.exposed.sql.transactions.transaction {
-            // 4. Lock row piutang (FOR UPDATE) — mencegah race condition
-            val receivable = kotlinx.coroutines.runBlocking { repository.getReceivableForUpdate(receivableId) }
-                ?: throw NotFoundException("Piutang dengan ID ${request.receivableId} tidak ditemukan")
-
-            // 5. Cek apakah sudah lunas
-            if (receivable.status == ReceivableStatus.LUNAS) {
-                throw ValidationException("Piutang ini sudah lunas, tidak dapat menerima pembayaran lagi")
-            }
-
-            // 6. Hitung sisa hutang
-            val remainingAmount = receivable.amount.subtract(receivable.paidAmount)
-
-            // 7. Overpayment Guard
-            if (request.amount > remainingAmount) {
-                throw ValidationException(
-                    "Pembayaran melebihi sisa hutang. " +
-                    "Sisa hutang: ${remainingAmount.toPlainString()}, " +
-                    "jumlah bayar: ${request.amount.toPlainString()}"
-                )
-            }
-
-            // 8. Hitung newPaidAmount
-            val newPaidAmount = receivable.paidAmount.add(request.amount)
-
-            // 9. Tentukan status baru
-            val newStatus = if (newPaidAmount >= receivable.amount) {
-                ReceivableStatus.LUNAS
-            } else {
-                ReceivableStatus.SEBAGIAN
-            }
-
-            // 10. Insert payment + update receivable (atomik)
-            kotlinx.coroutines.runBlocking {
-                repository.insertPaymentAndUpdateReceivable(
-                    receivableId = receivableId,
-                    userId = userId,
-                    paymentAmount = request.amount,
-                    method = method,
-                    reference = request.reference,
-                    notes = request.notes,
-                    newPaidAmount = newPaidAmount,
-                    newStatus = newStatus
-                )
-            }
-        }
+    suspend fun reversePayment(
+        userId: UUID,
+        paymentId: String,
+        request: ReversePaymentRequest
+    ): PaymentResponse {
+        val validated = validatePaymentReversalRequest(request)
+        return repository.reversePayment(
+            paymentId = parseUUID(paymentId),
+            userId = userId,
+            idempotencyKey = validated.idempotencyKey,
+            reason = validated.reason
+        )
     }
 
     // ==========================================
@@ -207,4 +261,17 @@ class ReceivableService(private val repository: ReceivableRepository) {
             throw ValidationException("Format ID tidak valid")
         }
     }
+
+    private fun parseDate(value: String, field: String): LocalDate {
+        return try {
+            LocalDate.parse(value)
+        } catch (_: DateTimeParseException) {
+            throw ValidationException("Format $field harus yyyy-MM-dd")
+        }
+    }
+
+    private fun parseReceivableStatus(value: String): ReceivableStatus =
+        ReceivableStatus.entries.firstOrNull {
+            it.name.equals(value, ignoreCase = true) || it.dbValue.equals(value, ignoreCase = true)
+        } ?: throw ValidationException("Status harus UNPAID, PARTIAL, atau PAID")
 }

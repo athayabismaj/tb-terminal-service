@@ -29,6 +29,24 @@ fun Application.receivableRoutes() {
                 // ==========================================
                 route("/customers") {
 
+                    get("/{id}/payments") {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val customerId = call.parameters["id"]
+                            ?: return@get call.respond(HttpStatusCode.BadRequest, ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan"))
+                        val payments = service.getPayments(
+                            page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1,
+                            limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20,
+                            customerId = customerId,
+                            method = call.request.queryParameters["method"],
+                            userId = call.request.queryParameters["userId"],
+                            receiverSearch = call.request.queryParameters["receiverSearch"],
+                            status = call.request.queryParameters["status"],
+                            dateFrom = call.request.queryParameters["dateFrom"],
+                            dateTo = call.request.queryParameters["dateTo"]
+                        )
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(payments))
+                    }
+
                     // GET list pelanggan — akses semua role
                     get {
                         call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
@@ -118,6 +136,23 @@ fun Application.receivableRoutes() {
                 // ==========================================
                 route("/receivables") {
 
+                    get("/{id}/payments") {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val receivableId = call.parameters["id"]
+                            ?: return@get call.respond(HttpStatusCode.BadRequest, ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan"))
+                        val payments = service.getPayments(
+                            page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1,
+                            limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20,
+                            receivableId = receivableId,
+                            method = call.request.queryParameters["method"],
+                            userId = call.request.queryParameters["userId"],
+                            status = call.request.queryParameters["status"],
+                            dateFrom = call.request.queryParameters["dateFrom"],
+                            dateTo = call.request.queryParameters["dateTo"]
+                        )
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(payments))
+                    }
+
                     // GET list piutang — akses semua role
                     get {
                         call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
@@ -125,9 +160,51 @@ fun Application.receivableRoutes() {
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val customerId = call.request.queryParameters["customerId"]
                         val status = call.request.queryParameters["status"]
+                        val dueFilter = call.request.queryParameters["dueFilter"]
+                        val dueFrom = call.request.queryParameters["dueFrom"]
+                        val dueTo = call.request.queryParameters["dueTo"]
 
-                        val receivables = service.getReceivables(page, limit, customerId, status)
+                        val receivables = service.getReceivables(
+                            page, limit, customerId, status, dueFilter, dueFrom, dueTo
+                        )
                         call.respond(HttpStatusCode.OK, ApiResponse.success(receivables))
+                    }
+
+                    get("/summary/customers") {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+                        val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+                        val dueFilter = call.request.queryParameters["dueFilter"]
+                        val summaries = service.getCustomerSummaries(page, limit, dueFilter)
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(summaries))
+                    }
+
+                    post("/opening-balance") {
+                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        val userId = call.getUserId()
+                        val request = call.receive<CreateStandaloneReceivableRequest>()
+                        val receivable = service.createStandaloneReceivable(
+                            userId,
+                            request.copy(source = ReceivableSource.OPENING_BALANCE.name)
+                        )
+                        call.respond(
+                            HttpStatusCode.Created,
+                            ApiResponse.success(receivable, "Saldo awal piutang berhasil dicatat")
+                        )
+                    }
+
+                    post("/adjustment") {
+                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        val userId = call.getUserId()
+                        val request = call.receive<CreateStandaloneReceivableRequest>()
+                        val receivable = service.createStandaloneReceivable(
+                            userId,
+                            request.copy(source = ReceivableSource.ADJUSTMENT.name)
+                        )
+                        call.respond(
+                            HttpStatusCode.Created,
+                            ApiResponse.success(receivable, "Penyesuaian piutang berhasil dicatat")
+                        )
                     }
 
                     // GET detail piutang — akses semua role
@@ -148,28 +225,52 @@ fun Application.receivableRoutes() {
                 // ==========================================
                 route("/payments") {
 
+                    // GET riwayat pembayaran piutang - audit operasional admin/owner
+                    get {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+                        val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+                        val payments = service.getPayments(
+                            page = page,
+                            limit = limit,
+                            receivableId = call.request.queryParameters["receivableId"],
+                            customerId = call.request.queryParameters["customerId"],
+                            method = call.request.queryParameters["method"],
+                            userId = call.request.queryParameters["userId"],
+                            customerSearch = call.request.queryParameters["customerSearch"],
+                            receiverSearch = call.request.queryParameters["receiverSearch"],
+                            status = call.request.queryParameters["status"],
+                            dateFrom = call.request.queryParameters["dateFrom"],
+                            dateTo = call.request.queryParameters["dateTo"]
+                        )
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(payments))
+                    }
+
+                    get("/{id}/receipt") {
+                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        val paymentId = call.parameters["id"]
+                            ?: return@get call.respond(HttpStatusCode.BadRequest, ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan"))
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(service.getPaymentReceipt(paymentId)))
+                    }
+
+                    post("/{id}/reversal") {
+                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        val paymentId = call.parameters["id"]
+                            ?: return@post call.respond(HttpStatusCode.BadRequest, ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan"))
+                        val reversal = service.reversePayment(
+                            userId = call.getUserId(),
+                            paymentId = paymentId,
+                            request = call.receive<ReversePaymentRequest>()
+                        )
+                        call.respond(HttpStatusCode.Created, ApiResponse.success(reversal, "Reversal pembayaran berhasil dicatat"))
+                    }
+
                     // POST bayar piutang — akses semua role (kasir di lapangan bisa terima cicilan)
                     post {
                         call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
                         val userId = call.getUserId()
                         val request = call.receive<PaymentRequest>()
                         val payment = service.pay(userId, request)
-                        systemService.recordOperationalAudit(
-                            call = call,
-                            actorUserId = userId,
-                            action = AuditAction.INSERT,
-                            schemaName = "receivable",
-                            tableName = "receivable_payments",
-                            recordId = payment.id
-                        )
-                        systemService.recordOperationalAudit(
-                            call = call,
-                            actorUserId = userId,
-                            action = AuditAction.UPDATE,
-                            schemaName = "receivable",
-                            tableName = "receivables",
-                            recordId = payment.receivableId
-                        )
                         call.respond(HttpStatusCode.Created, ApiResponse.success(payment, "Pembayaran berhasil dicatat"))
                     }
                 }
