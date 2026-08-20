@@ -9,33 +9,34 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.lowerCase
 import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.select
-import org.jetbrains.exposed.sql.transactions.transaction
+import kotlinx.coroutines.Dispatchers
+import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import org.jetbrains.exposed.sql.update
 import java.math.BigDecimal
 import java.util.UUID
 import kotlin.math.ceil
 
 internal class InventoryProductRepository {
-    suspend fun getProducts(page: Int, limit: Int, search: String?): PaginatedResponse<ProductResponse> = transaction {
+    suspend fun getProducts(page: Int, limit: Int, search: String?): PaginatedResponse<ProductResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val query = ProductsTable.select { ProductsTable.isActive eq true }.applySearch(search)
         val totalCount = query.count()
         val data = query.limit(limit, ((page - 1) * limit).toLong()).map(::toProductResponse)
         PaginatedResponse(data, totalCount, page, limit, totalPages(totalCount, limit))
     }
 
-    suspend fun getProductById(id: UUID): ProductResponse? = transaction {
+    suspend fun getProductById(id: UUID): ProductResponse? = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.select { (ProductsTable.id eq id) and (ProductsTable.isActive eq true) }
             .singleOrNull()
             ?.let(::toProductResponse)
     }
 
-    suspend fun getProductByIdIncludingInactive(id: UUID): ProductResponse? = transaction {
+    suspend fun getProductByIdIncludingInactive(id: UUID): ProductResponse? = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.select { ProductsTable.id eq id }
             .singleOrNull()
             ?.let(::toProductResponse)
     }
 
-    suspend fun getBySku(sku: String, includeInactive: Boolean): ProductResponse? = transaction {
+    suspend fun getBySku(sku: String, includeInactive: Boolean): ProductResponse? = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.select { ProductsTable.sku eq sku }
             .apply { if (!includeInactive) andWhere { ProductsTable.isActive eq true } }
             .singleOrNull()
@@ -53,7 +54,7 @@ internal class InventoryProductRepository {
         discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
-    ): UUID = transaction {
+    ): UUID = newSuspendedTransaction(Dispatchers.IO) {
         val productId = insertProduct(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
         StockTable.insert {
             it[this.productId] = productId
@@ -74,7 +75,7 @@ internal class InventoryProductRepository {
         discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
-    ): Boolean = transaction {
+    ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
     }
 
@@ -89,16 +90,16 @@ internal class InventoryProductRepository {
         discount: BigDecimal,
         minStock: BigDecimal,
         photoFilename: String?
-    ): Boolean = transaction {
+    ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = true }
         updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
     }
 
-    suspend fun softDeleteProduct(id: UUID): Boolean = transaction {
+    suspend fun softDeleteProduct(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = false } > 0
     }
 
-    suspend fun activateProduct(id: UUID): Boolean = transaction {
+    suspend fun activateProduct(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = true } > 0
     }
 

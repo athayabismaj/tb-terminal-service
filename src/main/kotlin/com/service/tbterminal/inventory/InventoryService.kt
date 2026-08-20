@@ -27,6 +27,7 @@ class InventoryService(private val repository: InventoryRepository) {
     suspend fun createCategory(request: CategoryRequest): CategoryResponse {
         val name = request.name.trim()
         if (name.isEmpty()) throw ValidationException("Nama kategori tidak boleh kosong")
+        if (name.length > 100) throw ValidationException("Nama kategori maksimal 100 karakter")
 
         val existing = repository.getCategoryByName(name)
         if (existing != null) throw ValidationException("Kategori dengan nama '$name' sudah ada")
@@ -39,6 +40,7 @@ class InventoryService(private val repository: InventoryRepository) {
         val uuid = parseInventoryUUID(id)
         val name = request.name.trim()
         if (name.isEmpty()) throw ValidationException("Nama kategori tidak boleh kosong")
+        if (name.length > 100) throw ValidationException("Nama kategori maksimal 100 karakter")
 
         val current = repository.getCategoryById(uuid) ?: throw NotFoundException("Kategori tidak ditemukan")
         
@@ -89,6 +91,8 @@ class InventoryService(private val repository: InventoryRepository) {
         
         if (name.isEmpty()) throw ValidationException("Nama satuan tidak boleh kosong")
         if (symbol.isEmpty()) throw ValidationException("Simbol satuan tidak boleh kosong")
+        if (name.length > 50) throw ValidationException("Nama satuan maksimal 50 karakter")
+        if (symbol.length > 20) throw ValidationException("Simbol satuan maksimal 20 karakter")
 
         val existing = repository.getUnitByNameOrSymbol(name, symbol)
         if (existing != null) {
@@ -107,6 +111,8 @@ class InventoryService(private val repository: InventoryRepository) {
         
         if (name.isEmpty()) throw ValidationException("Nama satuan tidak boleh kosong")
         if (symbol.isEmpty()) throw ValidationException("Simbol satuan tidak boleh kosong")
+        if (name.length > 50) throw ValidationException("Nama satuan maksimal 50 karakter")
+        if (symbol.length > 20) throw ValidationException("Simbol satuan maksimal 20 karakter")
 
         val current = repository.getUnitById(uuid) ?: throw NotFoundException("Satuan tidak ditemukan")
         
@@ -169,7 +175,10 @@ class InventoryService(private val repository: InventoryRepository) {
         val uuid = parseInventoryUUID(id)
         val name = request.name.trim()
 
-        if (name.isEmpty()) throw ValidationException("Nama produk tidak boleh kosong")
+        requireValidProductValues(
+            name, request.priceBuy, request.priceRetail, request.priceContractor,
+            request.discount, request.minStock
+        )
 
         val categoryId = parseInventoryUUID(request.categoryId)
         val unitId = parseInventoryUUID(request.baseUnitId)
@@ -238,6 +247,37 @@ class InventoryService(private val repository: InventoryRepository) {
         return repository.getStockAdjustments(safePage, safeLimit, search, type)
     }
 
+    suspend fun getStockCard(
+        page: Int,
+        limit: Int,
+        productId: String?,
+        search: String?,
+        type: String?,
+        startDate: String?,
+        endDate: String?
+    ): StockCardResponse {
+        val safePage = page.coerceAtLeast(1)
+        val safeLimit = limit.coerceIn(1, 200)
+        val productUuid = productId?.trim()?.takeIf(String::isNotBlank)?.let(::parseInventoryUUID)
+        val movementType = type?.trim()?.takeIf { it.isNotBlank() && !it.equals("ALL", true) }?.let { raw ->
+            StockMovementType.entries.firstOrNull { it.name.equals(raw, true) }
+                ?: throw ValidationException("Jenis mutasi stok tidak valid")
+        }
+        val zone = java.time.ZoneId.of("Asia/Jakarta")
+        fun parseDate(value: String?, label: String, plusDay: Boolean): java.time.OffsetDateTime? {
+            val raw = value?.trim()?.takeIf(String::isNotBlank) ?: return null
+            val date = runCatching { java.time.LocalDate.parse(raw) }.getOrNull()
+                ?: throw ValidationException("Format $label harus YYYY-MM-DD")
+            return date.plusDays(if (plusDay) 1 else 0).atStartOfDay(zone).toOffsetDateTime()
+        }
+        val startAt = parseDate(startDate, "startDate", false)
+        val endExclusive = parseDate(endDate, "endDate", true)
+        if (startAt != null && endExclusive != null && !startAt.isBefore(endExclusive)) {
+            throw ValidationException("startDate tidak boleh setelah endDate")
+        }
+        return repository.getStockCard(safePage, safeLimit, productUuid, search, movementType, startAt, endExclusive)
+    }
+
     suspend fun executeOpname(userId: String, request: StockOpnameRequest) {
         val productId = parseInventoryUUID(request.productId)
         val userUuid = parseInventoryUUID(userId)
@@ -258,31 +298,77 @@ class InventoryService(private val repository: InventoryRepository) {
         }
 
         // Jalankan seluruh proses validasi dan operasi database di dalam satu transaksi
-        org.jetbrains.exposed.sql.transactions.transaction {
-            // Lock dan baca stok saat ini
-            val currentSystemQty = kotlinx.coroutines.runBlocking { repository.getCurrentStockForUpdate(productId) }
-                ?: throw NotFoundException("Data stok untuk produk ini tidak ditemukan")
-
-            // Validasi jika tidak ada perubahan
-            if (currentSystemQty.compareTo(request.actualQty) == 0) {
-                throw ValidationException("Stok fisik sama dengan sistem, tidak ada penyesuaian.")
-            }
-
-            // Eksekusi pembaruan dan pencatatan audit trail
-            val success = kotlinx.coroutines.runBlocking {
-                repository.executeOpname(
-                    productId = productId,
-                    oldQty = currentSystemQty,
-                    newQty = request.actualQty,
-                    userId = userUuid,
-                    adjType = adjType,
-                    notes = request.notes
-                )
-            }
-
-            if (!success) {
-                throw NotFoundException("Gagal melakukan opname pada stok ini")
-            }
+        val success = repository.executeOpname(
+            productId = productId,
+            newQty = request.actualQty,
+            userId = userUuid,
+            adjType = adjType,
+            notes = request.notes?.trim()?.takeIf(String::isNotBlank)
+        )
+        if (!success) {
+            throw NotFoundException("Gagal melakukan opname pada stok ini")
         }
+    }
+
+    suspend fun createOpeningStock(userId: String, request: OpeningStockRequest): OpeningStockResponse {
+        val productId = parseInventoryUUID(request.productId)
+        val userUuid = parseInventoryUUID(userId)
+        repository.getProductById(productId) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
+        if (request.quantity <= java.math.BigDecimal.ZERO) {
+            throw ValidationException("Jumlah saldo awal harus lebih dari nol")
+        }
+        if (request.quantity.scale() > 2 || request.quantity > java.math.BigDecimal("99999999.99")) {
+            throw ValidationException("Jumlah saldo awal tidak valid")
+        }
+        val date = runCatching { java.time.LocalDate.parse(request.date.trim()) }.getOrNull()
+            ?: throw ValidationException("Tanggal saldo awal wajib berformat YYYY-MM-DD")
+        if (date > inventoryToday()) throw ValidationException("Tanggal saldo awal tidak boleh di masa depan")
+        val note = request.note.trim()
+        if (note.isBlank()) throw ValidationException("Catatan saldo awal wajib diisi")
+        if (note.length > 500) throw ValidationException("Catatan saldo awal maksimal 500 karakter")
+        val adjustmentId = repository.createOpeningBalance(productId, request.quantity, date, note, userUuid)
+        return OpeningStockResponse(adjustmentId.toString(), productId.toString(), request.quantity, date.toString(), note, userUuid.toString())
+    }
+
+    suspend fun previewProductImport(request: ProductCsvImportRequest): ProductCsvPreviewResponse {
+        if (request.csv.isBlank()) throw ValidationException("File CSV kosong")
+        if (request.csv.length > 2_000_000) throw ValidationException("Ukuran CSV maksimal 2 MB")
+        val categories = repository.getAllCategories().associate { it.name.trim().lowercase() to it.id }
+        val units = repository.getAllUnits().flatMap { unit ->
+            listOf(unit.name.trim().lowercase() to unit.id, unit.symbol.trim().lowercase() to unit.id)
+        }.toMap()
+        return previewProductCsv(request.csv, categories, units, repository.getAllSkus())
+    }
+
+    suspend fun importProducts(userId: String, request: ProductCsvImportRequest): ProductCsvImportResponse {
+        val preview = previewProductImport(request)
+        if (preview.totalRows == 0) throw ValidationException("CSV tidak memiliki baris produk")
+        if (preview.invalidRows > 0) {
+            throw ValidationException("Impor dibatalkan: ${preview.invalidRows} baris tidak valid. Jalankan preview kembali")
+        }
+        val categories = repository.getAllCategories().associate { it.name.trim().lowercase() to java.util.UUID.fromString(it.id) }
+        val units = repository.getAllUnits().flatMap { unit ->
+            listOf(
+                unit.name.trim().lowercase() to java.util.UUID.fromString(unit.id),
+                unit.symbol.trim().lowercase() to java.util.UUID.fromString(unit.id)
+            )
+        }.toMap()
+        val rows = preview.rows.map { row ->
+            val opening = row.openingStock.ifBlank { "0" }.replace(',', '.').toBigDecimal()
+            ResolvedProductImportRow(
+                sku = row.sku,
+                name = row.name,
+                categoryId = requireNotNull(categories[row.category.trim().lowercase()]),
+                unitId = requireNotNull(units[row.unit.trim().lowercase()]),
+                priceBuy = row.priceBuy.replace(',', '.').toBigDecimal(),
+                priceRetail = row.priceRetail.replace(',', '.').toBigDecimal(),
+                priceContractor = row.priceContractor.replace(',', '.').toBigDecimal(),
+                minStock = row.minStock.replace(',', '.').toBigDecimal(),
+                openingStock = opening,
+                openingDate = if (opening > java.math.BigDecimal.ZERO) java.time.LocalDate.parse(row.openingDate) else null,
+                openingNote = row.openingNote
+            )
+        }
+        return repository.importProducts(rows, parseInventoryUUID(userId))
     }
 }

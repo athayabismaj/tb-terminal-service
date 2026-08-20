@@ -2,9 +2,12 @@ package com.service.tbterminal.purchasing
 
 import com.service.tbterminal.inventory.PaginatedResponse
 import com.service.tbterminal.inventory.ProductsTable
+import com.service.tbterminal.shared.NotFoundException
+import com.service.tbterminal.shared.ValidationException
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.transactions.transaction
+import kotlinx.coroutines.Dispatchers
+import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import java.time.OffsetDateTime
 import java.util.UUID
 
@@ -48,8 +51,7 @@ interface PurchasingRepository {
     suspend fun insertPaymentAndUpdatePayable(
         payableId: UUID, userId: UUID,
         paymentAmount: java.math.BigDecimal, method: PurchasePaymentMethod,
-        reference: String?, notes: String?,
-        newPaidAmount: java.math.BigDecimal, newStatus: PayableStatus
+        reference: String?, notes: String?
     ): SupplierPaymentResponse
 }
 
@@ -80,7 +82,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     // SUPPLIERS
     // ==========================================
 
-    override suspend fun getPaginatedSuppliers(page: Int, limit: Int, search: String?): PaginatedResponse<SupplierResponse> = transaction {
+    override suspend fun getPaginatedSuppliers(page: Int, limit: Int, search: String?): PaginatedResponse<SupplierResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val offset = ((page - 1) * limit).toLong()
 
         var query = SuppliersTable.select { SuppliersTable.isActive eq true }
@@ -110,12 +112,12 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         )
     }
 
-    override suspend fun getSupplierById(id: UUID): SupplierResponse? = transaction {
+    override suspend fun getSupplierById(id: UUID): SupplierResponse? = newSuspendedTransaction(Dispatchers.IO) {
         SuppliersTable.select { (SuppliersTable.id eq id) and (SuppliersTable.isActive eq true) }
             .singleOrNull()?.let { rowToSupplierResponse(it) }
     }
 
-    override suspend fun getSupplierByName(name: String): SupplierResponse? = transaction {
+    override suspend fun getSupplierByName(name: String): SupplierResponse? = newSuspendedTransaction(Dispatchers.IO) {
         SuppliersTable.select {
             (SuppliersTable.name.lowerCase() eq name.lowercase()) and (SuppliersTable.isActive eq true)
         }.singleOrNull()?.let { rowToSupplierResponse(it) }
@@ -123,7 +125,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
 
     override suspend fun createSupplier(
         name: String, phone: String?, address: String?, paymentTermDays: Int
-    ): UUID = transaction {
+    ): UUID = newSuspendedTransaction(Dispatchers.IO) {
         val supplierId = UUID.randomUUID()
         SuppliersTable.insert {
             it[this.id] = supplierId
@@ -137,7 +139,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
 
     override suspend fun updateSupplier(
         id: UUID, name: String, phone: String?, address: String?, paymentTermDays: Int
-    ): Boolean = transaction {
+    ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updatedRows = SuppliersTable.update({ SuppliersTable.id eq id }) {
             it[this.name] = name
             it[this.phone] = phone
@@ -148,7 +150,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         updatedRows > 0
     }
 
-    override suspend fun softDeleteSupplier(id: UUID): Boolean = transaction {
+    override suspend fun softDeleteSupplier(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updatedRows = SuppliersTable.update({ SuppliersTable.id eq id }) {
             it[isActive] = false
             it[updatedAt] = OffsetDateTime.now()
@@ -170,7 +172,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         amountPaid: java.math.BigDecimal,
         notes: String?,
         dueDays: Int
-    ): PurchaseResponse = transaction {
+    ): PurchaseResponse = newSuspendedTransaction(Dispatchers.IO) {
 
         // 1. Insert ke purchases
         val purchaseId = UUID.randomUUID()
@@ -262,7 +264,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
 
     override suspend fun getPaginatedPurchases(
         page: Int, limit: Int, supplierId: UUID?
-    ): PaginatedResponse<PurchaseSummary> = transaction {
+    ): PaginatedResponse<PurchaseSummary> = newSuspendedTransaction(Dispatchers.IO) {
         val offset = ((page - 1) * limit).toLong()
 
         var query = PurchasesTable.innerJoin(SuppliersTable).selectAll()
@@ -298,10 +300,10 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         )
     }
 
-    override suspend fun getPurchaseById(id: UUID): PurchaseResponse? = transaction {
+    override suspend fun getPurchaseById(id: UUID): PurchaseResponse? = newSuspendedTransaction(Dispatchers.IO) {
         val purchaseRow = PurchasesTable.innerJoin(SuppliersTable)
             .select { PurchasesTable.id eq id }
-            .singleOrNull() ?: return@transaction null
+            .singleOrNull() ?: return@newSuspendedTransaction null
 
         val items = PurchaseItemsTable.select { PurchaseItemsTable.purchaseId eq id }
             .map { row ->
@@ -336,7 +338,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
 
     override suspend fun getPaginatedPayables(
         page: Int, limit: Int, supplierId: UUID?, status: PayableStatus?
-    ): PaginatedResponse<PayableResponse> = transaction {
+    ): PaginatedResponse<PayableResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val offset = ((page - 1) * limit).toLong()
 
         var query = SupplierPayablesTable.innerJoin(SuppliersTable).selectAll()
@@ -380,7 +382,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         )
     }
 
-    override suspend fun getPayableById(id: UUID): PayableResponse? = transaction {
+    override suspend fun getPayableById(id: UUID): PayableResponse? = newSuspendedTransaction(Dispatchers.IO) {
         SupplierPayablesTable.innerJoin(SuppliersTable)
             .select { SupplierPayablesTable.id eq id }
             .singleOrNull()?.let { row ->
@@ -401,7 +403,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             }
     }
 
-    override suspend fun getPayableByPurchaseId(purchaseId: UUID): PayableResponse? = transaction {
+    override suspend fun getPayableByPurchaseId(purchaseId: UUID): PayableResponse? = newSuspendedTransaction(Dispatchers.IO) {
         SupplierPayablesTable.innerJoin(SuppliersTable)
             .select { SupplierPayablesTable.purchaseId eq purchaseId }
             .orderBy(SupplierPayablesTable.createdAt, SortOrder.DESC)
@@ -424,7 +426,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             }
     }
 
-    override suspend fun getPayableForUpdate(id: UUID): PayableForUpdateRow? = transaction {
+    override suspend fun getPayableForUpdate(id: UUID): PayableForUpdateRow? = newSuspendedTransaction(Dispatchers.IO) {
         SupplierPayablesTable.select { SupplierPayablesTable.id eq id }
             .forUpdate()
             .singleOrNull()?.let { row ->
@@ -446,9 +448,23 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     override suspend fun insertPaymentAndUpdatePayable(
         payableId: UUID, userId: UUID,
         paymentAmount: java.math.BigDecimal, method: PurchasePaymentMethod,
-        reference: String?, notes: String?,
-        newPaidAmount: java.math.BigDecimal, newStatus: PayableStatus
-    ): SupplierPaymentResponse = transaction {
+        reference: String?, notes: String?
+    ): SupplierPaymentResponse = newSuspendedTransaction(Dispatchers.IO) {
+        val lockedPayable = SupplierPayablesTable.select { SupplierPayablesTable.id eq payableId }
+            .forUpdate()
+            .singleOrNull()
+            ?: throw NotFoundException("Hutang supplier tidak ditemukan")
+        if (lockedPayable[SupplierPayablesTable.status] == PayableStatus.LUNAS) {
+            throw ValidationException("Hutang ini sudah lunas, tidak dapat menerima pembayaran lagi")
+        }
+        val payableAmount = lockedPayable[SupplierPayablesTable.amount]
+        val remainingAmount = payableAmount.subtract(lockedPayable[SupplierPayablesTable.paidAmount])
+        if (paymentAmount > remainingAmount) {
+            throw ValidationException("Pembayaran melebihi sisa hutang ${remainingAmount.toPlainString()}")
+        }
+        val newPaidAmount = lockedPayable[SupplierPayablesTable.paidAmount].add(paymentAmount)
+        val newStatus = if (newPaidAmount >= payableAmount) PayableStatus.LUNAS else PayableStatus.SEBAGIAN
+
         // 1. INSERT payment
         val paymentId = UUID.randomUUID()
         SupplierPaymentsTable.insert {
@@ -470,9 +486,6 @@ class PurchasingRepositoryImpl : PurchasingRepository {
 
         // 3. Baca payment yang baru dibuat untuk response
         val paymentRow = SupplierPaymentsTable.select { SupplierPaymentsTable.id eq paymentId }.single()
-        val payableAmount = SupplierPayablesTable.select { SupplierPayablesTable.id eq payableId }.single()
-            .let { it[SupplierPayablesTable.amount] }
-
         SupplierPaymentResponse(
             id = paymentRow[SupplierPaymentsTable.id].toString(),
             payableId = payableId.toString(),

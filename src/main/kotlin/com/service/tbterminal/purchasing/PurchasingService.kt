@@ -232,52 +232,14 @@ class PurchasingService(
         )
 
         // 4-10. Eksekusi dalam satu transaksi atomik dengan FOR UPDATE lock
-        return org.jetbrains.exposed.sql.transactions.transaction {
-            // 4. Lock row hutang (FOR UPDATE) — mencegah race condition
-            val payable = kotlinx.coroutines.runBlocking { repository.getPayableForUpdate(payableId) }
-                ?: throw NotFoundException("Hutang dengan ID '${request.payableId}' tidak ditemukan")
-
-            // 5. LUNAS Guard — Cek apakah sudah lunas
-            if (payable.status == PayableStatus.LUNAS) {
-                throw ValidationException("Hutang ini sudah lunas, tidak dapat menerima pembayaran lagi")
-            }
-
-            // 6. Hitung sisa hutang
-            val remainingAmount = payable.amount.subtract(payable.paidAmount)
-
-            // 7. Overpayment Guard
-            if (request.amount > remainingAmount) {
-                throw ValidationException(
-                    "Pembayaran melebihi sisa hutang. " +
-                    "Sisa hutang: ${remainingAmount.toPlainString()}, " +
-                    "jumlah bayar: ${request.amount.toPlainString()}"
-                )
-            }
-
-            // 8. Hitung newPaidAmount
-            val newPaidAmount = payable.paidAmount.add(request.amount)
-
-            // 9. Tentukan status baru
-            val newStatus = if (newPaidAmount >= payable.amount) {
-                PayableStatus.LUNAS
-            } else {
-                PayableStatus.SEBAGIAN
-            }
-
-            // 10. Insert payment + update payable (atomik)
-            kotlinx.coroutines.runBlocking {
-                repository.insertPaymentAndUpdatePayable(
-                    payableId = payableId,
-                    userId = userId,
-                    paymentAmount = request.amount,
-                    method = method,
-                    reference = request.reference?.trim(),
-                    notes = request.notes?.trim(),
-                    newPaidAmount = newPaidAmount,
-                    newStatus = newStatus
-                )
-            }
-        }
+        return repository.insertPaymentAndUpdatePayable(
+            payableId = payableId,
+            userId = userId,
+            paymentAmount = request.amount,
+            method = method,
+            reference = request.reference?.trim()?.takeIf(String::isNotBlank),
+            notes = request.notes?.trim()?.takeIf(String::isNotBlank)
+        )
     }
 
     // ==========================================

@@ -36,6 +36,21 @@ internal fun Route.stockRoutes(service: InventoryService, systemService: SystemS
             call.respond(HttpStatusCode.OK, ApiResponse.success(adjustments))
         }
 
+        get("/card") {
+            val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+            val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+            val card = service.getStockCard(
+                page = page,
+                limit = limit,
+                productId = call.request.queryParameters["productId"],
+                search = call.request.queryParameters["search"],
+                type = call.request.queryParameters["type"],
+                startDate = call.request.queryParameters["startDate"],
+                endDate = call.request.queryParameters["endDate"]
+            )
+            call.respond(HttpStatusCode.OK, ApiResponse.success(card))
+        }
+
         post("/opname") {
             call.requireRole(Role.OWNER, Role.ADMIN)
             val actorUserId = call.getUserId()
@@ -50,6 +65,21 @@ internal fun Route.stockRoutes(service: InventoryService, systemService: SystemS
                 recordId = request.productId
             )
             call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Penyesuaian stok berhasil disimpan"))
+        }
+
+        post("/opening-balance") {
+            call.requireRole(Role.OWNER, Role.ADMIN)
+            val actorUserId = call.getUserId()
+            val result = service.createOpeningStock(actorUserId.toString(), call.receive())
+            systemService.recordOperationalAudit(
+                call = call,
+                actorUserId = actorUserId,
+                action = AuditAction.INSERT,
+                schemaName = "inventory",
+                tableName = "opening_stock",
+                recordId = result.adjustmentId
+            )
+            call.respond(HttpStatusCode.Created, ApiResponse.success(result, "Saldo awal stok berhasil dicatat"))
         }
     }
 }

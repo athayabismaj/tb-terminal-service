@@ -10,13 +10,14 @@ import org.jetbrains.exposed.sql.lowerCase
 import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import kotlinx.coroutines.Dispatchers
+import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import org.jetbrains.exposed.sql.update
 import java.util.UUID
 import kotlin.math.ceil
 
 internal class InventoryUnitRepository {
-    suspend fun getAllUnits(): List<UnitResponse> = transaction {
+    suspend fun getAllUnits(): List<UnitResponse> = newSuspendedTransaction(Dispatchers.IO) {
         UnitsTable.selectAll().map(::toUnitResponse)
     }
 
@@ -24,24 +25,27 @@ internal class InventoryUnitRepository {
         limit: Int,
         offset: Int,
         search: String?
-    ): PaginatedResponse<UnitResponse> = transaction {
+    ): PaginatedResponse<UnitResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val query = UnitsTable.selectAll().applySearch(search)
         val totalCount = query.count()
         val data = query.limit(limit, offset.toLong()).map(::toUnitResponse)
         PaginatedResponse(data, totalCount, (offset / limit) + 1, limit, totalPages(totalCount, limit))
     }
 
-    suspend fun getUnitById(id: UUID): UnitResponse? = transaction {
+    suspend fun getUnitById(id: UUID): UnitResponse? = newSuspendedTransaction(Dispatchers.IO) {
         UnitsTable.select { UnitsTable.id eq id }.singleOrNull()?.let(::toUnitResponse)
     }
 
-    suspend fun getByNameOrSymbol(name: String, symbol: String): UnitResponse? = transaction {
-        UnitsTable.select { (UnitsTable.name eq name) or (UnitsTable.symbol eq symbol) }
+    suspend fun getByNameOrSymbol(name: String, symbol: String): UnitResponse? = newSuspendedTransaction(Dispatchers.IO) {
+        UnitsTable.select {
+            (UnitsTable.name.lowerCase() eq name.lowercase()) or
+                (UnitsTable.symbol.lowerCase() eq symbol.lowercase())
+        }
             .firstOrNull()
             ?.let(::toUnitResponse)
     }
 
-    suspend fun createUnit(name: String, symbol: String): UUID = transaction {
+    suspend fun createUnit(name: String, symbol: String): UUID = newSuspendedTransaction(Dispatchers.IO) {
         val insertedId = UUID.randomUUID()
         UnitsTable.insert {
             it[id] = insertedId
@@ -51,14 +55,14 @@ internal class InventoryUnitRepository {
         insertedId
     }
 
-    suspend fun updateUnit(id: UUID, name: String, symbol: String): Boolean = transaction {
+    suspend fun updateUnit(id: UUID, name: String, symbol: String): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         UnitsTable.update({ UnitsTable.id eq id }) {
             it[this.name] = name
             it[this.symbol] = symbol
         } > 0
     }
 
-    suspend fun deleteUnit(id: UUID): Boolean = transaction {
+    suspend fun deleteUnit(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         UnitsTable.deleteWhere { UnitsTable.id eq id } > 0
     }
 

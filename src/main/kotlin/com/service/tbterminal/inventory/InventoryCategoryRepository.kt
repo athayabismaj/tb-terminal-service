@@ -9,13 +9,14 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.lowerCase
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import kotlinx.coroutines.Dispatchers
+import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import org.jetbrains.exposed.sql.update
 import java.util.UUID
 import kotlin.math.ceil
 
 internal class InventoryCategoryRepository {
-    suspend fun getAllCategories(): List<CategoryResponse> = transaction {
+    suspend fun getAllCategories(): List<CategoryResponse> = newSuspendedTransaction(Dispatchers.IO) {
         CategoriesTable.selectAll().map(::toCategoryResponse)
     }
 
@@ -23,22 +24,22 @@ internal class InventoryCategoryRepository {
         limit: Int,
         offset: Int,
         search: String?
-    ): PaginatedResponse<CategoryResponse> = transaction {
+    ): PaginatedResponse<CategoryResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val query = CategoriesTable.selectAll().applySearch(search)
         val totalCount = query.count()
         val data = query.limit(limit, offset.toLong()).map(::toCategoryResponse)
         PaginatedResponse(data, totalCount, (offset / limit) + 1, limit, totalPages(totalCount, limit))
     }
 
-    suspend fun getCategoryById(id: UUID): CategoryResponse? = transaction {
+    suspend fun getCategoryById(id: UUID): CategoryResponse? = newSuspendedTransaction(Dispatchers.IO) {
         CategoriesTable.select { CategoriesTable.id eq id }.singleOrNull()?.let(::toCategoryResponse)
     }
 
-    suspend fun getCategoryByName(name: String): CategoryResponse? = transaction {
-        CategoriesTable.select { CategoriesTable.name eq name }.singleOrNull()?.let(::toCategoryResponse)
+    suspend fun getCategoryByName(name: String): CategoryResponse? = newSuspendedTransaction(Dispatchers.IO) {
+        CategoriesTable.select { CategoriesTable.name.lowerCase() eq name.lowercase() }.singleOrNull()?.let(::toCategoryResponse)
     }
 
-    suspend fun createCategory(name: String): UUID = transaction {
+    suspend fun createCategory(name: String): UUID = newSuspendedTransaction(Dispatchers.IO) {
         val insertedId = UUID.randomUUID()
         CategoriesTable.insert {
             it[id] = insertedId
@@ -47,13 +48,13 @@ internal class InventoryCategoryRepository {
         insertedId
     }
 
-    suspend fun updateCategory(id: UUID, name: String): Boolean = transaction {
+    suspend fun updateCategory(id: UUID, name: String): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         CategoriesTable.update({ CategoriesTable.id eq id }) {
             it[this.name] = name
         } > 0
     }
 
-    suspend fun deleteCategory(id: UUID): Boolean = transaction {
+    suspend fun deleteCategory(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         CategoriesTable.deleteWhere { CategoriesTable.id eq id } > 0
     }
 

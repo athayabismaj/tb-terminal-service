@@ -2,6 +2,7 @@ package com.service.tbterminal.inventory
 
 import java.math.BigDecimal
 import java.util.UUID
+import java.time.OffsetDateTime
 
 interface InventoryRepository {
     suspend fun getAllCategories(): List<CategoryResponse>
@@ -24,6 +25,7 @@ interface InventoryRepository {
     suspend fun getProductById(id: UUID): ProductResponse?
     suspend fun getProductByIdIncludingInactive(id: UUID): ProductResponse?
     suspend fun getProductBySku(sku: String, includeInactive: Boolean = false): ProductResponse?
+    suspend fun getAllSkus(): Set<String>
     suspend fun createProductAndInitStock(
         categoryId: UUID,
         baseUnitId: UUID,
@@ -77,16 +79,32 @@ interface InventoryRepository {
         search: String?,
         type: String?
     ): PaginatedResponse<StockAdjustmentResponse>
+    suspend fun getStockCard(
+        page: Int,
+        limit: Int,
+        productId: UUID?,
+        search: String?,
+        type: StockMovementType?,
+        startAt: OffsetDateTime?,
+        endExclusive: OffsetDateTime?
+    ): StockCardResponse
 
     suspend fun getCurrentStockForUpdate(productId: UUID): BigDecimal?
     suspend fun executeOpname(
         productId: UUID,
-        oldQty: BigDecimal,
         newQty: BigDecimal,
         userId: UUID,
         adjType: AdjType,
         notes: String?
     ): Boolean
+    suspend fun createOpeningBalance(
+        productId: UUID,
+        quantity: BigDecimal,
+        occurredOn: java.time.LocalDate,
+        note: String,
+        userId: UUID
+    ): UUID
+    suspend fun importProducts(rows: List<ResolvedProductImportRow>, userId: UUID): ProductCsvImportResponse
 }
 
 class InventoryRepositoryImpl : InventoryRepository {
@@ -94,6 +112,7 @@ class InventoryRepositoryImpl : InventoryRepository {
     private val products = InventoryProductRepository()
     private val stock = InventoryStockRepository()
     private val units = InventoryUnitRepository()
+    private val imports = InventoryImportRepository()
 
     override suspend fun getAllCategories() = categories.getAllCategories()
     override suspend fun getCategories(page: Int, limit: Int, search: String?) =
@@ -119,6 +138,7 @@ class InventoryRepositoryImpl : InventoryRepository {
     override suspend fun getProductById(id: UUID) = products.getProductById(id)
     override suspend fun getProductByIdIncludingInactive(id: UUID) = products.getProductByIdIncludingInactive(id)
     override suspend fun getProductBySku(sku: String, includeInactive: Boolean) = products.getBySku(sku, includeInactive)
+    override suspend fun getAllSkus() = imports.getAllSkus()
 
     override suspend fun createProductAndInitStock(
         categoryId: UUID,
@@ -167,14 +187,34 @@ class InventoryRepositoryImpl : InventoryRepository {
     override suspend fun getStockAdjustments(page: Int, limit: Int, search: String?, type: String?) =
         stock.getStockAdjustments(page = page, limit = limit, search = search, type = type)
 
+    override suspend fun getStockCard(
+        page: Int,
+        limit: Int,
+        productId: UUID?,
+        search: String?,
+        type: StockMovementType?,
+        startAt: OffsetDateTime?,
+        endExclusive: OffsetDateTime?
+    ) = stock.getStockCard(page, limit, productId, search, type, startAt, endExclusive)
+
     override suspend fun getCurrentStockForUpdate(productId: UUID) = stock.getCurrentStockForUpdate(productId)
     override suspend fun executeOpname(
         productId: UUID,
-        oldQty: BigDecimal,
         newQty: BigDecimal,
         userId: UUID,
         adjType: AdjType,
         notes: String?
-    ) = stock.executeOpname(productId, oldQty, newQty, userId, adjType, notes)
+    ) = stock.executeOpname(productId, newQty, userId, adjType, notes)
+
+    override suspend fun createOpeningBalance(
+        productId: UUID,
+        quantity: BigDecimal,
+        occurredOn: java.time.LocalDate,
+        note: String,
+        userId: UUID
+    ) = imports.createOpeningBalance(productId, quantity, occurredOn, note, userId)
+
+    override suspend fun importProducts(rows: List<ResolvedProductImportRow>, userId: UUID) =
+        imports.importProducts(rows, userId)
 }
 

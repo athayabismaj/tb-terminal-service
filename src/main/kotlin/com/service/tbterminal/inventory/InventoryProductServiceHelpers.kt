@@ -15,14 +15,17 @@ internal suspend fun validateProductDraft(
     request: ProductCreateRequest
 ): ProductDraft {
     val draft = ProductDraft(
-        sku = request.sku.trim(),
+        sku = normalizeSku(request.sku),
         name = request.name.trim(),
         categoryId = parseInventoryUUID(request.categoryId),
         unitId = parseInventoryUUID(request.baseUnitId)
     )
 
-    if (draft.sku.isEmpty()) throw ValidationException("SKU tidak boleh kosong")
-    if (draft.name.isEmpty()) throw ValidationException("Nama produk tidak boleh kosong")
+    validateSku(draft.sku)?.let { throw ValidationException(it) }
+    requireValidProductValues(
+        draft.name, request.priceBuy, request.priceRetail, request.priceContractor,
+        request.discount, request.minStock
+    )
 
     repository.getCategoryById(draft.categoryId) ?: throw ValidationException("Kategori tidak valid atau tidak ditemukan")
     repository.getUnitById(draft.unitId) ?: throw ValidationException("Satuan tidak valid atau tidak ditemukan")

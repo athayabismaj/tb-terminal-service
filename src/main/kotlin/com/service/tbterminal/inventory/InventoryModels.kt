@@ -3,6 +3,7 @@ package com.service.tbterminal.inventory
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
+import org.jetbrains.exposed.sql.javatime.date
 import org.postgresql.util.PGobject
 
 // ==========================================
@@ -167,6 +168,10 @@ object StockAdjustmentsTable : Table("inventory.stock_adjustments") {
     val qtyBefore = decimal("qty_before", 10, 2)
     val qtyAfter = decimal("qty_after", 10, 2)
     val reason = text("reason")
+    val adjustmentSource = varchar("source", 30).default("manual")
+    val referenceType = varchar("reference_type", 40).nullable()
+    val referenceId = uuid("reference_id").nullable()
+    val occurredOn = date("occurred_on").databaseGenerated()
     val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
 
     override val primaryKey = PrimaryKey(id)
@@ -218,6 +223,8 @@ data class StockAdjustmentResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val difference: java.math.BigDecimal,
     val reason: String,
     val userId: String,
+    val source: String,
+    val occurredOn: String,
     val createdAt: String
 )
 
@@ -227,4 +234,117 @@ data class StockOpnameRequest(
     val adjustmentType: String, // "OPNAME", "CORRECTION", "DAMAGE", dll
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val actualQty: java.math.BigDecimal,
     val notes: String? = null
+)
+
+@Serializable
+data class OpeningStockRequest(
+    val productId: String,
+    val date: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val quantity: java.math.BigDecimal,
+    val note: String
+)
+
+@Serializable
+data class OpeningStockResponse(
+    val adjustmentId: String,
+    val productId: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val quantity: java.math.BigDecimal,
+    val date: String,
+    val note: String,
+    val userId: String
+)
+
+@Serializable
+data class ProductCsvImportRequest(val csv: String)
+
+@Serializable
+data class ProductCsvRowPreview(
+    val rowNumber: Int,
+    val sku: String,
+    val name: String,
+    val category: String,
+    val unit: String,
+    val priceBuy: String,
+    val priceRetail: String,
+    val priceContractor: String,
+    val minStock: String,
+    val openingStock: String,
+    val openingDate: String,
+    val openingNote: String,
+    val errors: List<String>
+) {
+    val valid: Boolean get() = errors.isEmpty()
+}
+
+enum class StockMovementType {
+    OPENING_BALANCE, PURCHASE, SALE, OPNAME, CORRECTION, DAMAGE, VOID, LEGACY_BASELINE
+}
+
+object StockMovementsTable : Table("inventory.stock_movements") {
+    val id = uuid("id").databaseGenerated()
+    val sequenceNo = long("sequence_no").databaseGenerated()
+    val productId = uuid("product_id").references(ProductsTable.id)
+    val unitId = uuid("unit_id").references(UnitsTable.id)
+    val movementType = customEnumeration(
+        "movement_type", "system.stock_movement_type",
+        fromDb = { StockMovementType.valueOf(it.toString()) },
+        toDb = { value -> PGobject().apply { type = "system.stock_movement_type"; this.value = value.name } }
+    )
+    val balanceBefore = decimal("balance_before", 10, 2)
+    val qtyIn = decimal("qty_in", 10, 2)
+    val qtyOut = decimal("qty_out", 10, 2)
+    val balanceAfter = decimal("balance_after", 10, 2)
+    val referenceType = varchar("reference_type", 40)
+    val referenceId = uuid("reference_id")
+    val referenceNumber = varchar("reference_number", 100).nullable()
+    val userId = uuid("user_id").nullable()
+    val occurredAt = timestampWithTimeZone("occurred_at")
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+@Serializable
+data class StockMovementResponse(
+    val id: String,
+    val productId: String,
+    val sku: String,
+    val productName: String,
+    val unitName: String,
+    val type: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val balanceBefore: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val qtyIn: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val qtyOut: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val balanceAfter: java.math.BigDecimal,
+    val referenceType: String,
+    val referenceId: String,
+    val referenceNumber: String?,
+    val userId: String?,
+    val occurredAt: String
+)
+
+@Serializable
+data class StockCardResponse(
+    val data: List<StockMovementResponse>,
+    val total: Long,
+    val page: Int,
+    val limit: Int,
+    val totalPages: Int,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val currentStock: java.math.BigDecimal?,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val ledgerBalance: java.math.BigDecimal?,
+    val reconciled: Boolean
+)
+
+@Serializable
+data class ProductCsvPreviewResponse(
+    val totalRows: Int,
+    val validRows: Int,
+    val invalidRows: Int,
+    val rows: List<ProductCsvRowPreview>
+)
+
+@Serializable
+data class ProductCsvImportResponse(
+    val importedProducts: Int,
+    val openingBalances: Int
 )

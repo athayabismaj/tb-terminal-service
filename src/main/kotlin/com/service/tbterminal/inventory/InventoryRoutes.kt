@@ -18,6 +18,7 @@ fun Application.inventoryRoutes() {
                 unitRoutes(service, systemService)
                 productRoutes(service, systemService)
                 stockRoutes(service, systemService)
+                inventoryImportRoutes(service, systemService)
             }
         }
     }
