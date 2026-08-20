@@ -18,6 +18,8 @@ import com.service.tbterminal.system.UserSessionService
 import org.koin.dsl.module
 
 val appModule = module {
+    single { com.service.tbterminal.backup.BackupRepository() }
+    single { com.service.tbterminal.backup.BackupService(get()) }
     // System Module
     single { SystemRepository() }
     single { SystemService(get()) }
