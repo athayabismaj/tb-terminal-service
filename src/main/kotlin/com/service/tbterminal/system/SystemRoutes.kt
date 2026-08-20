@@ -6,6 +6,8 @@ import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.server.plugins.ratelimit.RateLimitName
+import io.ktor.server.plugins.ratelimit.rateLimit
 import org.koin.ktor.ext.inject
 import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.AuthenticatedUserPrincipal
@@ -18,10 +20,53 @@ fun Application.systemRoutes() {
 
     routing {
         route("/api/auth") {
-            post("/login") {
-                try {
-                    val req = call.receive<LoginRequest>()
-                    val response = service.login(req)
+            rateLimit(RateLimitName("login")) {
+                post("/login") {
+                val req = call.receive<LoginRequest>()
+                val response = service.login(req)
+                if (response.success) {
+                    response.data?.user?.id?.let { userId ->
+                        service.recordOperationalAudit(
+                            call = call,
+                            actorUserId = java.util.UUID.fromString(userId),
+                            action = AuditAction.INSERT,
+                            schemaName = "system",
+                            tableName = "auth_login",
+                            recordId = userId
+                        )
+                    }
+                    call.respond(HttpStatusCode.OK, response)
+                } else {
+                    call.respond(
+                        HttpStatusCode.Unauthorized,
+                        ErrorResponse(
+                            code = response.code ?: "UNAUTHORIZED",
+                            message = response.error ?: "Autentikasi gagal"
+                        )
+                    )
+                }
+            }
+            }
+
+            post("/refresh") {
+                val response = service.refresh(call.receive<RefreshTokenRequest>())
+                if (response.success) {
+                    call.respond(HttpStatusCode.OK, response)
+                } else {
+                    call.respond(
+                        HttpStatusCode.Unauthorized,
+                        ErrorResponse(
+                            code = response.code ?: "UNAUTHORIZED",
+                            message = response.error ?: "Refresh token tidak valid"
+                        )
+                    )
+                }
+            }
+
+            authenticate("jwt-auth") {
+                post("/unlock") {
+                    val userId = call.getUserId()
+                    val response = service.unlock(userId, call.receive<UnlockRequest>())
                     if (response.success) {
                         call.respond(HttpStatusCode.OK, response)
                     } else {
@@ -29,41 +74,24 @@ fun Application.systemRoutes() {
                             HttpStatusCode.Unauthorized,
                             ErrorResponse(
                                 code = response.code ?: "UNAUTHORIZED",
-                                message = response.error ?: "Autentikasi gagal"
+                                message = response.error ?: "Unlock gagal"
                             )
                         )
                     }
-                } catch (e: Exception) {
-                    call.respond(
-                        HttpStatusCode.BadRequest,
-                        ErrorResponse("VALIDATION_ERROR", "Request tidak valid")
-                    )
                 }
-            }
 
-            authenticate("jwt-auth") {
-                post("/unlock") {
-                    try {
-                        val userId = call.getUserId()
-                        val req = call.receive<UnlockRequest>()
-                        val response = service.unlock(userId, req)
-                        if (response.success) {
-                            call.respond(HttpStatusCode.OK, response)
-                        } else {
-                            call.respond(
-                                HttpStatusCode.Unauthorized,
-                                ErrorResponse(
-                                    code = response.code ?: "UNAUTHORIZED",
-                                    message = response.error ?: "Unlock gagal"
-                                )
-                            )
-                        }
-                    } catch (e: Exception) {
-                        call.respond(
-                            HttpStatusCode.BadRequest,
-                            ErrorResponse("VALIDATION_ERROR", "Request tidak valid")
-                        )
-                    }
+                post("/logout") {
+                    val userId = call.getUserId()
+                    service.recordOperationalAudit(
+                        call = call,
+                        actorUserId = userId,
+                        action = AuditAction.UPDATE,
+                        schemaName = "system",
+                        tableName = "auth_logout",
+                        recordId = userId.toString()
+                    )
+                    service.logout(userId)
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Logout berhasil"))
                 }
 
                 get("/me") {
@@ -91,7 +119,7 @@ fun Application.systemRoutes() {
                 
                 // ROLES
                 get("/roles") {
-                    call.requireRole(com.service.tbterminal.shared.Role.ADMIN, com.service.tbterminal.shared.Role.OWNER)
+                    call.requireRole(com.service.tbterminal.shared.Role.OWNER)
                     val roles = service.getRoles()
                     call.respond(HttpStatusCode.OK, ApiResponse.success(roles))
                 }
@@ -143,7 +171,7 @@ fun Application.systemRoutes() {
 
                     // List Users
                     get {
-                        call.requireRole(com.service.tbterminal.shared.Role.ADMIN, com.service.tbterminal.shared.Role.OWNER)
+                        call.requireRole(com.service.tbterminal.shared.Role.OWNER)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val search = call.request.queryParameters["search"]
@@ -154,7 +182,7 @@ fun Application.systemRoutes() {
 
                     // Create User
                     post {
-                        call.requireRole(com.service.tbterminal.shared.Role.ADMIN, com.service.tbterminal.shared.Role.OWNER)
+                        call.requireRole(com.service.tbterminal.shared.Role.OWNER)
                         val actorUserId = call.getUserId()
                         val request = call.receive<UserCreateRequest>()
                         val user = service.createUser(request)
@@ -171,7 +199,7 @@ fun Application.systemRoutes() {
 
                     // Update User
                     put("/{id}") {
-                        call.requireRole(com.service.tbterminal.shared.Role.ADMIN, com.service.tbterminal.shared.Role.OWNER)
+                        call.requireRole(com.service.tbterminal.shared.Role.OWNER)
                         val actorUserId = call.getUserId()
                         val id = call.parameters["id"] ?: return@put call.respond(
                             HttpStatusCode.BadRequest,

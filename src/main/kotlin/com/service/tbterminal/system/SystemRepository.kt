@@ -120,6 +120,28 @@ class SystemRepository {
                 }
         }
 
+    suspend fun findUserById(id: UUID): UserRow? =
+        newSuspendedTransaction(Dispatchers.IO) {
+            (UsersTable innerJoin RolesTable)
+                .select { UsersTable.id eq id }
+                .singleOrNull()
+                ?.let {
+                    UserRow(
+                        id = it[UsersTable.id],
+                        username = it[UsersTable.username],
+                        name = it[UsersTable.name],
+                        passwordHash = it[UsersTable.passwordHash],
+                        pinHash = it[UsersTable.pinHash],
+                        email = it[UsersTable.email],
+                        roleName = it[RolesTable.name],
+                        isActive = it[UsersTable.isActive],
+                        tokenVersion = it[UsersTable.tokenVersion],
+                        createdAt = it[UsersTable.createdAt],
+                        lastLoginAt = it[UsersTable.lastLogin]
+                    )
+                }
+        }
+
     suspend fun createUser(name: String, username: String, passwordHash: String, pinHash: String, email: String?, roleId: UUID): UUID = newSuspendedTransaction(Dispatchers.IO) {
         val newId = UUID.randomUUID()
         UsersTable.insert {
@@ -378,6 +400,8 @@ private data class AuditActorRow(
 
 private fun AuditAction.toActivityLabel(tableName: String): String {
     when (tableName.lowercase()) {
+        "auth_login" -> return "Login"
+        "auth_logout" -> return "Logout"
         "user_pin" -> return "Ubah PIN"
         "user_password" -> return "Ubah Password"
         "user_credentials" -> return "Ubah Kredensial"
@@ -400,6 +424,8 @@ private fun String.toDomainLabel(): String {
         "user_pin" -> "PIN"
         "user_password" -> "Password"
         "user_credentials" -> "Kredensial"
+        "auth_login" -> "Login"
+        "auth_logout" -> "Logout"
         "store_settings" -> "Pengaturan Toko"
         "products" -> "Produk"
         "products_price" -> "Harga Produk"

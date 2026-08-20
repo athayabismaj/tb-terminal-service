@@ -3,12 +3,25 @@ package com.service.tbterminal.plugins
 import com.service.tbterminal.shared.*
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.plugins.ContentTransformationException
 import io.ktor.server.plugins.statuspages.*
 import io.ktor.server.response.*
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 
 fun Application.configureStatusPages() {
     install(StatusPages) {
+        status(HttpStatusCode.TooManyRequests) { call, _ ->
+            call.respond(
+                HttpStatusCode.TooManyRequests,
+                ErrorResponse("RATE_LIMITED", "Terlalu banyak percobaan. Silakan tunggu sebelum mencoba lagi")
+            )
+        }
+        exception<ContentTransformationException> { call, _ ->
+            call.respond(
+                HttpStatusCode.BadRequest,
+                ErrorResponse("INVALID_REQUEST", "Format request atau response tidak valid")
+            )
+        }
         exception<NotFoundException> { call, cause ->
             call.respond(
                 HttpStatusCode.NotFound,

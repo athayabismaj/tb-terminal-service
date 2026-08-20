@@ -1,6 +1,19 @@
-DB_URL=jdbc:postgresql://localhost:5432/tbterminal_backend
-DB_USER=postgres
-DB_PASSWORD=change-me
-JWT_SECRET=tb-terminal-dev-secret-key-min-32-chars!!
+APP_ENV=development
+DB_URL=
+DB_USER=
+DB_PASSWORD=
+JWT_SECRET=
 JWT_ISSUER=tb-terminal
 JWT_AUDIENCE=tb-terminal-client
+JWT_ACCESS_TOKEN_MINUTES=15
+JWT_REFRESH_TOKEN_DAYS=7
+# Simpan di volume privat di luar checkout source. Jangan commit dump.
+BACKUP_ENABLED=false
+BACKUP_DIRECTORY=D:/private/tb-terminal-backups
+BACKUP_RETENTION_DAYS=30
+BACKUP_INTERVAL_HOURS=24
+BACKUP_MAX_UPLOAD_MB=1024
+PG_DUMP_EXECUTABLE=pg_dump
+PG_RESTORE_EXECUTABLE=pg_restore
+# Aktifkan hanya selama maintenance restore yang diawasi.
+RESTORE_ENABLED=false

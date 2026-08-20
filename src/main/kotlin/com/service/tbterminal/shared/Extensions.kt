@@ -17,6 +17,11 @@ fun ApplicationCall.getUserId(): UUID {
     return principal.userId
 }
 
+fun ApplicationCall.getUserRole(): String {
+    return principal<AuthenticatedUserPrincipal>()?.role
+        ?: throw UnauthorizedException("Role user tidak tersedia")
+}
+
 /**
  * Extension untuk memvalidasi Role User dari JWT Principal.
  * Melempar ForbiddenException jika user tidak memiliki role yang diizinkan.

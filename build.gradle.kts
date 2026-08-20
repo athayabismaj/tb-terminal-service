@@ -6,10 +6,16 @@ plugins {
 }
 
 group = "com.service.tbterminal"
-version = "1.0.0-SNAPSHOT"
+version = "1.0.0"
 
 application {
     mainClass = "com.service.tbterminal.ApplicationKt"
+}
+
+ktor {
+    fatJar {
+        archiveFileName.set("tb-terminal-service-${project.version}-all.jar")
+    }
 }
 
 kotlin {
@@ -20,11 +26,14 @@ dependencies {
     implementation(ktorLibs.server.auth)
     implementation(ktorLibs.server.auth.jwt)
     implementation(ktorLibs.server.callLogging)
+    implementation("io.ktor:ktor-server-call-id:3.4.0")
+    implementation("io.ktor:ktor-server-forwarded-header:3.4.0")
     implementation(ktorLibs.server.config.yaml)
     implementation(ktorLibs.server.contentNegotiation)
     implementation(ktorLibs.server.core)
     implementation(ktorLibs.server.cors)
     implementation(ktorLibs.server.netty)
+    implementation(ktorLibs.server.rateLimit)
     implementation(ktorLibs.server.statusPages)
     implementation(libs.exposed.core)
     implementation(libs.exposed.jdbc)

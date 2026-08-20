@@ -12,11 +12,12 @@ import org.flywaydb.core.Flyway
  * so that schemas and tables are ready before the application uses them.
  */
 fun Application.configureDatabase() {
+    EnvironmentConfig.validateProductionConfiguration()
     val url = EnvironmentConfig.dbUrl
     val user = EnvironmentConfig.dbUser
     val password = EnvironmentConfig.dbPassword
 
-    log.info("Database: connecting to $url as $user")
+    log.info("Database: connecting using configured datasource")
 
     // Setup HikariCP DataSource
     val dataSource = HikariDataSource(HikariConfig().apply {
@@ -24,7 +25,11 @@ fun Application.configureDatabase() {
         username = user
         this.password = password
         driverClassName = "org.postgresql.Driver"
-        maximumPoolSize = 10
+        maximumPoolSize = EnvironmentConfig.dbMaximumPoolSize
+        minimumIdle = EnvironmentConfig.dbMinimumIdle
+        connectionTimeout = EnvironmentConfig.dbConnectionTimeoutMs
+        validationTimeout = 5_000
+        maxLifetime = 30 * 60 * 1_000L
         // Set search_path so all schemas are visible without prefix in queries
         connectionInitSql = "SET search_path TO system,inventory,sales,receivable,purchasing,public"
     })
@@ -45,4 +50,10 @@ fun Application.configureDatabase() {
 
     // Connect Exposed to the HikariDataSource
     org.jetbrains.exposed.sql.Database.connect(dataSource)
+    ProductionDataGuard.applyAndValidate(dataSource)
+    DatabaseHealth.attach(dataSource)
+    monitor.subscribe(ApplicationStopped) {
+        DatabaseHealth.detach(dataSource)
+        dataSource.close()
+    }
 }

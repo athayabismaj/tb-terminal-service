@@ -18,7 +18,17 @@ data class UnlockRequest(
 @Serializable
 data class LoginResponse(
     val token: String,
+    val refreshToken: String,
     val user: UserDto
+)
+
+@Serializable
+data class RefreshTokenRequest(val refreshToken: String)
+
+@Serializable
+data class RefreshTokenResponse(
+    val token: String,
+    val refreshToken: String
 )
 
 @Serializable

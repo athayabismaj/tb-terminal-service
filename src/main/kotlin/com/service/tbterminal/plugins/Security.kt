@@ -12,6 +12,8 @@ import io.ktor.server.application.*
 import io.ktor.server.auth.*
 import io.ktor.server.auth.jwt.*
 import io.ktor.server.response.respond
+import io.ktor.server.plugins.ratelimit.*
+import kotlin.time.Duration.Companion.minutes
 import org.koin.ktor.ext.inject
 import java.util.UUID
 
@@ -20,6 +22,13 @@ fun Application.configureSecurity() {
     val jwtAudience = EnvironmentConfig.jwtAudience
     val jwtIssuer = EnvironmentConfig.jwtIssuer
     val jwtSecret = EnvironmentConfig.jwtSecret
+
+    install(RateLimit) {
+        register(RateLimitName("login")) {
+            rateLimiter(limit = 5, refillPeriod = 1.minutes)
+            requestKey { call -> call.request.local.remoteHost }
+        }
+    }
 
     authentication {
         jwt("jwt-auth") {
@@ -39,6 +48,12 @@ fun Application.configureSecurity() {
                     .getClaim(JwtHelper.TOKEN_VERSION_CLAIM)
                     .asInt()
                     ?: return@validate null
+                val tokenType = credential.payload
+                    .getClaim(JwtHelper.TOKEN_TYPE_CLAIM)
+                    .asString()
+                if (tokenType != JwtHelper.ACCESS_TOKEN_TYPE) {
+                    return@validate null
+                }
 
                 val user = systemRepository.findAuthenticationUserById(userId)
                     ?: return@validate null

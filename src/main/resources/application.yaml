@@ -6,22 +6,14 @@ ktor:
     modules:
       - com.service.tbterminal.plugins.DependencyInjectionKt.configureDI
       - com.service.tbterminal.plugins.DatabaseKt.configureDatabase
+      - com.service.tbterminal.plugins.MonitoringKt.configureMonitoring
       - com.service.tbterminal.plugins.CorsKt.configureCors
       - com.service.tbterminal.plugins.SerializationKt.configureSerialization
       - com.service.tbterminal.plugins.SecurityKt.configureSecurity
       - com.service.tbterminal.plugins.StatusPagesKt.configureStatusPages
       - com.service.tbterminal.plugins.RoutingKt.configureRouting
+      - com.service.tbterminal.backup.BackupSchedulerKt.configureBackupScheduler
 
-# ─── Konfigurasi Environment ────────────────────────
-# Semua konfigurasi sensitif dikelola oleh EnvironmentConfig.kt
-# dengan pola hybrid: env var (production) → default (development).
-#
-# Default Development (langsung jalan tanpa set env var):
-#   DB_URL      = jdbc:postgresql://localhost:5432/tbterminal_backend
-#   DB_USER     = postgres
-#   DB_PASSWORD = postgres
-#   JWT_SECRET  = tb-terminal-dev-secret-key-min-32-chars!!
-#   JWT_ISSUER  = tb-terminal
-#   JWT_AUDIENCE= tb-terminal-client
-#
-# Production: Set environment variable di server/Docker untuk override.
+# Konfigurasi sensitif dibaca dari environment variable atau local.properties
+# yang diabaikan Git. Production wajib memakai APP_ENV=production dan secret
+# dari penyimpanan privat.

@@ -20,3 +20,9 @@ out/
 ### Env ###
 .env
 local.properties
+
+### Database backups ###
+*.dump
+*.dump.part
+*.backup
+backups/
