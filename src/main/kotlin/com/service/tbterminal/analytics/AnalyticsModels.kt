@@ -49,7 +49,9 @@ data class DailySalesSummary(
     val date: String,
     val transactionCount: Long,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val totalRevenue: java.math.BigDecimal,
-    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val totalDp: java.math.BigDecimal
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val totalDp: java.math.BigDecimal,
+    val voidedTransactionCount: Long = 0,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val voidedAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO
 )
 
 @Serializable
@@ -88,8 +90,43 @@ data class SalesReportResponse(
     val transactionStatuses: List<TransactionStatusSummary>,
     val topProducts: List<TopProductSalesSummary>,
     val cashiers: List<CashierSalesSummary>,
-    val receivables: SalesReceivableSummary
+    val receivables: SalesReceivableSummary,
+    val voided: VoidedSalesSummary = VoidedSalesSummary()
 )
+
+@Serializable
+data class VoidedSalesSummary(
+    val transactionCount: Long = 0,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val amount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val paidAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO
+)
+
+data class SalesReportFilter(
+    val startDate: java.time.LocalDate,
+    val endDate: java.time.LocalDate,
+    val cashierId: java.util.UUID? = null,
+    val sessionId: java.util.UUID? = null,
+    val customerId: java.util.UUID? = null,
+    val productId: java.util.UUID? = null,
+    val categoryId: java.util.UUID? = null,
+    val paymentMethod: String? = null,
+    val status: String? = null
+)
+
+enum class CsvExportType(val path: String) {
+    TRANSACTIONS("transactions"),
+    SALES_DETAILS("sales-details"),
+    STOCK("stock"),
+    STOCK_CARD("stock-card"),
+    RECEIVABLES("receivables"),
+    PAYMENTS("payments");
+
+    companion object {
+        fun fromPath(value: String): CsvExportType? = entries.firstOrNull { it.path == value }
+    }
+}
+
+data class CsvPage(val headers: List<String>, val rows: List<List<String?>>)
 
 @Serializable
 data class SalesReportRange(
