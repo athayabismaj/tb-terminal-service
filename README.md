@@ -80,17 +80,17 @@ cd tb-terminal-service
 # Buat database kosong bernama `tb_terminal_db`
 # (Pastikan username dan password postgres sesuai dengan `application.yaml`)
 
-# 3. Jalankan aplikasi (Flyway akan otomatis mengeksekusi 16 script migrasi dan seed data)
+# 3. Jalankan aplikasi (Flyway akan otomatis mengeksekusi seluruh migrasi sampai V33)
 ./gradlew run
 ```
 
 Server Ktor akan berjalan di `http://0.0.0.0:8080`.
 
-> [!NOTE]
-> Saat pertama kali dijalankan, migrasi Flyway akan memasukkan satu akun *Owner* default:
-> **Username**: `owner`
-> **Password**: `owner123`
-> **PIN**: `123456`
+Migrasi development memiliki akun seed untuk pengujian lokal. Nilainya tidak boleh
+dipakai saat deployment. Pada startup production pertama, berikan
+`BOOTSTRAP_OWNER_PASSWORD` dan `BOOTSTRAP_OWNER_PIN` melalui secret manager;
+hapus keduanya setelah owner berhasil login. Guard production menolak akun aktif
+dengan kredensial seed/default dan menolak identitas toko placeholder.
 
 ---
 
@@ -101,8 +101,24 @@ Server Ktor akan berjalan di `http://0.0.0.0:8080`.
 | `./gradlew run` | Menjalankan server aplikasi di mode *development* |
 | `./gradlew build` | Kompilasi proyek dan menjalankan *tests* |
 | `./gradlew test` | Menjalankan *Unit Tests* |
-| `./gradlew shadowJar`| Membuat *Fat JAR* untuk *production deployment* |
+| `./gradlew buildFatJar`| Membuat *Fat JAR* untuk *production deployment* |
 | `./gradlew clean` | Membersihkan *build cache* |
+
+### Backup dan restore PostgreSQL
+
+Backup server memerlukan `pg_dump`/`pg_restore` yang versinya kompatibel dengan
+PostgreSQL server. Konfigurasikan `BACKUP_DIRECTORY` ke volume privat di luar
+repository, lalu aktifkan jadwal dengan `BACKUP_ENABLED=true`. Retensi dan interval
+dikontrol oleh `BACKUP_RETENTION_DAYS` dan `BACKUP_INTERVAL_HOURS`; setiap dump
+custom PostgreSQL dicatat bersama ukuran dan checksum SHA-256.
+
+Restore hanya tersedia bagi OWNER/ADMIN. Alurnya wajib dua tahap: unggah ke endpoint
+validasi, lalu kirim token 10 menit, frasa `RESTORE <job-id>`, dan pengakuan downtime
+ke endpoint konfirmasi. Create backup dan confirm restore menghasilkan `202 Accepted`;
+poll endpoint detail job sampai `SUCCEEDED` atau `FAILED`. Set `RESTORE_ENABLED=true`
+hanya dalam jendela maintenance; server membuat safety backup baru sebelum
+`pg_restore` dijalankan. Jangan menaruh password database pada command line,
+repository, log, atau file dump.
 
 ---
 
