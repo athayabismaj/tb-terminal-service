@@ -4,8 +4,8 @@
 > sebelum menyentuh satu baris kode pun di project ini.
 > **Baca seluruh dokumen ini terlebih dahulu. Jangan skip.**
 >
-> Versi  : 1.0.0
-> Update : Perbaikan kritis — Flyway, suspend repository, Cloudinary, BCrypt async
+> Versi  : 1.2.0
+> Update : Integrasi Void Transaction dengan Manager Approval atomik
 
 ---
 
@@ -103,6 +103,7 @@ schema: system
   ├── roles              → role pengguna (owner|admin|kasir)
   ├── users              → akun karyawan + bcrypt pin_hash
   ├── audit_logs         → IMMUTABLE — log semua perubahan data
+  ├── manager_approvals  → grant approval scoped, short-lived, one-time
   └── store_settings     → SINGLETON — konfigurasi toko
 
 schema: inventory
@@ -1058,6 +1059,7 @@ Prefix semua API     : /api
 | POST | /api/auth/login | Public + RateLimit | Login username + PIN |
 | GET | /api/system/users | owner | Daftar user |
 | POST | /api/system/users | owner | Buat user baru |
+| POST | /api/system/manager-approvals | authenticated requester | Grant dari approver Admin/Owner |
 | PUT | /api/system/users/:id/pin | owner | Reset PIN |
 | PUT | /api/system/users/:id/deactivate | owner | Nonaktifkan user |
 | GET | /api/system/settings | semua | Baca pengaturan toko |
@@ -1091,6 +1093,7 @@ Prefix semua API     : /api
 | POST | /api/sales/transactions | kasir,admin | Buat transaksi |
 | GET | /api/sales/transactions | semua | Daftar transaksi |
 | GET | /api/sales/transactions/:id | semua | Detail transaksi |
+| POST | /api/sales/transactions/:id/void | owner/admin langsung; kasir + approval | Void transaksi secara atomik |
 | GET | /api/sales/transactions/:id/receipt | semua | Data struk JSON |
 | GET | /api/purchasing/suppliers | semua | Daftar supplier |
 | POST | /api/purchasing/suppliers | admin,owner | Tambah supplier |
@@ -1111,33 +1114,29 @@ Prefix semua API     : /api
 
 ## 9. Pola yang Digunakan
 
-### 9.1 Role Check
+### 9.1 Permission Check
 
 ```kotlin
-// shared/Extensions.kt
-suspend fun ApplicationCall.requireRole(vararg allowedRoles: String) {
-    val role = this.principal<JWTPrincipal>()
-        ?.payload?.getClaim("role")?.asString()
-        ?: throw AuthenticationException("Token tidak valid")
+call.requirePermission(Permission.MANAGE_INVENTORY)
 
-    if (role !in allowedRoles) {
-        throw AuthorizationException("Role '$role' tidak memiliki akses ke resource ini")
-    }
-}
-
-fun ApplicationCall.extractUserId(): UUID {
-    val id = this.principal<JWTPrincipal>()
-        ?.payload?.getClaim("user_id")?.asString()
-        ?: throw AuthenticationException("Token tidak valid")
-    return UUID.fromString(id)
-}
-
-fun ApplicationCall.extractRole(): String {
-    return this.principal<JWTPrincipal>()
-        ?.payload?.getClaim("role")?.asString()
-        ?: throw AuthenticationException("Token tidak valid")
-}
+// Operasi sensitif memeriksa permission kembali di service.
+AccessPolicy.require(actorRole, Permission.APPROVE_SENSITIVE_ACTION)
 ```
+
+Manager Approval memakai requester dari JWT, approver aktif dari database, dan
+verifikasi PIN BCrypt di `Dispatchers.IO`. Grant dipersistensikan pada
+`system.manager_approvals`, memiliki TTL, action/resource scope, serta konsumsi
+conditional-update satu kali. Void langsung hanya untuk permission
+`VOID_TRANSACTION`; actor tanpa permission langsung wajib memakai grant
+`VOID_TRANSACTION` yang scoped ke transaksi target. Mutasi Void, konsumsi grant,
+dan audit wajib berada dalam transaksi database yang sama. Refund tidak boleh
+disamakan dengan Void. Refund langsung hanya untuk permission `REFUND_TRANSACTION`;
+Kasir wajib memakai grant action `REFUND_TRANSACTION` yang scoped ke transaksi
+target. Batch 3B hanya mendukung full refund. Nominal refund dihitung server-side
+dari pembayaran aktual; stok hanya kembali melalui stock adjustment/movement bila
+disposisi `RETURN_TO_STOCK`. Refund record, kompensasi pembayaran, reversal piutang,
+kas, stok, status `REFUNDED`, konsumsi approval, dan audit wajib satu transaksi.
+Discount/Discount Override belum terintegrasi.
 
 ### 9.2 Custom Exceptions
 
@@ -1185,6 +1184,38 @@ get("/health") {
     }
 }
 ```
+
+---
+
+### 9.5 Aturan Discount Checkout
+
+```
+Checkout request
+  -> load dan lock authoritative product price
+  -> DiscountCalculator (pure, BigDecimal, HALF_UP)
+  -> effective combined discount policy
+  -> DISCOUNT_OVERRIDE approval bila Kasir melewati limit
+  -> transaction/item snapshot + stock + payment + receivable + cash + audit
+  -> consume approval dan checkout attempt
+  -> COMMIT
+```
+
+- Formula discount hanya boleh berada di `sales/DiscountCalculator.kt`; Route tidak
+  boleh menghitung harga, discount amount, atau final total.
+- Fixed item discount berlaku pada line total. Transaction discount selalu dihitung
+  setelah seluruh item discount.
+- Kasir dinilai dari effective total discount agar item + transaction discount tidak
+  dapat mem-bypass limit di `system.store_settings`.
+- Approval `DISCOUNT_OVERRIDE` wajib scoped ke checkout attempt UUID dan fingerprint
+  server yang memuat product, quantity, authoritative price, serta discount intent.
+- Final checkout wajib menghitung ulang. Approval baru dikonsumsi dalam transaksi
+  database setelah seluruh business write berhasil; idempotency replay dicek lebih
+  dahulu.
+- Transaction `total`, payment, receivable, dan cash menggunakan nilai NET. Refund
+  dan Void tidak boleh mengompensasi nilai gross. Discount bukan cash expense.
+- Jangan menerima `discountAmount`, `netTotal`, `finalPrice`, atau client price sebagai
+  authority untuk checkout online.
+- Jangan menambahkan voucher/promo/rule engine ke komponen Discount.
 
 ---
 
