@@ -9,6 +9,12 @@ import com.service.tbterminal.plugins.configureStatusPages
 import com.service.tbterminal.plugins.DatabaseHealth
 import com.service.tbterminal.system.SystemRepository
 import com.service.tbterminal.system.UserSessionService
+import com.service.tbterminal.system.ManagerApprovalAction
+import com.service.tbterminal.system.ManagerApprovalResourceType
+import com.service.tbterminal.system.ManagerApprovalScope
+import com.service.tbterminal.system.ManagerApprovalService
+import com.service.tbterminal.shared.ManagerApprovalException
+import com.service.tbterminal.shared.Role
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import io.ktor.client.request.get
@@ -16,6 +22,7 @@ import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitFormWithBinaryData
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsBytes
@@ -51,6 +58,7 @@ import java.sql.Connection
 import java.sql.SQLException
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import org.koin.core.context.stopKoin
@@ -125,6 +133,8 @@ class IntegrationTest {
         dataSource.connection.use { connection ->
             connection.createStatement().use { statement ->
                 statement.execute("TRUNCATE TABLE system.database_backup_jobs CASCADE")
+                statement.execute("TRUNCATE TABLE sales.checkout_discount_attempts CASCADE")
+                statement.execute("TRUNCATE TABLE system.manager_approvals CASCADE")
                 statement.execute("TRUNCATE TABLE receivable.receivable_payments, receivable.receivables CASCADE")
                 statement.execute("TRUNCATE TABLE sales.cash_sessions CASCADE")
                 statement.execute("DELETE FROM receivable.customers WHERE name LIKE 'Integration Receivable %'")
@@ -414,6 +424,208 @@ class IntegrationTest {
     }
 
     @Test
+    fun test_full_refund_should_compensate_cash_restore_stock_and_be_idempotent() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val product = createProductFixture()
+        assertTrue(openSession(token).status.value in 200..299)
+        val transactionId = checkoutTransactionId(
+            checkout(token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
+        )
+        val key = "refund-${UUID.randomUUID()}"
+
+        val first = refundTransaction(token, transactionId, key, "Barang dikembalikan utuh")
+        val replay = refundTransaction(token, transactionId, key, "Barang dikembalikan utuh")
+
+        assertEquals(HttpStatusCode.Created, first.status, first.bodyAsText())
+        assertEquals(HttpStatusCode.OK, replay.status, replay.bodyAsText())
+        assertTrue(refundReplay(replay))
+        assertEquals("refunded", transactionStatus(transactionId))
+        assertEquals(1, transactionRefundCount(transactionId))
+        assertEquals(BigDecimal("200.00"), refundFinancialAmount(transactionId))
+        assertEquals(BigDecimal("-200.00"), refundCompensationTotal(transactionId))
+        assertEquals(BigDecimal("10.00"), stockQuantity(product.id))
+        assertEquals(stockQuantity(product.id), latestLedgerBalance(product.id))
+        assertEquals(1, stockMovementCount(product.id, "REFUND"))
+        assertEquals(BigDecimal("100000.00"), activeCashSystemCash(ownerId()))
+
+        val voidAfterRefund = voidTransaction(
+            token, transactionId, "void-${UUID.randomUUID()}", "Void tidak boleh sesudah refund"
+        )
+        assertTrue(voidAfterRefund.status.value >= 400, voidAfterRefund.bodyAsText())
+        assertEquals(0, transactionVoidCount(transactionId))
+
+        val report = client.get("/api/analytics/sales/report") { bearer(token) }
+        assertEquals(HttpStatusCode.OK, report.status, report.bodyAsText())
+        val reportData = Json.parseToJsonElement(report.bodyAsText()).jsonObject.getValue("data").jsonObject
+        assertEquals("200.00", reportData.getValue("totals").jsonObject.getValue("grossRevenue").jsonPrimitive.content)
+        assertEquals("200.00", reportData.getValue("totals").jsonObject.getValue("refundAmount").jsonPrimitive.content)
+        assertEquals("0.00", reportData.getValue("totals").jsonObject.getValue("netRevenue").jsonPrimitive.content)
+        assertEquals("1", reportData.getValue("refunded").jsonObject.getValue("transactionCount").jsonPrimitive.content)
+    }
+
+    @Test
+    fun test_refund_without_physical_return_should_not_restore_stock() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val product = createProductFixture()
+        assertTrue(openSession(token).status.value in 200..299)
+        val transactionId = checkoutTransactionId(
+            checkout(token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        )
+
+        val response = refundTransaction(
+            token,
+            transactionId,
+            "refund-${UUID.randomUUID()}",
+            "Barang tidak kembali ke toko",
+            disposition = "NOT_RETURNED"
+        )
+
+        assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+        assertEquals(BigDecimal("9.00"), stockQuantity(product.id))
+        assertEquals(0, stockMovementCount(product.id, "REFUND"))
+    }
+
+    @Test
+    fun test_refund_hutang_and_dp_use_actual_received_amount_and_cancel_receivable() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val product = createProductFixture()
+        val customerId = createReceivableCustomerFixture(BigDecimal("1000.00"))
+        assertTrue(openSession(token).status.value in 200..299)
+
+        val debtId = checkoutTransactionId(
+            checkoutWithCustomer(
+                token, product, "1.00", "0.00", "checkout-${UUID.randomUUID()}", "hutang", customerId
+            )
+        )
+        val debtRefund = refundTransaction(
+            token, debtId, "refund-${UUID.randomUUID()}", "Membatalkan piutang tanpa pembayaran"
+        )
+        assertEquals(HttpStatusCode.Created, debtRefund.status, debtRefund.bodyAsText())
+        assertEquals(BigDecimal("0.00"), refundFinancialAmount(debtId))
+        assertFalse(receivableActive(debtId))
+
+        val dpId = checkoutTransactionId(
+            checkoutWithCustomer(
+                token, product, "1.00", "30.00", "checkout-${UUID.randomUUID()}", "dp", customerId
+            )
+        )
+        val dpRefund = refundTransaction(
+            token, dpId, "refund-${UUID.randomUUID()}", "Mengembalikan uang muka pelanggan"
+        )
+        assertEquals(HttpStatusCode.Created, dpRefund.status, dpRefund.bodyAsText())
+        assertEquals(BigDecimal("30.00"), refundFinancialAmount(dpId))
+        assertFalse(receivableActive(dpId))
+    }
+
+    @Test
+    fun test_concurrent_refund_should_create_one_compensation_and_one_stock_return() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val product = createProductFixture()
+        assertTrue(openSession(token).status.value in 200..299)
+        val transactionId = checkoutTransactionId(
+            checkout(token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
+        )
+        val release = CompletableDeferred<Unit>()
+        val responses = coroutineScope {
+            val first = async {
+                release.await()
+                refundTransaction(token, transactionId, "refund-${UUID.randomUUID()}", "Refund concurrent pertama")
+            }
+            val second = async {
+                release.await()
+                refundTransaction(token, transactionId, "refund-${UUID.randomUUID()}", "Refund concurrent kedua")
+            }
+            release.complete(Unit)
+            listOf(first.await(), second.await())
+        }
+
+        assertEquals(1, responses.count { it.status.value in 200..299 })
+        assertEquals(1, responses.count { it.status.value >= 400 })
+        assertEquals(1, transactionRefundCount(transactionId))
+        assertEquals(BigDecimal("10.00"), stockQuantity(product.id))
+        assertEquals(1, stockMovementCount(product.id, "REFUND"))
+        assertEquals(1, refundCompensationCount(transactionId))
+    }
+
+    @Test
+    fun test_cashier_refund_requires_and_consumes_refund_scoped_approval() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "refund_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "refund_cashier")
+        val product = createProductFixture()
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+        val transactionId = checkoutTransactionId(
+            checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        )
+
+        val missing = refundTransaction(
+            cashier.token, transactionId, "refund-${UUID.randomUUID()}", "Kasir tanpa persetujuan"
+        )
+        assertEquals(HttpStatusCode.Forbidden, missing.status, missing.bodyAsText())
+        assertTrue(missing.bodyAsText().contains("MANAGER_APPROVAL_REQUIRED"), missing.bodyAsText())
+
+        val approvalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token,
+                UUID.fromString(transactionId),
+                admin.username,
+                admin.pin,
+                action = "REFUND_TRANSACTION"
+            )
+        )
+        val key = "refund-${UUID.randomUUID()}"
+        val approved = refundTransaction(
+            cashier.token, transactionId, key, "Kasir refund dengan persetujuan", managerApprovalId = approvalId
+        )
+        val replay = refundTransaction(
+            cashier.token, transactionId, key, "Kasir refund dengan persetujuan", managerApprovalId = approvalId
+        )
+
+        assertEquals(HttpStatusCode.Created, approved.status, approved.bodyAsText())
+        assertEquals(HttpStatusCode.OK, replay.status, replay.bodyAsText())
+        assertEquals("USED", managerApprovalStatus(approvalId))
+        assertEquals(1, transactionRefundCount(transactionId))
+    }
+
+    @Test
+    fun test_refund_failure_should_rollback_event_status_stock_and_approval() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "refund_rollback_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "refund_rollback_cashier")
+        val product = createProductFixture()
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+        val transactionId = checkoutTransactionId(
+            checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        )
+        val approvalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token, UUID.fromString(transactionId), admin.username, admin.pin,
+                action = "REFUND_TRANSACTION"
+            )
+        )
+        deleteStockFixture(product.id)
+
+        val response = refundTransaction(
+            cashier.token,
+            transactionId,
+            "refund-${UUID.randomUUID()}",
+            "Paksa rollback refund tanpa stok",
+            managerApprovalId = approvalId
+        )
+
+        assertTrue(response.status.value >= 400, response.bodyAsText())
+        assertEquals("lunas", transactionStatus(transactionId))
+        assertEquals(0, transactionRefundCount(transactionId))
+        assertEquals("APPROVED", managerApprovalStatus(approvalId))
+    }
+
+    @Test
     fun test_report_separates_voided_totals_and_csv_neutralizes_formula() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
@@ -486,6 +698,257 @@ class IntegrationTest {
         assertEquals("lunas", transactionStatus(transactionId))
         assertEquals(0, transactionVoidCount(transactionId))
         assertEquals(0, stockMovementCount(product.id, "VOID"))
+    }
+
+    @Test
+    fun test_admin_voids_directly_while_cashier_requires_and_consumes_scoped_approval() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "void_direct_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "void_cashier")
+        val product = createProductFixture()
+
+        assertTrue(openSession(admin.token).status.value in 200..299)
+        val adminTransactionId = checkoutTransactionId(
+            checkout(admin.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        )
+        val adminVoid = voidTransaction(
+            admin.token,
+            adminTransactionId,
+            "void-${UUID.randomUUID()}",
+            "Admin membatalkan transaksi"
+        )
+        assertEquals(HttpStatusCode.OK, adminVoid.status, adminVoid.bodyAsText())
+        assertFalse(adminVoid.bodyAsText().contains("managerApprovalId\":\""), adminVoid.bodyAsText())
+
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+        val cashierTransactionId = checkoutTransactionId(
+            checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        )
+        val missingApproval = voidTransaction(
+            cashier.token,
+            cashierTransactionId,
+            "void-${UUID.randomUUID()}",
+            "Kasir mencoba tanpa approval"
+        )
+        assertEquals(HttpStatusCode.Forbidden, missingApproval.status, missingApproval.bodyAsText())
+        assertTrue(missingApproval.bodyAsText().contains("MANAGER_APPROVAL_REQUIRED"), missingApproval.bodyAsText())
+        assertEquals("lunas", transactionStatus(cashierTransactionId))
+
+        val createdApproval = requestManagerApproval(
+            cashier.token,
+            UUID.fromString(cashierTransactionId),
+            admin.username,
+            admin.pin
+        )
+        val approvalId = managerApprovalId(createdApproval)
+        val cashierVoidKey = "void-${UUID.randomUUID()}"
+        val approvedVoid = voidTransaction(
+            cashier.token,
+            cashierTransactionId,
+            cashierVoidKey,
+            "Kasir membatalkan dengan approval",
+            approvalId
+        )
+        val replay = voidTransaction(
+            cashier.token,
+            cashierTransactionId,
+            cashierVoidKey,
+            "Kasir membatalkan dengan approval",
+            approvalId
+        )
+
+        assertEquals(HttpStatusCode.OK, approvedVoid.status, approvedVoid.bodyAsText())
+        assertEquals(HttpStatusCode.OK, replay.status, replay.bodyAsText())
+        assertTrue(voidReplay(replay))
+        assertTrue(approvedVoid.bodyAsText().contains(approvalId.toString()), approvedVoid.bodyAsText())
+        assertEquals("USED", managerApprovalStatus(approvalId))
+        assertEquals(1, transactionVoidCount(cashierTransactionId))
+        val voidAudit = voidAuditMetadata(UUID.fromString(cashierTransactionId))
+        assertTrue(voidAudit.contains(approvalId.toString()), voidAudit)
+        assertTrue(voidAudit.contains(admin.userId.toString()), voidAudit)
+    }
+
+    @Test
+    fun test_cashier_void_rejects_foreign_action_and_transaction_scope_mismatches() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "void_scope_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "void_scope_cashier")
+        val otherCashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "void_scope_other")
+        val product = createProductFixture()
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+        val transactionId = UUID.fromString(
+            checkoutTransactionId(
+                checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+            )
+        )
+
+        val foreignApproval = managerApprovalId(
+            requestManagerApproval(otherCashier.token, transactionId, admin.username, admin.pin)
+        )
+        val foreign = voidTransaction(
+            cashier.token, transactionId.toString(), "void-${UUID.randomUUID()}",
+            "Approval milik kasir lain", foreignApproval
+        )
+        assertEquals(HttpStatusCode.Forbidden, foreign.status, foreign.bodyAsText())
+        assertTrue(foreign.bodyAsText().contains("MANAGER_APPROVAL_REQUESTER_MISMATCH"), foreign.bodyAsText())
+
+        val actionApproval = managerApprovalId(
+            requestManagerApproval(
+                cashier.token,
+                transactionId,
+                admin.username,
+                admin.pin,
+                action = "REFUND_TRANSACTION"
+            )
+        )
+        val wrongAction = voidTransaction(
+            cashier.token, transactionId.toString(), "void-${UUID.randomUUID()}",
+            "Approval action tidak sesuai", actionApproval
+        )
+        assertEquals(HttpStatusCode.Forbidden, wrongAction.status, wrongAction.bodyAsText())
+        assertTrue(wrongAction.bodyAsText().contains("MANAGER_APPROVAL_ACTION_MISMATCH"), wrongAction.bodyAsText())
+
+        val wrongResourceApproval = managerApprovalId(
+            requestManagerApproval(cashier.token, UUID.randomUUID(), admin.username, admin.pin)
+        )
+        val wrongResource = voidTransaction(
+            cashier.token, transactionId.toString(), "void-${UUID.randomUUID()}",
+            "Approval transaksi tidak sesuai", wrongResourceApproval
+        )
+        assertEquals(HttpStatusCode.Forbidden, wrongResource.status, wrongResource.bodyAsText())
+        assertTrue(wrongResource.bodyAsText().contains("MANAGER_APPROVAL_SCOPE_MISMATCH"), wrongResource.bodyAsText())
+        assertEquals("lunas", transactionStatus(transactionId.toString()))
+        assertEquals(0, transactionVoidCount(transactionId.toString()))
+    }
+
+    @Test
+    fun test_void_business_failure_rolls_back_approval_and_void_audit() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "void_rollback_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "void_rollback_cashier")
+        val product = createProductFixture()
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+        val transactionId = checkoutTransactionId(
+            checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        )
+        val approvalId = managerApprovalId(
+            requestManagerApproval(cashier.token, UUID.fromString(transactionId), admin.username, admin.pin)
+        )
+        deleteStockFixture(product.id)
+
+        val response = voidTransaction(
+            cashier.token,
+            transactionId,
+            "void-${UUID.randomUUID()}",
+            "Paksa rollback Void berapproval",
+            approvalId
+        )
+
+        assertTrue(response.status.value >= 400, response.bodyAsText())
+        assertEquals("lunas", transactionStatus(transactionId))
+        assertEquals("APPROVED", managerApprovalStatus(approvalId))
+        assertEquals(0, transactionVoidCount(transactionId))
+        assertEquals(0, voidAuditCount(UUID.fromString(transactionId)))
+    }
+
+    @Test
+    fun test_cashier_void_rejects_expired_and_already_used_approval() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "void_state_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "void_state_cashier")
+        val product = createProductFixture()
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+
+        val expiredTransactionId = UUID.fromString(
+            checkoutTransactionId(
+                checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+            )
+        )
+        val expiredApprovalId = managerApprovalId(
+            requestManagerApproval(cashier.token, expiredTransactionId, admin.username, admin.pin)
+        )
+        expireManagerApproval(expiredApprovalId)
+        val expiredResponse = voidTransaction(
+            cashier.token,
+            expiredTransactionId.toString(),
+            "void-${UUID.randomUUID()}",
+            "Approval sudah kedaluwarsa",
+            expiredApprovalId
+        )
+        assertEquals(HttpStatusCode.Conflict, expiredResponse.status, expiredResponse.bodyAsText())
+        assertTrue(expiredResponse.bodyAsText().contains("MANAGER_APPROVAL_EXPIRED"), expiredResponse.bodyAsText())
+        assertEquals("lunas", transactionStatus(expiredTransactionId.toString()))
+
+        val usedTransactionId = UUID.fromString(
+            checkoutTransactionId(
+                checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+            )
+        )
+        val usedApprovalId = managerApprovalId(
+            requestManagerApproval(cashier.token, usedTransactionId, admin.username, admin.pin)
+        )
+        val approvalService = org.koin.core.context.GlobalContext.get().get<ManagerApprovalService>()
+        approvalService.consumeApproval(
+            ManagerApprovalScope(
+                approvalId = usedApprovalId,
+                requesterUserId = cashier.userId,
+                action = ManagerApprovalAction.VOID_TRANSACTION,
+                resourceType = ManagerApprovalResourceType.TRANSACTION,
+                resourceId = usedTransactionId
+            ),
+            null
+        )
+        val usedResponse = voidTransaction(
+            cashier.token,
+            usedTransactionId.toString(),
+            "void-${UUID.randomUUID()}",
+            "Approval sudah pernah dipakai",
+            usedApprovalId
+        )
+        assertEquals(HttpStatusCode.Conflict, usedResponse.status, usedResponse.bodyAsText())
+        assertTrue(usedResponse.bodyAsText().contains("MANAGER_APPROVAL_ALREADY_USED"), usedResponse.bodyAsText())
+        assertEquals("lunas", transactionStatus(usedTransactionId.toString()))
+    }
+
+    @Test
+    fun test_concurrent_cashier_void_with_one_approval_has_exactly_one_success() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "void_concurrent_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "void_concurrent_cashier")
+        val product = createProductFixture()
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+        val transactionId = checkoutTransactionId(
+            checkout(cashier.token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
+        )
+        val approvalId = managerApprovalId(
+            requestManagerApproval(cashier.token, UUID.fromString(transactionId), admin.username, admin.pin)
+        )
+        val release = CompletableDeferred<Unit>()
+
+        val responses = coroutineScope {
+            val first = async {
+                release.await()
+                voidTransaction(cashier.token, transactionId, "void-${UUID.randomUUID()}", "Void approval bersamaan A", approvalId)
+            }
+            val second = async {
+                release.await()
+                voidTransaction(cashier.token, transactionId, "void-${UUID.randomUUID()}", "Void approval bersamaan B", approvalId)
+            }
+            release.complete(Unit)
+            listOf(first.await(), second.await())
+        }
+
+        assertEquals(1, responses.count { it.status.value in 200..299 })
+        assertEquals(1, responses.count { it.status.value >= 400 })
+        assertEquals("USED", managerApprovalStatus(approvalId))
+        assertEquals(1, transactionVoidCount(transactionId))
+        assertEquals(BigDecimal("10.00"), stockQuantity(product.id))
+        assertEquals(1, stockMovementCount(product.id, "VOID"))
     }
 
     @Test
@@ -570,6 +1033,7 @@ class IntegrationTest {
             client.get("/api/system/users") { bearer(cashierToken) },
             client.get("/api/analytics/sales/report") { bearer(cashierToken) },
             client.get("/api/system/database-backups") { bearer(cashierToken) },
+            client.get("/api/system/security-settings") { bearer(cashierToken) },
             client.post("/api/inventory/imports/products/preview") {
                 contentType(ContentType.Application.Json)
                 bearer(cashierToken)
@@ -587,6 +1051,258 @@ class IntegrationTest {
 
         assertEquals(HttpStatusCode.OK, client.get("/api/analytics/sales/report") { bearer(ownerToken) }.status)
         assertEquals(HttpStatusCode.OK, client.get("/api/system/database-backups") { bearer(ownerToken) }.status)
+        assertEquals(HttpStatusCode.OK, client.get("/api/system/security-settings") { bearer(ownerToken) }.status)
+        assertEquals(HttpStatusCode.OK, client.get("/api/system/store-profile") { bearer(cashierToken) }.status)
+    }
+
+    @Test
+    fun test_protected_routes_require_authentication() = testApplication {
+        application { configureIntegrationApplication() }
+
+        val responses = listOf(
+            client.get("/api/system/users"),
+            client.get("/api/system/roles"),
+            client.get("/api/system/store-profile"),
+            client.get("/api/system/security-settings"),
+            client.get("/api/system/database-backups"),
+            client.get("/api/inventory/products"),
+            client.get("/api/analytics/sales/report")
+        )
+
+        responses.forEach { response ->
+            assertEquals(HttpStatusCode.Unauthorized, response.status, response.bodyAsText())
+        }
+    }
+
+    @Test
+    fun test_manager_approval_route_uses_jwt_requester_and_admin_approver_without_exposing_credentials() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val requester = createAndLoginApprovalUser(ownerToken, Role.KASIR, "approval_requester")
+        val approver = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "approval_admin")
+        val resourceId = UUID.randomUUID()
+
+        val unauthenticated = requestManagerApproval(
+            token = null,
+            resourceId = resourceId,
+            approverUsername = approver.username,
+            approverPin = approver.pin
+        )
+        assertEquals(HttpStatusCode.Unauthorized, unauthenticated.status, unauthenticated.bodyAsText())
+
+        val created = requestManagerApproval(
+            token = requester.token,
+            resourceId = resourceId,
+            approverUsername = approver.username,
+            approverPin = approver.pin
+        )
+        val body = created.bodyAsText()
+        assertEquals(HttpStatusCode.Created, created.status, body)
+        assertFalse(body.contains("approverPin", ignoreCase = true), body)
+        assertFalse(body.contains("pinHash", ignoreCase = true), body)
+        assertFalse(body.contains(approver.pin), body)
+        assertFalse(body.contains("token", ignoreCase = true), body)
+        val approvalId = UUID.fromString(
+            Json.parseToJsonElement(body).jsonObject.getValue("data").jsonObject
+                .getValue("approvalId").jsonPrimitive.content
+        )
+
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                """
+                SELECT requested_by_user_id, approved_by_user_id, action, resource_type, resource_id, status
+                FROM system.manager_approvals WHERE id = ?
+                """.trimIndent()
+            ).use { statement ->
+                statement.setObject(1, approvalId)
+                statement.executeQuery().use { rows ->
+                    assertTrue(rows.next())
+                    assertEquals(requester.userId, rows.getObject("requested_by_user_id", UUID::class.java))
+                    assertEquals(approver.userId, rows.getObject("approved_by_user_id", UUID::class.java))
+                    assertEquals("VOID_TRANSACTION", rows.getString("action"))
+                    assertEquals("TRANSACTION", rows.getString("resource_type"))
+                    assertEquals(resourceId, rows.getObject("resource_id", UUID::class.java))
+                    assertEquals("APPROVED", rows.getString("status"))
+                }
+            }
+            connection.prepareStatement(
+                "SELECT new_data::text FROM system.audit_logs WHERE table_name = 'manager_approvals' AND record_id = ?"
+            ).use { statement ->
+                statement.setObject(1, approvalId)
+                statement.executeQuery().use { rows ->
+                    assertTrue(rows.next())
+                    val audit = rows.getString(1)
+                    assertTrue(audit.contains(requester.userId.toString()), audit)
+                    assertTrue(audit.contains(approver.userId.toString()), audit)
+                    assertFalse(audit.contains(approver.pin), audit)
+                }
+            }
+        }
+
+        val invalidAction = client.post("/api/system/manager-approvals") {
+            contentType(ContentType.Application.Json)
+            bearer(requester.token)
+            setBody(
+                """{"action":"BECOME_OWNER","resourceType":"TRANSACTION","resourceId":"$resourceId","approverUsername":"${approver.username}","approverPin":"${approver.pin}"}"""
+            )
+        }
+        assertEquals(HttpStatusCode.BadRequest, invalidAction.status, invalidAction.bodyAsText())
+    }
+
+    @Test
+    fun test_manager_approval_rejects_cashier_inactive_invalid_pin_and_self_approval() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val requester = createAndLoginApprovalUser(ownerToken, Role.KASIR, "approval_requester_rules")
+        val cashierApprover = createAndLoginApprovalUser(ownerToken, Role.KASIR, "approval_cashier")
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "approval_self_admin")
+        val inactiveAdmin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "approval_inactive")
+        dataSource.connection.use { connection ->
+            connection.prepareStatement("UPDATE system.users SET is_active = false WHERE id = ?").use { statement ->
+                statement.setObject(1, inactiveAdmin.userId)
+                statement.executeUpdate()
+            }
+        }
+
+        val responses = listOf(
+            requestManagerApproval(requester.token, UUID.randomUUID(), cashierApprover.username, cashierApprover.pin),
+            requestManagerApproval(requester.token, UUID.randomUUID(), admin.username, "000999"),
+            requestManagerApproval(requester.token, UUID.randomUUID(), inactiveAdmin.username, inactiveAdmin.pin),
+            requestManagerApproval(admin.token, UUID.randomUUID(), admin.username, admin.pin)
+        )
+        responses.forEach { response ->
+            assertEquals(HttpStatusCode.Forbidden, response.status, response.bodyAsText())
+        }
+        assertEquals(0, managerApprovalCount())
+    }
+
+    @Test
+    fun test_owner_can_approve_manager_approval() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val requester = createAndLoginApprovalUser(ownerToken, Role.KASIR, "approval_owner_requester")
+        val ownerApprover = createAndLoginApprovalUser(ownerToken, Role.OWNER, "approval_owner")
+
+        val response = requestManagerApproval(
+            requester.token,
+            UUID.randomUUID(),
+            ownerApprover.username,
+            ownerApprover.pin
+        )
+
+        assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+    }
+
+    @Test
+    fun test_manager_approval_concurrent_consume_allows_exactly_one_use() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val requester = createAndLoginApprovalUser(ownerToken, Role.KASIR, "approval_concurrent_requester")
+        val approver = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "approval_concurrent_admin")
+        val resourceId = UUID.randomUUID()
+        val created = requestManagerApproval(requester.token, resourceId, approver.username, approver.pin)
+        val approvalId = UUID.fromString(
+            Json.parseToJsonElement(created.bodyAsText()).jsonObject.getValue("data").jsonObject
+                .getValue("approvalId").jsonPrimitive.content
+        )
+        val service = org.koin.core.context.GlobalContext.get().get<ManagerApprovalService>()
+        val scope = ManagerApprovalScope(
+            approvalId = approvalId,
+            requesterUserId = requester.userId,
+            action = ManagerApprovalAction.VOID_TRANSACTION,
+            resourceType = ManagerApprovalResourceType.TRANSACTION,
+            resourceId = resourceId
+        )
+        val release = CompletableDeferred<Unit>()
+
+        val results = coroutineScope {
+            val first = async { release.await(); runCatching { service.consumeApproval(scope, null) } }
+            val second = async { release.await(); runCatching { service.consumeApproval(scope, null) } }
+            release.complete(Unit)
+            listOf(first.await(), second.await())
+        }
+
+        assertEquals(1, results.count(Result<*>::isSuccess))
+        assertEquals(1, results.count(Result<*>::isFailure))
+        assertTrue(results.single(Result<*>::isFailure).exceptionOrNull() is ManagerApprovalException)
+        assertEquals("USED", managerApprovalStatus(approvalId))
+        assertEquals(2, auditCount("system", "manager_approvals", approvalId))
+    }
+
+    @Test
+    fun test_manager_approval_expiry_foreign_key_and_failed_creation_leave_consistent_state() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val requester = createAndLoginApprovalUser(ownerToken, Role.KASIR, "approval_expired_requester")
+        val approver = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "approval_expired_admin")
+        val resourceId = UUID.randomUUID()
+
+        val invalidPin = requestManagerApproval(requester.token, resourceId, approver.username, "000999")
+        assertEquals(HttpStatusCode.Forbidden, invalidPin.status, invalidPin.bodyAsText())
+        assertEquals(0, managerApprovalCount())
+
+        val created = requestManagerApproval(requester.token, resourceId, approver.username, approver.pin)
+        val approvalId = UUID.fromString(
+            Json.parseToJsonElement(created.bodyAsText()).jsonObject.getValue("data").jsonObject
+                .getValue("approvalId").jsonPrimitive.content
+        )
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "UPDATE system.manager_approvals SET created_at = NOW() - INTERVAL '10 minutes', expires_at = NOW() - INTERVAL '5 minutes' WHERE id = ?"
+            ).use { statement ->
+                statement.setObject(1, approvalId)
+                statement.executeUpdate()
+            }
+        }
+        val service = org.koin.core.context.GlobalContext.get().get<ManagerApprovalService>()
+        assertFailsWith<ManagerApprovalException> {
+            service.validateApproval(
+                ManagerApprovalScope(
+                    approvalId,
+                    requester.userId,
+                    ManagerApprovalAction.VOID_TRANSACTION,
+                    ManagerApprovalResourceType.TRANSACTION,
+                    resourceId
+                )
+            )
+        }
+        assertEquals("EXPIRED", managerApprovalStatus(approvalId))
+
+        assertFailsWith<SQLException> {
+            dataSource.connection.use { connection ->
+                connection.prepareStatement(
+                    """
+                    INSERT INTO system.manager_approvals
+                        (requested_by_user_id, approved_by_user_id, action, resource_type, resource_id, expires_at)
+                    VALUES (?, ?, 'VOID_TRANSACTION', 'TRANSACTION', ?, NOW() + INTERVAL '5 minutes')
+                    """.trimIndent()
+                ).use { statement ->
+                    statement.setObject(1, UUID.randomUUID())
+                    statement.setObject(2, approver.userId)
+                    statement.setObject(3, UUID.randomUUID())
+                    statement.executeUpdate()
+                }
+            }
+        }
+        assertEquals(1, managerApprovalCount())
+    }
+
+    @Test
+    fun test_manager_approval_PIN_verification_is_rate_limited() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val requester = createAndLoginApprovalUser(ownerToken, Role.KASIR, "approval_rate_requester")
+        val approver = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "approval_rate_admin")
+
+        val responses = (1..6).map {
+            requestManagerApproval(requester.token, UUID.randomUUID(), approver.username, "000999")
+        }
+
+        responses.take(5).forEach { response ->
+            assertEquals(HttpStatusCode.Forbidden, response.status, response.bodyAsText())
+        }
+        assertEquals(HttpStatusCode.TooManyRequests, responses.last().status, responses.last().bodyAsText())
+        assertEquals(0, managerApprovalCount())
     }
 
     @Test
@@ -783,8 +1499,58 @@ class IntegrationTest {
             .jsonObject.getValue("data").jsonObject.getValue("token").jsonPrimitive.content
         val forbiddenUsers = client.get("/api/system/users") { bearer(adminToken) }
         assertEquals(HttpStatusCode.Forbidden, forbiddenUsers.status, forbiddenUsers.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, client.get("/api/system/roles") { bearer(adminToken) }.status)
+        assertEquals(HttpStatusCode.Forbidden, client.get("/api/system/security-settings") { bearer(adminToken) }.status)
+        assertEquals(HttpStatusCode.Forbidden, client.get("/api/system/database-backups") { bearer(adminToken) }.status)
+        assertEquals(
+            HttpStatusCode.Forbidden,
+            client.post("/api/system/database-backups/restore/validate") { bearer(adminToken) }.status
+        )
         assertEquals(HttpStatusCode.OK, client.get("/api/analytics/sales/report") { bearer(adminToken) }.status)
-        assertEquals(HttpStatusCode.OK, client.get("/api/system/database-backups") { bearer(adminToken) }.status)
+        assertEquals(HttpStatusCode.OK, client.get("/api/inventory/products") { bearer(adminToken) }.status)
+        assertEquals(HttpStatusCode.OK, client.get("/api/system/store-profile") { bearer(adminToken) }.status)
+    }
+
+    @Test
+    fun test_store_profile_is_separated_from_device_settings_and_security_is_sanitized() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+
+        val update = client.put("/api/system/store-profile") {
+            contentType(ContentType.Application.Json)
+            bearer(ownerToken)
+            setBody(
+                """{"storeName":"TB Integration","address":"Alamat Test","phone":"0800","receiptHeader":"Selamat datang","receiptFooter":"Terima kasih"}"""
+            )
+        }
+        assertEquals(HttpStatusCode.OK, update.status, update.bodyAsText())
+        assertFalse(update.bodyAsText().contains("printerSize"), update.bodyAsText())
+
+        val legacy = client.get("/api/system/settings") { bearer(ownerToken) }
+        val legacyBody = legacy.bodyAsText()
+        assertEquals(HttpStatusCode.OK, legacy.status, legacyBody)
+        assertTrue(legacyBody.contains("printerSize"), legacyBody)
+        val originalPrinterSize = Json.parseToJsonElement(legacyBody).jsonObject
+            .getValue("data").jsonObject.getValue("printerSize").jsonPrimitive.content
+        val ignoredPrinterSize = if (originalPrinterSize == "58mm") "80mm" else "58mm"
+        val legacyUpdate = client.put("/api/system/settings") {
+            contentType(ContentType.Application.Json)
+            bearer(ownerToken)
+            setBody(
+                """{"storeName":"TB Integration","address":"Alamat Test","phone":"0800","receiptHeader":"Selamat datang","receiptFooter":"Terima kasih","printerSize":"$ignoredPrinterSize"}"""
+            )
+        }
+        assertEquals(HttpStatusCode.OK, legacyUpdate.status, legacyUpdate.bodyAsText())
+        val printerSizeAfterUpdate = Json.parseToJsonElement(legacyUpdate.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue("printerSize").jsonPrimitive.content
+        assertEquals(originalPrinterSize, printerSizeAfterUpdate)
+
+        val security = client.get("/api/system/security-settings") { bearer(ownerToken) }
+        val securityBody = security.bodyAsText()
+        assertEquals(HttpStatusCode.OK, security.status, securityBody)
+        assertFalse(securityBody.contains("password", ignoreCase = true), securityBody)
+        assertFalse(securityBody.contains("secret", ignoreCase = true), securityBody)
+        assertFalse(securityBody.contains("backupDirectory"), securityBody)
     }
 
     @Test
@@ -1011,6 +1777,410 @@ class IntegrationTest {
         awaitRestoreAudit(UUID.fromString(restoreId))
     }
 
+    @Test
+    fun test_discount_snapshots_refund_and_analytics_use_net_amount() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val product = createProductFixture()
+        assertEquals(HttpStatusCode.Created, openSession(token).status)
+
+        val response = discountCheckout(
+            token = token,
+            product = product,
+            itemDiscountType = "PERCENTAGE",
+            itemDiscountValue = "10.00",
+            transactionDiscountType = "FIXED_AMOUNT",
+            transactionDiscountValue = "10.00",
+            amountPaid = "80.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}"
+        )
+        assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+        val transactionId = checkoutTransactionId(response)
+        val data = Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("data").jsonObject
+        assertEquals("100.00", data.getValue("grossSubtotal").jsonPrimitive.content)
+        assertEquals("20.00", data.getValue("totalDiscountAmount").jsonPrimitive.content)
+        assertEquals("80.00", data.getValue("total").jsonPrimitive.content)
+
+        val snapshot = discountSnapshot(UUID.fromString(transactionId))
+        assertEquals(BigDecimal("100.00"), snapshot.first)
+        assertEquals(BigDecimal("20.00"), snapshot.second)
+        assertEquals(BigDecimal("80.00"), snapshot.third)
+
+        val refund = refundTransaction(
+            token, transactionId, "refund-${UUID.randomUUID()}", "Refund transaksi berdiskon"
+        )
+        assertEquals(HttpStatusCode.Created, refund.status, refund.bodyAsText())
+        assertEquals(BigDecimal("80.00"), refundFinancialAmount(transactionId))
+
+        val report = client.get("/api/analytics/sales/report") { bearer(token) }
+        assertEquals(HttpStatusCode.OK, report.status, report.bodyAsText())
+        val totals = Json.parseToJsonElement(report.bodyAsText()).jsonObject.getValue("data").jsonObject
+            .getValue("totals").jsonObject
+        assertEquals("100.00", totals.getValue("grossRevenue").jsonPrimitive.content)
+        assertEquals("20.00", totals.getValue("discountAmount").jsonPrimitive.content)
+        assertEquals("80.00", totals.getValue("refundAmount").jsonPrimitive.content)
+        assertEquals("0.00", totals.getValue("netRevenue").jsonPrimitive.content)
+    }
+
+    @Test
+    fun test_cashier_discount_override_is_bound_to_attempt_intent_and_idempotent() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "discount_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "discount_cashier")
+        val otherCashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "discount_other_cashier")
+        val product = createProductFixture()
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+
+        val underLimit = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "10.00", amountPaid = "90.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}"
+        )
+        assertEquals(HttpStatusCode.Created, underLimit.status, underLimit.bodyAsText())
+
+        val preview = discountPreview(cashier.token, product, "PERCENTAGE", "15.00")
+        assertEquals(HttpStatusCode.OK, preview.status, preview.bodyAsText())
+        val previewData = Json.parseToJsonElement(preview.bodyAsText()).jsonObject.getValue("data").jsonObject
+        assertTrue(previewData.getValue("approvalRequired").jsonPrimitive.content.toBoolean())
+        val attemptId = UUID.fromString(previewData.getValue("checkoutAttemptId").jsonPrimitive.content)
+
+        val missing = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId
+        )
+        assertTrue(missing.status.value >= 400, missing.bodyAsText())
+
+        listOf("VOID_TRANSACTION").forEach { wrongAction ->
+            val wrongApprovalId = managerApprovalId(
+                requestManagerApproval(
+                    cashier.token, attemptId, admin.username, admin.pin,
+                    action = wrongAction, resourceType = "TRANSACTION"
+                )
+            )
+            val rejected = discountCheckout(
+                cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+                idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+                managerApprovalId = wrongApprovalId
+            )
+            assertTrue(rejected.status.value >= 400, rejected.bodyAsText())
+        }
+
+        val wrongScopeApprovalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token, UUID.randomUUID(), admin.username, admin.pin,
+                action = "DISCOUNT_OVERRIDE", resourceType = "TRANSACTION"
+            )
+        )
+        val wrongScope = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+            managerApprovalId = wrongScopeApprovalId
+        )
+        assertTrue(wrongScope.status.value >= 400, wrongScope.bodyAsText())
+
+        val foreignRequesterApprovalId = managerApprovalId(
+            requestManagerApproval(
+                otherCashier.token, attemptId, admin.username, admin.pin,
+                action = "DISCOUNT_OVERRIDE", resourceType = "TRANSACTION"
+            )
+        )
+        val foreignRequester = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+            managerApprovalId = foreignRequesterApprovalId
+        )
+        assertTrue(foreignRequester.status.value >= 400, foreignRequester.bodyAsText())
+
+        val expiredApprovalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token, attemptId, admin.username, admin.pin,
+                action = "DISCOUNT_OVERRIDE", resourceType = "TRANSACTION"
+            )
+        )
+        expireManagerApproval(expiredApprovalId)
+        val expired = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+            managerApprovalId = expiredApprovalId
+        )
+        assertTrue(expired.status.value >= 400, expired.bodyAsText())
+
+        val approvalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token, attemptId, admin.username, admin.pin,
+                action = "DISCOUNT_OVERRIDE", resourceType = "TRANSACTION"
+            )
+        )
+        val mutation = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "50.00", amountPaid = "50.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+            managerApprovalId = approvalId
+        )
+        assertTrue(mutation.status.value >= 400, mutation.bodyAsText())
+
+        val key = "discount-${UUID.randomUUID()}"
+        val approved = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+            idempotencyKey = key, checkoutAttemptId = attemptId, managerApprovalId = approvalId
+        )
+        assertEquals(HttpStatusCode.Created, approved.status, approved.bodyAsText())
+        val replay = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+            idempotencyKey = key, checkoutAttemptId = attemptId, managerApprovalId = approvalId
+        )
+        assertEquals(HttpStatusCode.OK, replay.status, replay.bodyAsText())
+        assertEquals(checkoutTransactionId(approved), checkoutTransactionId(replay))
+        assertTrue(checkoutReplay(replay))
+
+        val reused = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+            managerApprovalId = approvalId
+        )
+        assertTrue(reused.status.value >= 400, reused.bodyAsText())
+        assertEquals(2, transactionCount())
+        assertEquals(BigDecimal("8.00"), stockQuantity(product.id))
+    }
+
+    @Test
+    fun test_discount_override_rejects_refund_approval_action() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "discount_refund_action_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "discount_refund_action_cashier")
+        val product = createProductFixture()
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+        val preview = discountPreview(cashier.token, product, "PERCENTAGE", "15.00")
+        val previewData = Json.parseToJsonElement(preview.bodyAsText()).jsonObject.getValue("data").jsonObject
+        val attemptId = UUID.fromString(previewData.getValue("checkoutAttemptId").jsonPrimitive.content)
+        val refundApprovalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token, attemptId, admin.username, admin.pin,
+                action = "REFUND_TRANSACTION", resourceType = "TRANSACTION"
+            )
+        )
+
+        val rejected = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+            managerApprovalId = refundApprovalId
+        )
+        assertEquals(HttpStatusCode.Forbidden, rejected.status, rejected.bodyAsText())
+        assertTrue(rejected.bodyAsText().contains("MANAGER_APPROVAL_ACTION_MISMATCH"), rejected.bodyAsText())
+        assertEquals(0, transactionCount())
+        assertEquals("APPROVED", managerApprovalStatus(refundApprovalId))
+    }
+
+    @Test
+    fun test_concurrent_discount_checkout_with_one_approval_creates_one_transaction() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "discount_concurrent_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "discount_concurrent_cashier")
+        val product = createProductFixture()
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+        val preview = discountPreview(cashier.token, product, "PERCENTAGE", "15.00")
+        val previewData = Json.parseToJsonElement(preview.bodyAsText()).jsonObject.getValue("data").jsonObject
+        val attemptId = UUID.fromString(previewData.getValue("checkoutAttemptId").jsonPrimitive.content)
+        val approvalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token, attemptId, admin.username, admin.pin,
+                action = "DISCOUNT_OVERRIDE", resourceType = "TRANSACTION"
+            )
+        )
+
+        val release = CompletableDeferred<Unit>()
+        val responses = coroutineScope {
+            val first = async {
+                release.await()
+                discountCheckout(
+                    cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+                    idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+                    managerApprovalId = approvalId
+                )
+            }
+            val second = async {
+                release.await()
+                discountCheckout(
+                    cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+                    idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+                    managerApprovalId = approvalId
+                )
+            }
+            release.complete(Unit)
+            listOf(first.await(), second.await())
+        }
+        val responseDetails = responses.map { "${it.status}: ${it.bodyAsText()}" }.joinToString(" | ")
+        assertEquals(1, responses.count { it.status.value in 200..299 }, responseDetails)
+        assertEquals(1, transactionCount())
+        assertEquals(BigDecimal("9.00"), stockQuantity(product.id))
+        assertEquals("USED", managerApprovalStatus(approvalId))
+    }
+
+    @Test
+    fun test_discount_checkout_failure_rolls_back_transaction_stock_audit_and_approval() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val admin = createAndLoginApprovalUser(ownerToken, Role.ADMIN, "discount_rollback_admin")
+        val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "discount_rollback_cashier")
+        val product = createProductFixture()
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+        val preview = discountPreview(cashier.token, product, "PERCENTAGE", "15.00")
+        val previewData = Json.parseToJsonElement(preview.bodyAsText()).jsonObject.getValue("data").jsonObject
+        val attemptId = UUID.fromString(previewData.getValue("checkoutAttemptId").jsonPrimitive.content)
+        val approvalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token, attemptId, admin.username, admin.pin,
+                action = "DISCOUNT_OVERRIDE", resourceType = "TRANSACTION"
+            )
+        )
+        installFailingDiscountCheckoutTrigger()
+        try {
+            val response = discountCheckout(
+                cashier.token, product, "PERCENTAGE", "15.00", amountPaid = "85.00",
+                idempotencyKey = "discount-${UUID.randomUUID()}", checkoutAttemptId = attemptId,
+                managerApprovalId = approvalId
+            )
+            assertTrue(response.status.value >= 400, response.bodyAsText())
+        } finally {
+            removeFailingDiscountCheckoutTrigger()
+        }
+
+        assertEquals(0, transactionCount())
+        assertEquals(BigDecimal("10.00"), stockQuantity(product.id))
+        assertEquals("APPROVED", managerApprovalStatus(approvalId))
+        assertFalse(discountAttemptConsumed(attemptId))
+        assertEquals(0, auditActionCount("sales", "transactions", attemptId, "UPDATE"))
+    }
+
+    @Test
+    fun test_discounted_dp_creates_receivable_from_net_total() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val product = createProductFixture()
+        val customerId = createReceivableCustomerFixture(BigDecimal("1000.00"))
+        assertEquals(HttpStatusCode.Created, openSession(token).status)
+
+        val response = client.post("/api/sales/checkout") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody(
+                """{"idempotencyKey":"discount-${UUID.randomUUID()}","customerId":"$customerId","items":[{"productId":"${product.id}","qty":"1.00","discountRequest":{"type":"PERCENTAGE","value":"10.00"}}],"paymentMethod":"dp","amountPaid":"30.00","dueDays":30}"""
+            )
+        }
+        assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+        val transactionId = UUID.fromString(checkoutTransactionId(response))
+        assertEquals(BigDecimal("60.00"), transactionReceivableRemaining(transactionId))
+    }
+
+    private suspend fun ApplicationTestBuilder.discountPreview(
+        token: String,
+        product: ProductFixture,
+        type: String,
+        value: String
+    ): HttpResponse = client.post("/api/sales/checkout/preview") {
+        contentType(ContentType.Application.Json)
+        bearer(token)
+        setBody(
+            """{"items":[{"productId":"${product.id}","qty":"1.00","discountRequest":{"type":"$type","value":"$value"}}]}"""
+        )
+    }
+
+    private suspend fun ApplicationTestBuilder.discountCheckout(
+        token: String,
+        product: ProductFixture,
+        itemDiscountType: String,
+        itemDiscountValue: String,
+        transactionDiscountType: String? = null,
+        transactionDiscountValue: String? = null,
+        amountPaid: String,
+        idempotencyKey: String,
+        checkoutAttemptId: UUID? = null,
+        managerApprovalId: UUID? = null
+    ): HttpResponse {
+        val transactionDiscount = if (transactionDiscountType == null) "" else
+            ",\"transactionDiscount\":{\"type\":\"$transactionDiscountType\",\"value\":\"$transactionDiscountValue\"}"
+        val attempt = checkoutAttemptId?.let { ",\"checkoutAttemptId\":\"$it\"" }.orEmpty()
+        val approval = managerApprovalId?.let { ",\"managerApprovalId\":\"$it\"" }.orEmpty()
+        return client.post("/api/sales/checkout") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody(
+                """{"idempotencyKey":"$idempotencyKey","items":[{"productId":"${product.id}","qty":"1.00","discountRequest":{"type":"$itemDiscountType","value":"$itemDiscountValue"}}],"paymentMethod":"tunai","amountPaid":"$amountPaid"$transactionDiscount$attempt$approval}"""
+            )
+        }
+    }
+
+    private fun discountSnapshot(transactionId: UUID): Triple<BigDecimal, BigDecimal, BigDecimal> =
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "SELECT gross_subtotal,total_discount_amount,total FROM sales.transactions WHERE id=?"
+            ).use { statement ->
+                statement.setObject(1, transactionId)
+                statement.executeQuery().use { rows ->
+                    assertTrue(rows.next())
+                    Triple(rows.getBigDecimal(1), rows.getBigDecimal(2), rows.getBigDecimal(3))
+                }
+            }
+        }
+
+    private fun transactionReceivableRemaining(transactionId: UUID): BigDecimal = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            "SELECT amount-paid_amount FROM receivable.receivables WHERE transaction_id=?"
+        ).use { statement ->
+            statement.setObject(1, transactionId)
+            statement.executeQuery().use { rows ->
+                assertTrue(rows.next())
+                rows.getBigDecimal(1)
+            }
+        }
+    }
+
+    private fun installFailingDiscountCheckoutTrigger() {
+        dataSource.connection.use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute(
+                    """
+                    CREATE OR REPLACE FUNCTION sales.fn_test_fail_discount_checkout()
+                    RETURNS TRIGGER LANGUAGE plpgsql AS ${'$'}${'$'}
+                    BEGIN
+                        RAISE EXCEPTION 'forced discount checkout rollback';
+                    END;
+                    ${'$'}${'$'}
+                    """.trimIndent()
+                )
+                statement.execute(
+                    """
+                    CREATE TRIGGER trg_test_fail_discount_checkout
+                    BEFORE INSERT ON sales.transaction_items
+                    FOR EACH ROW EXECUTE FUNCTION sales.fn_test_fail_discount_checkout()
+                    """.trimIndent()
+                )
+            }
+        }
+    }
+
+    private fun removeFailingDiscountCheckoutTrigger() {
+        dataSource.connection.use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("DROP TRIGGER IF EXISTS trg_test_fail_discount_checkout ON sales.transaction_items")
+                statement.execute("DROP FUNCTION IF EXISTS sales.fn_test_fail_discount_checkout()")
+            }
+        }
+    }
+
+    private fun discountAttemptConsumed(id: UUID): Boolean = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            "SELECT consumed_at IS NOT NULL FROM sales.checkout_discount_attempts WHERE id=?"
+        ).use { statement ->
+            statement.setObject(1, id)
+            statement.executeQuery().use { rows ->
+                assertTrue(rows.next())
+                rows.getBoolean(1)
+            }
+        }
+    }
+
     private suspend fun ApplicationTestBuilder.awaitBackupJob(token: String, id: String): kotlinx.serialization.json.JsonObject {
         repeat(150) {
             val response = client.get("/api/system/database-backups/$id") { bearer(token) }
@@ -1102,6 +2272,82 @@ class IntegrationTest {
             .getValue("data").jsonObject.getValue("token").jsonPrimitive.content
     }
 
+    private suspend fun ApplicationTestBuilder.createAndLoginApprovalUser(
+        ownerToken: String,
+        role: String,
+        usernamePrefix: String
+    ): ApprovalUserFixture {
+        val roleId = dataSource.connection.use { connection ->
+            connection.prepareStatement("SELECT id FROM system.roles WHERE name::text = ?").use { statement ->
+                statement.setString(1, role)
+                statement.executeQuery().use { rows ->
+                    assertTrue(rows.next())
+                    rows.getObject(1, UUID::class.java)
+                }
+            }
+        }
+        val username = "${usernamePrefix}_${UUID.randomUUID().toString().replace("-", "").take(10)}"
+        val createResponse = client.post("/api/system/users") {
+            contentType(ContentType.Application.Json)
+            bearer(ownerToken)
+            setBody(
+                """
+                {
+                  "name":"Integration Approval User",
+                  "username":"$username",
+                  "password":"$APPROVAL_TEST_PASSWORD",
+                  "pin":"$APPROVAL_TEST_PIN",
+                  "roleId":"$roleId"
+                }
+                """.trimIndent()
+            )
+        }
+        assertEquals(HttpStatusCode.Created, createResponse.status, createResponse.bodyAsText())
+        val userId = UUID.fromString(
+            Json.parseToJsonElement(createResponse.bodyAsText()).jsonObject.getValue("data").jsonObject
+                .getValue("id").jsonPrimitive.content
+        )
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"username":"$username","password":"$APPROVAL_TEST_PASSWORD"}""")
+        }
+        assertEquals(HttpStatusCode.OK, loginResponse.status, loginResponse.bodyAsText())
+        val token = Json.parseToJsonElement(loginResponse.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue("token").jsonPrimitive.content
+        return ApprovalUserFixture(userId, username, APPROVAL_TEST_PIN, token)
+    }
+
+    private suspend fun ApplicationTestBuilder.requestManagerApproval(
+        token: String?,
+        resourceId: UUID,
+        approverUsername: String,
+        approverPin: String,
+        action: String = "VOID_TRANSACTION",
+        resourceType: String = "TRANSACTION"
+    ): HttpResponse = client.post("/api/system/manager-approvals") {
+        contentType(ContentType.Application.Json)
+        token?.let { bearer(it) }
+        setBody(
+            """
+            {
+              "action":"$action",
+              "resourceType":"$resourceType",
+              "resourceId":"$resourceId",
+              "approverUsername":"$approverUsername",
+              "approverPin":"$approverPin"
+            }
+            """.trimIndent()
+        )
+    }
+
+    private suspend fun managerApprovalId(response: HttpResponse): UUID {
+        assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+        return UUID.fromString(
+            Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("data").jsonObject
+                .getValue("approvalId").jsonPrimitive.content
+        )
+    }
+
     private suspend fun ApplicationTestBuilder.checkout(
         token: String,
         product: ProductFixture,
@@ -1126,6 +2372,30 @@ class IntegrationTest {
         }
     }
 
+    private suspend fun ApplicationTestBuilder.checkoutWithCustomer(
+        token: String,
+        product: ProductFixture,
+        quantity: String,
+        amountPaid: String,
+        idempotencyKey: String,
+        paymentMethod: String,
+        customerId: UUID
+    ): HttpResponse = client.post("/api/sales/checkout") {
+        contentType(ContentType.Application.Json)
+        bearer(token)
+        setBody(
+            """
+            {
+              "customerId":"$customerId",
+              "items":[{"productId":"${product.id}","qty":"$quantity","discount":"0.00"}],
+              "paymentMethod":"$paymentMethod",
+              "amountPaid":"$amountPaid",
+              "idempotencyKey":"$idempotencyKey"
+            }
+            """.trimIndent()
+        )
+    }
+
     private suspend fun checkoutTransactionId(response: HttpResponse): String =
         Json.parseToJsonElement(response.bodyAsText()).jsonObject
             .getValue("data").jsonObject.getValue("id").jsonPrimitive.content
@@ -1141,14 +2411,36 @@ class IntegrationTest {
         token: String,
         transactionId: String,
         idempotencyKey: String,
-        reason: String
+        reason: String,
+        managerApprovalId: UUID? = null
     ): HttpResponse = client.post("/api/sales/transactions/$transactionId/void") {
         contentType(ContentType.Application.Json)
         bearer(token)
-        setBody("""{"idempotencyKey":"$idempotencyKey","reason":"$reason"}""")
+        val approvalJson = managerApprovalId?.let { ",\"managerApprovalId\":\"$it\"" }.orEmpty()
+        setBody("""{"idempotencyKey":"$idempotencyKey","reason":"$reason"$approvalJson}""")
     }
 
     private suspend fun voidReplay(response: HttpResponse): Boolean =
+        Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue("idempotentReplay").jsonPrimitive.content.toBoolean()
+
+    private suspend fun ApplicationTestBuilder.refundTransaction(
+        token: String,
+        transactionId: String,
+        idempotencyKey: String,
+        reason: String,
+        disposition: String = "RETURN_TO_STOCK",
+        managerApprovalId: UUID? = null
+    ): HttpResponse = client.post("/api/sales/transactions/$transactionId/refund") {
+        contentType(ContentType.Application.Json)
+        bearer(token)
+        val approvalJson = managerApprovalId?.let { ",\"managerApprovalId\":\"$it\"" }.orEmpty()
+        setBody(
+            """{"idempotencyKey":"$idempotencyKey","reason":"$reason","returnDisposition":"$disposition"$approvalJson}"""
+        )
+    }
+
+    private suspend fun refundReplay(response: HttpResponse): Boolean =
         Json.parseToJsonElement(response.bodyAsText()).jsonObject
             .getValue("data").jsonObject.getValue("idempotentReplay").jsonPrimitive.content.toBoolean()
 
@@ -1334,6 +2626,54 @@ class IntegrationTest {
         }
     }
 
+    private fun transactionRefundCount(transactionId: String): Int = dataSource.connection.use { connection ->
+        connection.prepareStatement("SELECT COUNT(*) FROM sales.transaction_refunds WHERE transaction_id = ?").use { statement ->
+            statement.setObject(1, UUID.fromString(transactionId))
+            statement.executeQuery().use { result -> result.next(); result.getInt(1) }
+        }
+    }
+
+    private fun refundFinancialAmount(transactionId: String): BigDecimal = dataSource.connection.use { connection ->
+        connection.prepareStatement("SELECT refunded_amount FROM sales.transaction_refunds WHERE transaction_id = ?").use { statement ->
+            statement.setObject(1, UUID.fromString(transactionId))
+            statement.executeQuery().use { result -> assertTrue(result.next()); result.getBigDecimal(1) }
+        }
+    }
+
+    private fun refundCompensationTotal(transactionId: String): BigDecimal = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            "SELECT COALESCE(SUM(amount), 0) FROM sales.payments WHERE transaction_id = ? AND transaction_refund_id IS NOT NULL"
+        ).use { statement ->
+            statement.setObject(1, UUID.fromString(transactionId))
+            statement.executeQuery().use { result -> result.next(); result.getBigDecimal(1) }
+        }
+    }
+
+    private fun refundCompensationCount(transactionId: String): Int = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            "SELECT COUNT(*) FROM sales.payments WHERE transaction_id = ? AND transaction_refund_id IS NOT NULL"
+        ).use { statement ->
+            statement.setObject(1, UUID.fromString(transactionId))
+            statement.executeQuery().use { result -> result.next(); result.getInt(1) }
+        }
+    }
+
+    private fun activeCashSystemCash(userId: UUID): BigDecimal = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            "SELECT system_cash FROM sales.cash_sessions WHERE user_id = ? AND closed_at IS NULL"
+        ).use { statement ->
+            statement.setObject(1, userId)
+            statement.executeQuery().use { result -> assertTrue(result.next()); result.getBigDecimal(1) }
+        }
+    }
+
+    private fun receivableActive(transactionId: String): Boolean = dataSource.connection.use { connection ->
+        connection.prepareStatement("SELECT is_active FROM receivable.receivables WHERE transaction_id = ?").use { statement ->
+            statement.setObject(1, UUID.fromString(transactionId))
+            statement.executeQuery().use { result -> assertTrue(result.next()); result.getBoolean(1) }
+        }
+    }
+
     private fun latestLedgerBalance(productId: UUID): BigDecimal = dataSource.connection.use { connection ->
         connection.prepareStatement(
             "SELECT balance_after FROM inventory.stock_movements WHERE product_id = ? ORDER BY sequence_no DESC LIMIT 1"
@@ -1496,6 +2836,71 @@ class IntegrationTest {
             }
         }
 
+    private fun voidAuditCount(transactionId: UUID): Int = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT COUNT(*)
+            FROM system.audit_logs
+            WHERE schema_name = 'sales'
+              AND table_name = 'transaction_voids'
+              AND new_data ->> 'transactionId' = ?
+            """.trimIndent()
+        ).use { statement ->
+            statement.setString(1, transactionId.toString())
+            statement.executeQuery().use { result -> result.next(); result.getInt(1) }
+        }
+    }
+
+    private fun voidAuditMetadata(transactionId: UUID): String = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT new_data::text
+            FROM system.audit_logs
+            WHERE schema_name = 'sales'
+              AND table_name = 'transaction_voids'
+              AND new_data ->> 'transactionId' = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """.trimIndent()
+        ).use { statement ->
+            statement.setString(1, transactionId.toString())
+            statement.executeQuery().use { result ->
+                assertTrue(result.next(), "Audit Void harus tersedia")
+                result.getString(1)
+            }
+        }
+    }
+
+    private fun managerApprovalCount(): Int = dataSource.connection.use { connection ->
+        connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT COUNT(*) FROM system.manager_approvals").use { rows ->
+                rows.next()
+                rows.getInt(1)
+            }
+        }
+    }
+
+    private fun managerApprovalStatus(id: UUID): String = dataSource.connection.use { connection ->
+        connection.prepareStatement("SELECT status FROM system.manager_approvals WHERE id = ?").use { statement ->
+            statement.setObject(1, id)
+            statement.executeQuery().use { rows ->
+                assertTrue(rows.next())
+                rows.getString(1)
+            }
+        }
+    }
+
+    private fun expireManagerApproval(id: UUID) {
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "UPDATE system.manager_approvals SET created_at = NOW() - INTERVAL '10 minutes', expires_at = NOW() - INTERVAL '5 minutes' WHERE id = ?"
+            ).use { statement ->
+                statement.setObject(1, id)
+                statement.executeUpdate()
+            }
+        }
+    }
+
     private fun auditActionCount(schema: String, table: String, recordId: UUID, action: String): Int =
         dataSource.connection.use { connection ->
             connection.prepareStatement(
@@ -1601,8 +3006,20 @@ class IntegrationTest {
         }
     }
 
+    private data class ApprovalUserFixture(
+        val userId: UUID,
+        val username: String,
+        val pin: String,
+        val token: String
+    )
+
     private data class ProductFixture(
         val id: UUID,
         val unitId: UUID
     )
+
+    private companion object {
+        const val APPROVAL_TEST_PASSWORD = "Integration-Approval-789!"
+        const val APPROVAL_TEST_PIN = "846291"
+    }
 }
