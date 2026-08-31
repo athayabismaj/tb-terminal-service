@@ -4,7 +4,8 @@ import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.getUserRole
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.Permission
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.recordOperationalAudit
@@ -20,6 +21,8 @@ import java.util.UUID
 
 fun Application.salesRoutes() {
     val service by inject<SalesService>()
+    val discountService by inject<DiscountService>()
+    val refundService by inject<RefundService>()
     val systemService by inject<SystemService>()
 
     routing {
@@ -33,7 +36,7 @@ fun Application.salesRoutes() {
 
                     // GET histori sesi kas seluruh kasir
                     get {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_CASH_SESSIONS)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 10
                         val status = call.request.queryParameters["status"]
@@ -44,7 +47,7 @@ fun Application.salesRoutes() {
 
                     // GET sesi aktif milik user yang sedang login
                     get("/active") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.OPERATE_POS)
                         val userId = call.getUserId()
                         val session = service.getActiveSession(userId)
                         if (session != null) {
@@ -56,7 +59,7 @@ fun Application.salesRoutes() {
 
                     // POST buka sesi kasir baru
                     post("/open") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.OPERATE_POS)
                         val userId = call.getUserId()
                         val request = call.receive<OpenSessionRequest>()
                         val session = service.openSession(userId, request)
@@ -65,7 +68,7 @@ fun Application.salesRoutes() {
 
                     // POST sync sesi kas lokal yang dibuka saat offline
                     post("/sync/open") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.OPERATE_POS)
                         val userId = call.getUserId()
                         val request = call.receive<OfflineCashSessionOpenSyncRequest>()
                         val syncResult = service.syncOpenCashSession(userId, request)
@@ -80,7 +83,7 @@ fun Application.salesRoutes() {
 
                     // POST sync tutup sesi kas lokal yang ditutup saat offline
                     post("/sync/close") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.OPERATE_POS)
                         val userId = call.getUserId()
                         val request = call.receive<OfflineCashSessionCloseSyncRequest>()
                         val syncResult = service.syncCloseCashSession(userId, request)
@@ -90,7 +93,7 @@ fun Application.salesRoutes() {
 
                     // POST tutup sesi kasir yang aktif
                     post("/close") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.OPERATE_POS)
                         val userId = call.getUserId()
                         val request = call.receive<CloseSessionRequest>()
                         val session = service.closeSession(userId, request)
@@ -99,7 +102,7 @@ fun Application.salesRoutes() {
 
                     // POST catat pengeluaran kasir
                     post("/expenses") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.OPERATE_POS)
                         val userId = call.getUserId()
                         val request = call.receive<CashExpenseRequest>()
                         val expense = service.addExpense(userId, request)
@@ -116,7 +119,7 @@ fun Application.salesRoutes() {
 
                     // GET histori pengeluaran kas seluruh sesi
                     get("/expenses") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_CASH_SESSIONS)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 10
                         val sessionId = call.request.queryParameters["sessionId"]
@@ -130,7 +133,7 @@ fun Application.salesRoutes() {
 
                     // GET daftar pengeluaran kasir per sesi
                     get("/{sessionId}/expenses") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_CASH_SESSIONS)
                         val sessionId = call.parameters["sessionId"]
                             ?: throw com.service.tbterminal.shared.ValidationException("Session ID wajib diisi")
                         val expenses = service.getExpenses(sessionId)
@@ -139,7 +142,7 @@ fun Application.salesRoutes() {
 
                     // GET detail rekonsiliasi satu sesi kas
                     get("/{sessionId}") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_CASH_SESSIONS)
                         val sessionId = call.parameters["sessionId"]
                             ?: throw com.service.tbterminal.shared.ValidationException("Session ID wajib diisi")
                         call.respond(HttpStatusCode.OK, ApiResponse.success(service.getSessionById(sessionId)))
@@ -152,7 +155,7 @@ fun Application.salesRoutes() {
 
                 // POST sync checkout offline dari local database Android
                 post("/checkout/sync") {
-                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.OPERATE_POS)
                     val userId = call.getUserId()
                     val request = call.receive<OfflineCheckoutSyncRequest>()
                     val syncResult = service.syncOfflineCheckout(userId, request)
@@ -167,7 +170,7 @@ fun Application.salesRoutes() {
 
                 // POST sync pengeluaran kas offline dari local database Android
                 post("/cash-expenses/sync") {
-                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.OPERATE_POS)
                     val userId = call.getUserId()
                     val request = call.receive<OfflineCashExpenseSyncRequest>()
                     val syncResult = service.syncCashExpense(userId, request)
@@ -192,11 +195,21 @@ fun Application.salesRoutes() {
                 }
 
                 // POST checkout (transaksi baru)
+                post("/checkout/preview") {
+                    call.requirePermission(Permission.OPERATE_POS)
+                    val preview = discountService.preview(
+                        actorUserId = call.getUserId(),
+                        actorRole = call.getUserRole(),
+                        request = call.receive()
+                    )
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(preview, "Preview checkout berhasil dihitung"))
+                }
+
                 post("/checkout") {
-                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.OPERATE_POS)
                     val userId = call.getUserId()
                     val request = call.receive<CheckoutRequest>()
-                    val transaction = service.checkout(userId, request)
+                    val transaction = service.checkout(userId, call.getUserRole(), request)
                     val status = if (transaction.idempotentReplay) HttpStatusCode.OK else HttpStatusCode.Created
                     val message = if (transaction.idempotentReplay) {
                         "Checkout sebelumnya berhasil; hasil transaksi yang sama dikembalikan"
@@ -208,7 +221,7 @@ fun Application.salesRoutes() {
 
                 // GET riwayat transaksi dengan pagination
                 get("/transactions") {
-                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.OPERATE_POS)
                     val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                     val sessionId = call.request.queryParameters["sessionId"]
@@ -231,7 +244,7 @@ fun Application.salesRoutes() {
                 }
 
                 get("/transactions/{id}") {
-                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.OPERATE_POS)
                     val id = call.parameters["id"] ?: return@get call.respond(
                         HttpStatusCode.BadRequest,
                         ApiResponse.error<Unit>("ID Transaksi harus diisi")
@@ -245,18 +258,39 @@ fun Application.salesRoutes() {
                 }
 
                 post("/transactions/{id}/void") {
-                    call.requireRole(Role.OWNER, Role.ADMIN)
                     val id = call.parameters["id"]
                         ?: throw com.service.tbterminal.shared.ValidationException("ID Transaksi wajib diisi")
-                    val result = service.voidTransaction(call.getUserId(), id, call.receive())
+                    val result = service.voidTransaction(
+                        userId = call.getUserId(),
+                        actorRole = call.getUserRole(),
+                        id = id,
+                        request = call.receive(),
+                        ipAddress = call.salesClientIpAddress()
+                    )
                     call.respond(HttpStatusCode.OK, ApiResponse.success(result, if (result.idempotentReplay) {
                         "Void sebelumnya sudah berhasil; hasil yang sama dikembalikan"
                     } else "Transaksi berhasil dibatalkan"))
                 }
 
+                post("/transactions/{id}/refund") {
+                    val id = call.parameters["id"]
+                        ?: throw com.service.tbterminal.shared.ValidationException("ID Transaksi wajib diisi")
+                    val result = refundService.refundTransaction(
+                        actorUserId = call.getUserId(),
+                        actorRole = call.getUserRole(),
+                        transactionIdRaw = id,
+                        request = call.receive(),
+                        ipAddress = call.salesClientIpAddress()
+                    )
+                    val responseStatus = if (result.idempotentReplay) HttpStatusCode.OK else HttpStatusCode.Created
+                    call.respond(responseStatus, ApiResponse.success(result, if (result.idempotentReplay) {
+                        "Refund sebelumnya sudah berhasil; hasil yang sama dikembalikan"
+                    } else "Refund transaksi berhasil dicatat"))
+                }
+
                 // POST pelunasan piutang (bayar hutang transaksi)
                 post("/transactions/{id}/pay") {
-                    call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.OPERATE_POS)
                     val id = call.parameters["id"] ?: return@post call.respond(
                         HttpStatusCode.BadRequest,
                         ApiResponse.error<Unit>("ID Transaksi harus diisi")
@@ -271,6 +305,13 @@ fun Application.salesRoutes() {
         }
     }
 }
+
+private fun ApplicationCall.salesClientIpAddress(): String? =
+    request.headers["X-Forwarded-For"]
+        ?.substringBefore(",")
+        ?.trim()
+        ?.takeIf(String::isNotBlank)
+        ?: request.headers["X-Real-IP"]?.trim()?.takeIf(String::isNotBlank)
 
 private suspend fun recordCheckoutReceivableAudit(
     call: ApplicationCall,

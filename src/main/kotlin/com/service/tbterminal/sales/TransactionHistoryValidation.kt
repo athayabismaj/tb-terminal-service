@@ -1,6 +1,13 @@
 package com.service.tbterminal.sales
 
+import com.service.tbterminal.shared.AccessPolicy
+import com.service.tbterminal.shared.ManagerApprovalError
+import com.service.tbterminal.shared.ManagerApprovalException
+import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.ValidationException
+import com.service.tbterminal.system.ManagerApprovalAction
+import com.service.tbterminal.system.ManagerApprovalResourceType
+import com.service.tbterminal.system.ManagerApprovalScope
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -76,4 +83,33 @@ internal fun validateVoidRequest(request: VoidTransactionRequest): Pair<String, 
     val reason = request.reason.trim()
     if (reason.length !in 5..1000) throw ValidationException("Alasan void wajib 5-1000 karakter")
     return key to reason
+}
+
+internal fun resolveVoidApprovalScope(
+    actorUserId: UUID,
+    actorRole: String,
+    transactionId: UUID,
+    managerApprovalId: String?
+): ManagerApprovalScope? {
+    if (AccessPolicy.isAllowed(actorRole, Permission.VOID_TRANSACTION)) return null
+
+    AccessPolicy.require(actorRole, Permission.REQUEST_MANAGER_APPROVAL)
+    val rawApprovalId = managerApprovalId?.trim()?.takeIf(String::isNotBlank)
+        ?: throw ManagerApprovalException(
+            ManagerApprovalError.REQUIRED,
+            "Manager approval diperlukan untuk membatalkan transaksi ini"
+        )
+    val approvalId = runCatching { UUID.fromString(rawApprovalId) }.getOrNull()
+        ?: throw ManagerApprovalException(
+            ManagerApprovalError.INVALID,
+            "Manager approval tidak valid"
+        )
+
+    return ManagerApprovalScope(
+        approvalId = approvalId,
+        requesterUserId = actorUserId,
+        action = ManagerApprovalAction.VOID_TRANSACTION,
+        resourceType = ManagerApprovalResourceType.TRANSACTION,
+        resourceId = transactionId
+    )
 }

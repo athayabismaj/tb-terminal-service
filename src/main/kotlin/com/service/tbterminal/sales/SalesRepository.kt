@@ -18,9 +18,18 @@ import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.SessionNotFoundException
 import com.service.tbterminal.shared.StockInsufficientException
 import com.service.tbterminal.shared.ValidationException
+import com.service.tbterminal.shared.ManagerApprovalError
+import com.service.tbterminal.shared.ManagerApprovalException
 import com.service.tbterminal.system.UsersTable
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.AuditLogsTable
+import com.service.tbterminal.system.ManagerApprovalRecord
+import com.service.tbterminal.system.ManagerApprovalScope
+import com.service.tbterminal.system.ManagerApprovalService
+import com.service.tbterminal.system.ManagerApprovalAction
+import com.service.tbterminal.system.ManagerApprovalResourceType
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import kotlinx.coroutines.Dispatchers
@@ -57,17 +66,7 @@ interface SalesRepository {
     ): Boolean
 
     // POS
-    suspend fun executeCheckout(
-        userId: UUID,
-        customerId: UUID?,
-        requestItems: List<CheckoutItemRequest>,
-        paymentMethod: PaymentMethod,
-        amountPaid: java.math.BigDecimal,
-        notes: String?,
-        dueDays: Int,
-        idempotencyKey: String,
-        requestFingerprint: String
-    ): TransactionResponse
+    suspend fun executeCheckout(command: CheckoutCommand): TransactionResponse
     suspend fun findCheckoutByIdempotencyKey(idempotencyKey: String): IdempotentCheckout?
 
     suspend fun findOfflineSyncedCheckout(
@@ -96,7 +95,9 @@ interface SalesRepository {
         actorUserId: UUID,
         transactionId: UUID,
         reason: String,
-        idempotencyKey: String
+        idempotencyKey: String,
+        approvalScope: ManagerApprovalScope?,
+        ipAddress: String?
     ): VoidTransactionResponse
     suspend fun getReceivableIdByTransactionId(transactionId: UUID): UUID?
 
@@ -128,6 +129,9 @@ data class ResolvedItem(
     val qty: java.math.BigDecimal,
     val priceAtTransaction: java.math.BigDecimal,
     val cogsAtTransaction: java.math.BigDecimal,
+    val grossLineTotal: java.math.BigDecimal,
+    val discountType: DiscountType?,
+    val discountValue: java.math.BigDecimal,
     val discount: java.math.BigDecimal,
     val subtotal: java.math.BigDecimal
 )
@@ -143,8 +147,27 @@ data class OfflineCheckoutSyncItemCommand(
     val quantity: java.math.BigDecimal,
     val priceAtTransaction: java.math.BigDecimal,
     val cogsAtTransaction: java.math.BigDecimal,
+    val grossLineTotal: java.math.BigDecimal,
+    val discountType: DiscountType?,
+    val discountValue: java.math.BigDecimal,
     val discount: java.math.BigDecimal,
     val subtotal: java.math.BigDecimal
+)
+
+data class CheckoutCommand(
+    val userId: UUID,
+    val actorRole: String,
+    val customerId: UUID?,
+    val requestItems: List<CheckoutItemRequest>,
+    val transactionDiscount: DiscountRequest?,
+    val paymentMethod: PaymentMethod,
+    val amountPaid: BigDecimal,
+    val notes: String?,
+    val dueDays: Int,
+    val idempotencyKey: String,
+    val requestFingerprint: String,
+    val checkoutAttemptId: UUID?,
+    val managerApprovalId: UUID?
 )
 
 data class OfflineCheckoutSyncCommand(
@@ -219,7 +242,10 @@ data class TransactionSummary(
 )
 
 
-class SalesRepositoryImpl : SalesRepository {
+class SalesRepositoryImpl(
+    private val managerApprovalService: ManagerApprovalService,
+    private val discountRepository: DiscountRepository
+) : SalesRepository {
 
     override suspend fun getActiveSession(userId: UUID): CashSessionResponse? = newSuspendedTransaction(Dispatchers.IO) {
         CashSessionsTable.select {
@@ -660,61 +686,91 @@ class SalesRepositoryImpl : SalesRepository {
     // POS — CHECKOUT ENGINE
     // ==========================================
 
-    override suspend fun executeCheckout(
-        userId: UUID,
-        customerId: UUID?,
-        requestItems: List<CheckoutItemRequest>,
-        paymentMethod: PaymentMethod,
-        amountPaid: java.math.BigDecimal,
-        notes: String?,
-        dueDays: Int,
-        idempotencyKey: String,
-        requestFingerprint: String
-    ): TransactionResponse = newSuspendedTransaction(Dispatchers.IO) {
+    override suspend fun executeCheckout(command: CheckoutCommand): TransactionResponse = newSuspendedTransaction(Dispatchers.IO) {
         val session = CashSessionsTable.select {
-            (CashSessionsTable.userId eq userId) and CashSessionsTable.closedAt.isNull()
+            (CashSessionsTable.userId eq command.userId) and CashSessionsTable.closedAt.isNull()
         }.forUpdate().singleOrNull()
             ?: throw SessionNotFoundException("Buka sesi kasir terlebih dahulu sebelum bertransaksi")
 
         val sessionId = session[CashSessionsTable.id]
 
-        findCheckoutByIdempotencyKeyInTransaction(idempotencyKey)?.let { existing ->
-            if (existing.transaction.userId != userId.toString()) {
+        findCheckoutByIdempotencyKeyInTransaction(command.idempotencyKey)?.let { existing ->
+            if (existing.transaction.userId != command.userId.toString()) {
                 throw ValidationException("idempotencyKey sudah digunakan oleh transaksi lain")
             }
-            if (existing.requestFingerprint != requestFingerprint) {
+            if (existing.requestFingerprint != command.requestFingerprint) {
                 throw ValidationException("idempotencyKey sudah digunakan untuk payload checkout yang berbeda")
             }
             return@newSuspendedTransaction existing.transaction.copy(idempotentReplay = true)
         }
 
-        val lockedStockIds = lockAndValidateStocks(requestItems)
-        val resolvedItems = requestItems.map(::resolveItemForCheckout)
-        val totalAmount = resolvedItems.fold(BigDecimal.ZERO) { total, item -> total.add(item.subtotal) }.normalizeCheckoutMoney()
-        val payment = resolveCheckoutPayment(paymentMethod, amountPaid, totalAmount, customerId, dueDays)
+        val lockedStockIds = lockAndValidateStocks(command.requestItems)
+        val (resolvedItems, discountCalculation) = resolveItemsForCheckout(command.requestItems, command.transactionDiscount)
+        val totalAmount = discountCalculation.netTotal
+        val overrideRequired = requiresDiscountOverride(
+            command.actorRole,
+            discountCalculation.effectiveDiscountPercent,
+            discountRepository.cashierLimitInCurrentTransaction()
+        )
+        val approvalScope = if (overrideRequired) {
+            val attemptId = command.checkoutAttemptId ?: throw ManagerApprovalException(
+                ManagerApprovalError.REQUIRED,
+                "Discount Override memerlukan checkoutAttemptId dari preview"
+            )
+            val approvalId = command.managerApprovalId ?: throw ManagerApprovalException(
+                ManagerApprovalError.REQUIRED,
+                "Manager approval diperlukan karena diskon melebihi batas Kasir"
+            )
+            discountRepository.validateAttemptInCurrentTransaction(attemptId, command.userId, discountCalculation.fingerprint)
+            ManagerApprovalScope(
+                approvalId = approvalId,
+                requesterUserId = command.userId,
+                action = ManagerApprovalAction.DISCOUNT_OVERRIDE,
+                resourceType = ManagerApprovalResourceType.TRANSACTION,
+                resourceId = attemptId
+            )
+        } else {
+            if (command.checkoutAttemptId != null || command.managerApprovalId != null) {
+                throw ValidationException("Manager approval hanya digunakan untuk diskon Kasir di atas batas")
+            }
+            null
+        }
+        val validatedApproval: ManagerApprovalRecord? = if (approvalScope == null) null
+        else managerApprovalService.validateApprovalInCurrentTransaction(approvalScope)
+        val payment = resolveCheckoutPayment(
+            command.paymentMethod, command.amountPaid, totalAmount, command.customerId, command.dueDays
+        )
         val dueDate = if (payment.status == TrxStatus.HUTANG || payment.status == TrxStatus.DP) {
-            lockCustomerAndValidateCredit(customerId, payment.receivableAmount, dueDays)
+            lockCustomerAndValidateCredit(command.customerId, payment.receivableAmount, command.dueDays)
         } else {
             null
         }
 
         // 1. Insert transaksi utama
-        val trxId = UUID.randomUUID()
+        // Checkout attempt menjadi resource UUID approval sekaligus transaction UUID final.
+        val trxId = command.checkoutAttemptId ?: UUID.randomUUID()
         TransactionsTable.insert {
             it[this.id] = trxId
             it[this.sessionId] = sessionId
-            it[this.userId] = userId
-            it[this.customerId] = customerId
+            it[this.userId] = command.userId
+            it[this.customerId] = command.customerId
             it[this.type] = TrxType.PENJUALAN
             it[this.status] = payment.status
             it[this.total] = totalAmount
+            it[this.grossSubtotal] = discountCalculation.grossSubtotal
+            it[this.itemDiscountTotal] = discountCalculation.itemDiscountTotal
+            it[this.transactionDiscountType] = discountCalculation.transactionDiscountType
+            it[this.transactionDiscountValue] = discountCalculation.transactionDiscountValue
+            it[this.transactionDiscountAmount] = discountCalculation.transactionDiscountAmount
+            it[this.totalDiscountAmount] = discountCalculation.totalDiscountAmount
+            it[this.discountManagerApprovalId] = validatedApproval?.id
             it[this.dpAmount] = if (payment.status == TrxStatus.DP) payment.paidAmount else BigDecimal.ZERO
             it[this.paidAmount] = payment.paidAmount
             it[this.amountTendered] = payment.amountTendered
             it[this.changeAmount] = payment.changeAmount
-            it[this.idempotencyKey] = idempotencyKey
-            it[this.requestFingerprint] = requestFingerprint
-            it[this.notes] = notes?.trim()?.takeIf(String::isNotBlank)
+            it[this.idempotencyKey] = command.idempotencyKey
+            it[this.requestFingerprint] = command.requestFingerprint
+            it[this.notes] = command.notes?.trim()?.takeIf(String::isNotBlank)
         }
 
         // 2. Loop insert transaction_items (trigger fn_sync_stock akan berjalan otomatis)
@@ -729,6 +785,9 @@ class SalesRepositoryImpl : SalesRepository {
                 it[this.quantity] = item.qty
                 it[this.priceAtTransaction] = item.priceAtTransaction
                 it[this.cogsAtTransaction] = item.cogsAtTransaction
+                it[this.grossLineTotal] = item.grossLineTotal
+                it[this.discountType] = item.discountType
+                it[this.discountValue] = item.discountValue
                 it[this.discount] = item.discount
                 it[this.subtotal] = item.subtotal
             }
@@ -741,44 +800,52 @@ class SalesRepositoryImpl : SalesRepository {
             PaymentsTable.insert {
                 it[id] = paymentId
                 it[this.transactionId] = trxId
-                it[this.method] = paymentMethod
+                it[this.method] = command.paymentMethod
                 it[this.amount] = payment.paidAmount
             }
         }
 
         // 4. Jika HUTANG/DP — insert ke receivable.receivables
-        val receivableId = if (dueDate != null && customerId != null) UUID.randomUUID() else null
-        if (dueDate != null && customerId != null && receivableId != null) {
+        val receivableId = if (dueDate != null && command.customerId != null) UUID.randomUUID() else null
+        if (dueDate != null && command.customerId != null && receivableId != null) {
             ReceivablesTable.insert {
                 it[id] = receivableId
-                it[this.customerId] = customerId
+                it[this.customerId] = command.customerId
                 it[this.transactionId] = trxId
                 it[this.receivableSource] = ReceivableSource.SALE
                 it[this.amount] = payment.receivableAmount
                 it[this.paidAmount] = java.math.BigDecimal.ZERO
                 it[this.debtDate] = receivableToday()
                 it[this.dueDate] = dueDate
-                it[this.createdBy] = userId
+                it[this.createdBy] = command.userId
                 it[this.status] = ReceivableStatus.UNPAID
             }
         }
 
-        if (paymentMethod == PaymentMethod.TUNAI && payment.paidAmount > BigDecimal.ZERO) {
+        if (command.paymentMethod == PaymentMethod.TUNAI && payment.paidAmount > BigDecimal.ZERO) {
             val currentSystemCash = session[CashSessionsTable.systemCash] ?: session[CashSessionsTable.openingCash]
             CashSessionsTable.update({ CashSessionsTable.id eq sessionId }) {
                 it[this.systemCash] = currentSystemCash.add(payment.paidAmount)
             }
         }
 
-        insertCheckoutAudit(userId, "sales", "transactions", trxId)
-        transactionItemIds.forEach { insertCheckoutAudit(userId, "sales", "transaction_items", it) }
-        paymentId?.let { insertCheckoutAudit(userId, "sales", "payments", it) }
-        receivableId?.let { insertCheckoutAudit(userId, "receivable", "receivables", it) }
+        insertCheckoutAudit(command.userId, "sales", "transactions", trxId)
+        transactionItemIds.forEach { insertCheckoutAudit(command.userId, "sales", "transaction_items", it) }
+        paymentId?.let { insertCheckoutAudit(command.userId, "sales", "payments", it) }
+        receivableId?.let { insertCheckoutAudit(command.userId, "receivable", "receivables", it) }
         lockedStockIds.values.forEach {
-            insertCheckoutAudit(userId, "inventory", "stock", it, AuditAction.UPDATE)
+            insertCheckoutAudit(command.userId, "inventory", "stock", it, AuditAction.UPDATE)
         }
-        if (paymentMethod == PaymentMethod.TUNAI && payment.paidAmount > BigDecimal.ZERO) {
-            insertCheckoutAudit(userId, "sales", "cash_sessions", sessionId, AuditAction.UPDATE)
+        if (command.paymentMethod == PaymentMethod.TUNAI && payment.paidAmount > BigDecimal.ZERO) {
+            insertCheckoutAudit(command.userId, "sales", "cash_sessions", sessionId, AuditAction.UPDATE)
+        }
+
+        if (discountCalculation.totalDiscountAmount > BigDecimal.ZERO) {
+            insertDiscountAudit(command.userId, trxId, discountCalculation, validatedApproval)
+        }
+        if (approvalScope != null) {
+            managerApprovalService.consumeApprovalInCurrentTransaction(approvalScope, null)
+            discountRepository.consumeAttemptInCurrentTransaction(requireNotNull(command.checkoutAttemptId), trxId)
         }
 
         // Ambil data transaksi yang baru dibuat (inline, tidak memanggil suspend function)
@@ -792,6 +859,9 @@ class SalesRepositoryImpl : SalesRepository {
                     quantity = row[TransactionItemsTable.quantity],
                     priceAtTransaction = row[TransactionItemsTable.priceAtTransaction],
                     cogsAtTransaction = row[TransactionItemsTable.cogsAtTransaction],
+                    grossLineTotal = row[TransactionItemsTable.grossLineTotal],
+                    discountType = row[TransactionItemsTable.discountType]?.name,
+                    discountValue = row[TransactionItemsTable.discountValue],
                     discount = row[TransactionItemsTable.discount],
                     subtotal = row[TransactionItemsTable.subtotal]
                 )
@@ -810,6 +880,16 @@ class SalesRepositoryImpl : SalesRepository {
             userId = trxRow[TransactionsTable.userId].toString(),
             type = trxRow[TransactionsTable.type].dbValue,
             status = trxRow[TransactionsTable.status].dbValue,
+            grossSubtotal = trxRow[TransactionsTable.grossSubtotal],
+            itemDiscountTotal = trxRow[TransactionsTable.itemDiscountTotal],
+            transactionDiscountType = trxRow[TransactionsTable.transactionDiscountType]?.name,
+            transactionDiscountValue = trxRow[TransactionsTable.transactionDiscountValue],
+            transactionDiscountAmount = trxRow[TransactionsTable.transactionDiscountAmount],
+            totalDiscountAmount = trxRow[TransactionsTable.totalDiscountAmount],
+            effectiveDiscountPercent = DiscountCalculator.effectivePercent(
+                trxRow[TransactionsTable.grossSubtotal], trxRow[TransactionsTable.totalDiscountAmount]
+            ),
+            discountManagerApprovalId = trxRow[TransactionsTable.discountManagerApprovalId]?.toString(),
             total = trxRow[TransactionsTable.total],
             dpAmount = trxRow[TransactionsTable.dpAmount],
             paidAmount = trxRow[TransactionsTable.paidAmount],
@@ -901,6 +981,13 @@ class SalesRepositoryImpl : SalesRepository {
             it[this.type] = TrxType.PENJUALAN
             it[this.status] = payment.status
             it[this.total] = totalAmount
+            it[this.grossSubtotal] = itemTotal
+            it[this.itemDiscountTotal] = BigDecimal.ZERO
+            it[this.transactionDiscountType] = null
+            it[this.transactionDiscountValue] = BigDecimal.ZERO
+            it[this.transactionDiscountAmount] = BigDecimal.ZERO
+            it[this.totalDiscountAmount] = BigDecimal.ZERO
+            it[this.discountManagerApprovalId] = null
             it[this.dpAmount] = if (payment.status == TrxStatus.DP) payment.paidAmount else BigDecimal.ZERO
             it[this.paidAmount] = payment.paidAmount
             it[this.amountTendered] = payment.amountTendered
@@ -923,6 +1010,9 @@ class SalesRepositoryImpl : SalesRepository {
                 it[this.quantity] = item.qty
                 it[this.priceAtTransaction] = item.priceAtTransaction
                 it[this.cogsAtTransaction] = item.cogsAtTransaction
+                it[this.grossLineTotal] = item.grossLineTotal
+                it[this.discountType] = item.discountType
+                it[this.discountValue] = item.discountValue
                 it[this.discount] = item.discount
                 it[this.subtotal] = item.subtotal
             }
@@ -993,7 +1083,11 @@ class SalesRepositoryImpl : SalesRepository {
         if (item.quantity.scale() > 2) {
             throw ValidationException("Quantity maksimal memiliki 2 angka desimal")
         }
-        if (listOf(item.priceAtTransaction, item.cogsAtTransaction, item.discount, item.subtotal).any { it.scale() > 2 }) {
+        if (listOf(
+                item.priceAtTransaction, item.cogsAtTransaction, item.grossLineTotal,
+                item.discountValue, item.discount, item.subtotal
+            ).any { it.scale() > 2 }
+        ) {
             throw ValidationException("Nilai uang item checkout maksimal memiliki 2 angka desimal")
         }
         if (item.priceAtTransaction < BigDecimal.ZERO) {
@@ -1005,8 +1099,10 @@ class SalesRepositoryImpl : SalesRepository {
         if (item.discount < BigDecimal.ZERO) {
             throw ValidationException("Diskon produk ${item.productId} tidak boleh negatif")
         }
-        if (item.discount > item.priceAtTransaction) {
-            throw ValidationException("Diskon tidak boleh melebihi harga produk ${item.productId}")
+        if (item.discountType != null || item.discountValue.compareTo(BigDecimal.ZERO) != 0 ||
+            item.discount.compareTo(BigDecimal.ZERO) != 0
+        ) {
+            throw ValidationException("Diskon offline tidak didukung")
         }
 
         val product = ProductsTable.select {
@@ -1014,10 +1110,11 @@ class SalesRepositoryImpl : SalesRepository {
         }.forUpdate().singleOrNull()
             ?: throw NotFoundException("Produk dengan ID ${item.productId} tidak ditemukan atau tidak aktif")
 
-        val expectedSubtotal = item.priceAtTransaction
-            .subtract(item.discount)
-            .multiply(item.quantity)
-            .normalizeMoney()
+        val expectedGross = item.priceAtTransaction.multiply(item.quantity).normalizeMoney()
+        if (item.grossLineTotal.normalizeMoney().compareTo(expectedGross) != 0) {
+            throw ValidationException("Gross line total sync tidak valid untuk produk ${item.productId}")
+        }
+        val expectedSubtotal = expectedGross.subtract(item.discount).normalizeMoney()
         val requestedSubtotal = item.subtotal.normalizeMoney()
         if (requestedSubtotal.compareTo(expectedSubtotal) != 0) {
             throw ValidationException("Subtotal item sync tidak valid untuk produk ${item.productId}")
@@ -1030,49 +1127,66 @@ class SalesRepositoryImpl : SalesRepository {
             qty = item.quantity,
             priceAtTransaction = item.priceAtTransaction.normalizeMoney(),
             cogsAtTransaction = item.cogsAtTransaction.normalizeMoney(),
+            grossLineTotal = item.grossLineTotal.normalizeMoney(),
+            discountType = item.discountType,
+            discountValue = item.discountValue.normalizeMoney(),
             discount = item.discount.normalizeMoney(),
             subtotal = requestedSubtotal
         )
     }
 
-    private fun resolveItemForCheckout(item: CheckoutItemRequest): ResolvedItem {
-        val productId = try {
-            UUID.fromString(item.productId)
-        } catch (e: IllegalArgumentException) {
-            throw ValidationException("Format Product ID tidak valid: ${item.productId}")
+    private fun resolveItemsForCheckout(
+        items: List<CheckoutItemRequest>,
+        transactionDiscount: DiscountRequest?
+    ): Pair<List<ResolvedItem>, DiscountCalculation> {
+        val productIds = items.map { item ->
+            runCatching { UUID.fromString(item.productId) }.getOrElse {
+                throw ValidationException("Format Product ID tidak valid: ${item.productId}")
+            }
         }
+        val products = ProductsTable.select { ProductsTable.id inList productIds.sortedBy(UUID::toString) }
+            .orderBy(ProductsTable.id to SortOrder.ASC)
+            .forUpdate()
+            .associateBy { it[ProductsTable.id] }
+        if (products.size != productIds.size) throw NotFoundException("Satu atau lebih produk tidak ditemukan")
 
-        if (item.qty <= BigDecimal.ZERO) {
-            throw ValidationException("Quantity untuk produk ${item.productId} harus lebih dari 0")
-        }
-        if (item.discount < BigDecimal.ZERO) {
-            throw ValidationException("Diskon tidak boleh negatif")
-        }
-
-        val product = ProductsTable.select {
-            (ProductsTable.id eq productId) and (ProductsTable.isActive eq true)
-        }.forUpdate().singleOrNull()
-            ?: throw NotFoundException("Produk dengan ID ${item.productId} tidak ditemukan atau tidak aktif")
-
-        val price = product[ProductsTable.priceRetail]
-        if (item.discount > price) {
-            throw ValidationException("Diskon tidak boleh melebihi harga produk ${item.productId}")
-        }
-
-        val subtotal = price.subtract(item.discount)
-            .multiply(item.qty)
-            .setScale(2, RoundingMode.HALF_UP)
-
-        return ResolvedItem(
-            productId = productId,
-            unitId = product[ProductsTable.baseUnitId],
-            productName = product[ProductsTable.name],
-            qty = item.qty,
-            priceAtTransaction = price,
-            cogsAtTransaction = product[ProductsTable.priceBuy],
-            discount = item.discount,
-            subtotal = subtotal
+        val calculation = DiscountCalculator.calculate(
+            items.mapIndexed { index, item ->
+                val productId = productIds[index]
+                val product = requireNotNull(products[productId])
+                if (!product[ProductsTable.isActive]) {
+                    throw ValidationException("Produk ${product[ProductsTable.name]} tidak aktif")
+                }
+                DiscountItemInput(
+                    reference = productId.toString(),
+                    quantity = item.qty,
+                    unitPrice = product[ProductsTable.priceRetail],
+                    discount = item.discountRequest,
+                    legacyPerUnitDiscount = item.discount
+                )
+            },
+            transactionDiscount
         )
+        val calculations = calculation.items.associateBy { UUID.fromString(it.reference) }
+        val resolved = items.mapIndexed { index, _ ->
+            val productId = productIds[index]
+            val product = requireNotNull(products[productId])
+            val line = requireNotNull(calculations[productId])
+            ResolvedItem(
+                productId = productId,
+                unitId = product[ProductsTable.baseUnitId],
+                productName = product[ProductsTable.name],
+                qty = line.quantity,
+                priceAtTransaction = line.unitPrice,
+                cogsAtTransaction = product[ProductsTable.priceBuy],
+                grossLineTotal = line.grossLineTotal,
+                discountType = line.discountType,
+                discountValue = line.discountValue,
+                discount = line.discountAmount,
+                subtotal = line.netLineTotal
+            )
+        }
+        return resolved to calculation
     }
 
     private fun lockCustomerAndValidateCredit(
@@ -1175,6 +1289,34 @@ class SalesRepositoryImpl : SalesRepository {
         }
     }
 
+    private fun insertDiscountAudit(
+        actorUserId: UUID,
+        transactionId: UUID,
+        calculation: DiscountCalculation,
+        approval: ManagerApprovalRecord?
+    ) {
+        val metadata = buildJsonObject {
+            put("event", if (approval == null) "DISCOUNT_APPLIED" else "DISCOUNT_OVERRIDE_USED")
+            put("transactionId", transactionId.toString())
+            put("grossSubtotal", calculation.grossSubtotal.toPlainString())
+            put("discountAmount", calculation.totalDiscountAmount.toPlainString())
+            put("effectiveDiscountPercent", calculation.effectiveDiscountPercent.toPlainString())
+            approval?.let {
+                put("managerApprovalId", it.id.toString())
+                put("approvedByUserId", it.approvedByUserId.toString())
+            }
+        }.toString()
+        AuditLogsTable.insert {
+            it[id] = UUID.randomUUID()
+            it[userId] = actorUserId
+            it[action] = AuditAction.UPDATE
+            it[targetSchemaName] = "sales"
+            it[targetTableName] = "transactions"
+            it[recordId] = transactionId
+            it[newData] = metadata
+        }
+    }
+
     override suspend fun getTransactionById(id: UUID): TransactionResponse? = newSuspendedTransaction(Dispatchers.IO) {
         getTransactionByIdInTransaction(id)
     }
@@ -1194,6 +1336,9 @@ class SalesRepositoryImpl : SalesRepository {
                     quantity = row[TransactionItemsTable.quantity],
                     priceAtTransaction = row[TransactionItemsTable.priceAtTransaction],
                     cogsAtTransaction = row[TransactionItemsTable.cogsAtTransaction],
+                    grossLineTotal = row[TransactionItemsTable.grossLineTotal],
+                    discountType = row[TransactionItemsTable.discountType]?.name,
+                    discountValue = row[TransactionItemsTable.discountValue],
                     discount = row[TransactionItemsTable.discount],
                     subtotal = row[TransactionItemsTable.subtotal]
                 )
@@ -1218,6 +1363,16 @@ class SalesRepositoryImpl : SalesRepository {
             paymentMethods = paymentMethods,
             type = trxRow[TransactionsTable.type].dbValue,
             status = trxRow[TransactionsTable.status].dbValue,
+            grossSubtotal = trxRow[TransactionsTable.grossSubtotal],
+            itemDiscountTotal = trxRow[TransactionsTable.itemDiscountTotal],
+            transactionDiscountType = trxRow[TransactionsTable.transactionDiscountType]?.name,
+            transactionDiscountValue = trxRow[TransactionsTable.transactionDiscountValue],
+            transactionDiscountAmount = trxRow[TransactionsTable.transactionDiscountAmount],
+            totalDiscountAmount = trxRow[TransactionsTable.totalDiscountAmount],
+            effectiveDiscountPercent = DiscountCalculator.effectivePercent(
+                trxRow[TransactionsTable.grossSubtotal], trxRow[TransactionsTable.totalDiscountAmount]
+            ),
+            discountManagerApprovalId = trxRow[TransactionsTable.discountManagerApprovalId]?.toString(),
             total = trxRow[TransactionsTable.total],
             dpAmount = trxRow[TransactionsTable.dpAmount],
             paidAmount = trxRow[TransactionsTable.paidAmount],
@@ -1252,14 +1407,17 @@ class SalesRepositoryImpl : SalesRepository {
         actorUserId: UUID,
         transactionId: UUID,
         reason: String,
-        idempotencyKey: String
+        idempotencyKey: String,
+        approvalScope: ManagerApprovalScope?,
+        ipAddress: String?
     ): VoidTransactionResponse = newSuspendedTransaction(Dispatchers.IO) {
         val existingByKey = TransactionVoidsTable.select {
             TransactionVoidsTable.idempotencyKey eq idempotencyKey
         }.forUpdate().singleOrNull()
         if (existingByKey != null) {
             if (existingByKey[TransactionVoidsTable.transactionId] != transactionId ||
-                existingByKey[TransactionVoidsTable.reason] != reason
+                existingByKey[TransactionVoidsTable.reason] != reason ||
+                existingByKey[TransactionVoidsTable.managerApprovalId] != approvalScope?.approvalId
             ) throw ValidationException("idempotencyKey sudah digunakan untuk permintaan void yang berbeda")
             return@newSuspendedTransaction voidResponse(existingByKey, true)
         }
@@ -1275,10 +1433,18 @@ class SalesRepositoryImpl : SalesRepository {
                 .singleOrNull()
                 ?.takeIf {
                     it[TransactionVoidsTable.idempotencyKey] == idempotencyKey &&
-                        it[TransactionVoidsTable.reason] == reason
+                        it[TransactionVoidsTable.reason] == reason &&
+                        it[TransactionVoidsTable.managerApprovalId] == approvalScope?.approvalId
                 }
                 ?.let { return@newSuspendedTransaction voidResponse(it, true) }
             throw ValidationException("Transaksi sudah pernah dibatalkan")
+        }
+        if (transactionRow[TransactionsTable.status] == TrxStatus.REFUNDED) {
+            throw ValidationException("Transaksi REFUNDED tidak dapat dibatalkan dengan Void")
+        }
+
+        val validatedApproval = approvalScope?.let {
+            managerApprovalService.validateApprovalInCurrentTransaction(it)
         }
 
         val transactionItems = TransactionItemsTable.select {
@@ -1299,6 +1465,7 @@ class SalesRepositoryImpl : SalesRepository {
             it[voidedBy] = actorUserId
             it[this.reason] = reason
             it[this.idempotencyKey] = idempotencyKey
+            it[managerApprovalId] = approvalScope?.approvalId
         }
 
         quantitiesByProduct.toSortedMap(compareBy(UUID::toString)).forEach { (productId, quantity) ->
@@ -1405,7 +1572,17 @@ class SalesRepositoryImpl : SalesRepository {
             it[paidAmount] = BigDecimal.ZERO.setScale(2)
             it[dpAmount] = BigDecimal.ZERO.setScale(2)
         }
-        insertCheckoutAudit(actorUserId, "sales", "transaction_voids", voidId)
+        val consumedApproval = approvalScope?.let {
+            managerApprovalService.consumeApprovalInCurrentTransaction(it, ipAddress)
+        }
+        insertVoidAudit(
+            actorUserId = actorUserId,
+            transactionId = transactionId,
+            voidId = voidId,
+            reason = reason,
+            approval = consumedApproval ?: validatedApproval,
+            ipAddress = ipAddress
+        )
         insertCheckoutAudit(actorUserId, "sales", "transactions", transactionId, AuditAction.UPDATE)
         voidResponse(
             TransactionVoidsTable.select { TransactionVoidsTable.id eq voidId }.single(),
@@ -1427,8 +1604,39 @@ class SalesRepositoryImpl : SalesRepository {
             voidedBy = actor.toString(),
             voidedByName = getUserName(actor),
             voidedAt = row[TransactionVoidsTable.createdAt].toString(),
+            managerApprovalId = row[TransactionVoidsTable.managerApprovalId]?.toString(),
             idempotentReplay = replay
         )
+    }
+
+    private fun insertVoidAudit(
+        actorUserId: UUID,
+        transactionId: UUID,
+        voidId: UUID,
+        reason: String,
+        approval: ManagerApprovalRecord?,
+        ipAddress: String?
+    ) {
+        val metadata = buildJsonObject {
+            put("event", "TRANSACTION_VOIDED")
+            put("transactionId", transactionId.toString())
+            put("actorUserId", actorUserId.toString())
+            put("reason", reason)
+            approval?.let {
+                put("managerApprovalId", it.id.toString())
+                put("approvedByUserId", it.approvedByUserId.toString())
+            }
+        }.toString()
+        AuditLogsTable.insert {
+            it[id] = UUID.randomUUID()
+            it[userId] = actorUserId
+            it[action] = AuditAction.INSERT
+            it[targetSchemaName] = "sales"
+            it[targetTableName] = "transaction_voids"
+            it[recordId] = voidId
+            it[newData] = metadata
+            it[this.ipAddress] = ipAddress?.take(45)
+        }
     }
 
     private fun reverseCashForPayment(

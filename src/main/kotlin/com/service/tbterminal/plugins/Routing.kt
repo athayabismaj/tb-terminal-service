@@ -4,6 +4,7 @@ import io.ktor.server.application.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import com.service.tbterminal.system.systemRoutes
+import com.service.tbterminal.system.managerApprovalRoutes
 import com.service.tbterminal.inventory.inventoryRoutes
 import com.service.tbterminal.sales.salesRoutes
 import com.service.tbterminal.receivable.receivableRoutes
@@ -64,6 +65,7 @@ fun Application.configureRouting() {
     // Modules that extend Application
     inventoryRoutes()
     systemRoutes()
+    managerApprovalRoutes()
     salesRoutes()
     receivableRoutes()
     purchasingRoutes()

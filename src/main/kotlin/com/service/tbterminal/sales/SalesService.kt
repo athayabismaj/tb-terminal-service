@@ -160,7 +160,7 @@ class SalesService(private val repository: SalesRepository) {
     // POS — CHECKOUT ENGINE
     // ==========================================
 
-    suspend fun checkout(userId: UUID, request: CheckoutRequest): TransactionResponse {
+    suspend fun checkout(userId: UUID, actorRole: String, request: CheckoutRequest): TransactionResponse {
         val idempotencyKey = validateCheckoutRequest(request)
 
         val paymentMethod = PaymentMethod.entries.firstOrNull { it.dbValue == request.paymentMethod.lowercase() }
@@ -189,15 +189,21 @@ class SalesService(private val repository: SalesRepository) {
 
         return try {
             repository.executeCheckout(
-                userId = userId,
-                customerId = customerId,
-                requestItems = request.items,
-                paymentMethod = paymentMethod,
-                amountPaid = request.amountPaid,
-                notes = request.notes,
-                dueDays = request.dueDays,
-                idempotencyKey = idempotencyKey,
-                requestFingerprint = fingerprint
+                CheckoutCommand(
+                    userId = userId,
+                    actorRole = actorRole,
+                    customerId = customerId,
+                    requestItems = request.items,
+                    transactionDiscount = request.transactionDiscount,
+                    paymentMethod = paymentMethod,
+                    amountPaid = request.amountPaid,
+                    notes = request.notes,
+                    dueDays = request.dueDays,
+                    idempotencyKey = idempotencyKey,
+                    requestFingerprint = fingerprint,
+                    checkoutAttemptId = request.checkoutAttemptId?.let { parseUuid(it, "Checkout Attempt ID") },
+                    managerApprovalId = request.managerApprovalId?.let { parseUuid(it, "Manager Approval ID") }
+                )
             )
         } catch (e: ExposedSQLException) {
             if (e.sqlState == "23505") {
@@ -262,6 +268,14 @@ class SalesService(private val repository: SalesRepository) {
         val paidAmount = request.paidAmount.normalizeMoney()
         val remainingAmount = request.remainingAmount.normalizeMoney()
 
+        if (discount.compareTo(BigDecimal.ZERO) != 0 ||
+            request.items.any { it.discount.compareTo(BigDecimal.ZERO) != 0 }
+        ) {
+            throw ValidationException(
+                "Diskon offline tidak didukung karena harga dan approval wajib dihitung server saat checkout online"
+            )
+        }
+
         if (subtotal < BigDecimal.ZERO) {
             throw ValidationException("Subtotal checkout offline tidak boleh negatif")
         }
@@ -299,6 +313,9 @@ class SalesService(private val repository: SalesRepository) {
                 quantity = item.quantity,
                 priceAtTransaction = item.priceAtTransaction,
                 cogsAtTransaction = item.cogsAtTransaction,
+                grossLineTotal = item.priceAtTransaction.multiply(item.quantity).normalizeMoney(),
+                discountType = null,
+                discountValue = BigDecimal.ZERO.setScale(MONEY_SCALE),
                 discount = item.discount,
                 subtotal = item.subtotal
             )
@@ -389,10 +406,29 @@ class SalesService(private val repository: SalesRepository) {
         )
     }
 
-    suspend fun voidTransaction(userId: UUID, id: String, request: VoidTransactionRequest): VoidTransactionResponse {
+    suspend fun voidTransaction(
+        userId: UUID,
+        actorRole: String,
+        id: String,
+        request: VoidTransactionRequest,
+        ipAddress: String?
+    ): VoidTransactionResponse {
         val transactionId = parseUuid(id, "Transaction ID")
         val (key, reason) = validateVoidRequest(request)
-        return repository.voidTransaction(userId, transactionId, reason, key)
+        val approvalScope = resolveVoidApprovalScope(
+            actorUserId = userId,
+            actorRole = actorRole,
+            transactionId = transactionId,
+            managerApprovalId = request.managerApprovalId
+        )
+        return repository.voidTransaction(
+            actorUserId = userId,
+            transactionId = transactionId,
+            reason = reason,
+            idempotencyKey = key,
+            approvalScope = approvalScope,
+            ipAddress = ipAddress
+        )
     }
 
     suspend fun getTransactionById(id: String): TransactionResponse {
