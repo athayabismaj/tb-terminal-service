@@ -51,7 +51,10 @@ data class DailySalesSummary(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val totalRevenue: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val totalDp: java.math.BigDecimal,
     val voidedTransactionCount: Long = 0,
-    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val voidedAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val voidedAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    val refundedTransactionCount: Long = 0,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val refundedSalesAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val financialRefundAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO
 )
 
 @Serializable
@@ -91,7 +94,8 @@ data class SalesReportResponse(
     val topProducts: List<TopProductSalesSummary>,
     val cashiers: List<CashierSalesSummary>,
     val receivables: SalesReceivableSummary,
-    val voided: VoidedSalesSummary = VoidedSalesSummary()
+    val voided: VoidedSalesSummary = VoidedSalesSummary(),
+    val refunded: RefundedSalesSummary = RefundedSalesSummary()
 )
 
 @Serializable
@@ -99,6 +103,13 @@ data class VoidedSalesSummary(
     val transactionCount: Long = 0,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val amount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val paidAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO
+)
+
+@Serializable
+data class RefundedSalesSummary(
+    val transactionCount: Long = 0,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val salesAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val financialRefundAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO
 )
 
 data class SalesReportFilter(
@@ -138,9 +149,12 @@ data class SalesReportRange(
 data class SalesReportTotals(
     val transactionCount: Long,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossRevenue: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val discountAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val paidAmount: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val outstandingAmount: java.math.BigDecimal,
-    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossProfit: java.math.BigDecimal
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossProfit: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val refundAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val netRevenue: java.math.BigDecimal = grossRevenue.subtract(discountAmount).subtract(refundAmount)
 )
 
 @Serializable

@@ -25,12 +25,16 @@ class AnalyticsRepository {
                 """
                 SELECT
                     (t.created_at AT TIME ZONE 'Asia/Jakarta')::date AS sale_date,
-                    COUNT(t.id) FILTER (WHERE t.status::text <> 'voided') AS total_transactions,
-                    COALESCE(SUM(t.total) FILTER (WHERE t.status::text <> 'voided'), 0)::numeric AS total_revenue,
-                    COALESCE(SUM(t.dp_amount) FILTER (WHERE t.status::text <> 'voided'), 0)::numeric AS total_dp,
+                    COUNT(t.id) FILTER (WHERE t.status::text NOT IN ('voided', 'refunded')) AS total_transactions,
+                    COALESCE(SUM(t.total) FILTER (WHERE t.status::text NOT IN ('voided', 'refunded')), 0)::numeric AS total_revenue,
+                    COALESCE(SUM(t.dp_amount) FILTER (WHERE t.status::text NOT IN ('voided', 'refunded')), 0)::numeric AS total_dp,
                     COUNT(t.id) FILTER (WHERE t.status::text = 'voided') AS voided_transaction_count,
-                    COALESCE(SUM(t.total) FILTER (WHERE t.status::text = 'voided'), 0)::numeric AS voided_amount
+                    COALESCE(SUM(t.total) FILTER (WHERE t.status::text = 'voided'), 0)::numeric AS voided_amount,
+                    COUNT(t.id) FILTER (WHERE t.status::text = 'refunded') AS refunded_transaction_count,
+                    COALESCE(SUM(t.total) FILTER (WHERE t.status::text = 'refunded'), 0)::numeric AS refunded_sales_amount,
+                    COALESCE(SUM(rf.refunded_amount) FILTER (WHERE t.status::text = 'refunded'), 0)::numeric AS financial_refund_amount
                 FROM sales.transactions t
+                LEFT JOIN sales.transaction_refunds rf ON rf.transaction_id = t.id
                 WHERE t.type = 'penjualan'::system.trx_type
                   AND t.created_at >= ${startAt.toSqlTimestamptz()}
                   AND t.created_at < ${endExclusive.toSqlTimestamptz()}
@@ -44,7 +48,10 @@ class AnalyticsRepository {
                     totalRevenue = row.getBigDecimalOrZero("total_revenue"),
                     totalDp = row.getBigDecimalOrZero("total_dp"),
                     voidedTransactionCount = row.getLong("voided_transaction_count"),
-                    voidedAmount = row.getBigDecimalOrZero("voided_amount")
+                    voidedAmount = row.getBigDecimalOrZero("voided_amount"),
+                    refundedTransactionCount = row.getLong("refunded_transaction_count"),
+                    refundedSalesAmount = row.getBigDecimalOrZero("refunded_sales_amount"),
+                    financialRefundAmount = row.getBigDecimalOrZero("financial_refund_amount")
                 )
             }
         }
@@ -63,7 +70,7 @@ class AnalyticsRepository {
                     COALESCE(SUM(total), 0)::numeric AS month
                 FROM sales.transactions
                 WHERE type = 'penjualan'::system.trx_type
-                  AND status::text <> 'voided'
+                  AND status::text NOT IN ('voided', 'refunded')
                   AND created_at >= ${monthStart.toSqlTimestamptz()}
                   AND created_at < ${tomorrowStart.toSqlTimestamptz()}
                 """
@@ -121,7 +128,14 @@ class AnalyticsRepository {
             startAt = startAt,
             endExclusive = endExclusive,
             filter = filter,
-            includeVoided = false
+            includeTerminalStatuses = false
+        )
+        val grossTransactionWhere = buildTransactionWhere(
+            transactionAlias = "t",
+            startAt = startAt,
+            endExclusive = endExclusive,
+            filter = filter,
+            includeTerminalStatuses = true
         )
         val baseTotals = queryOne(
             """
@@ -129,17 +143,20 @@ class AnalyticsRepository {
                 SELECT
                     t.id,
                     t.total,
+                    t.gross_subtotal,
+                    t.total_discount_amount,
                     CASE
                         WHEN r.id IS NULL THEN GREATEST(t.total - t.paid_amount, 0)
                         ELSE GREATEST(r.amount - r.paid_amount, 0)
                     END AS remaining_amount
                 FROM sales.transactions t
                 LEFT JOIN receivable.receivables r ON r.transaction_id = t.id
-                WHERE $transactionWhere
+                WHERE $grossTransactionWhere AND t.status::text <> 'voided'
             )
             SELECT
                 COUNT(id) AS transaction_count,
-                COALESCE(SUM(total), 0)::numeric AS gross_revenue,
+                COALESCE(SUM(gross_subtotal), 0)::numeric AS gross_revenue,
+                COALESCE(SUM(total_discount_amount), 0)::numeric AS discount_amount,
                 COALESCE(SUM(LEAST(total, GREATEST(total - remaining_amount, 0))), 0)::numeric AS paid_amount
             FROM transaction_report
             """
@@ -147,6 +164,7 @@ class AnalyticsRepository {
             SalesReportTotals(
                 transactionCount = row.getLong("transaction_count"),
                 grossRevenue = row.getBigDecimalOrZero("gross_revenue"),
+                discountAmount = row.getBigDecimalOrZero("discount_amount"),
                 paidAmount = row.getBigDecimalOrZero("paid_amount"),
                 outstandingAmount = BigDecimal.ZERO,
                 grossProfit = BigDecimal.ZERO
@@ -304,7 +322,7 @@ class AnalyticsRepository {
             startAt = startAt,
             endExclusive = endExclusive,
             filter = filter,
-            includeVoided = false
+            includeTerminalStatuses = false
         )
         val cashiers = queryList(
             """
@@ -340,14 +358,14 @@ class AnalyticsRepository {
             )
         }
 
-        val voidedWhere = buildTransactionWhere("t", startAt, endExclusive, filter, includeVoided = true)
+        val terminalWhere = buildTransactionWhere("t", startAt, endExclusive, filter, includeTerminalStatuses = true)
         val voided = queryOne(
             """
             SELECT COUNT(t.id) AS transaction_count,
                    COALESCE(SUM(t.total), 0)::numeric AS amount,
                    COALESCE(SUM(t.paid_amount), 0)::numeric AS paid_amount
             FROM sales.transactions t
-            WHERE $voidedWhere AND t.status::text = 'voided'
+            WHERE $terminalWhere AND t.status::text = 'voided'
             """
         ) { row ->
             VoidedSalesSummary(
@@ -357,6 +375,23 @@ class AnalyticsRepository {
             )
         } ?: VoidedSalesSummary()
 
+        val refunded = queryOne(
+            """
+            SELECT COUNT(t.id) AS transaction_count,
+                   COALESCE(SUM(t.total), 0)::numeric AS sales_amount,
+                   COALESCE(SUM(rf.refunded_amount), 0)::numeric AS financial_refund_amount
+            FROM sales.transactions t
+            JOIN sales.transaction_refunds rf ON rf.transaction_id = t.id
+            WHERE $terminalWhere AND t.status::text = 'refunded'
+            """
+        ) { row ->
+            RefundedSalesSummary(
+                transactionCount = row.getLong("transaction_count"),
+                salesAmount = row.getBigDecimalOrZero("sales_amount"),
+                financialRefundAmount = row.getBigDecimalOrZero("financial_refund_amount")
+            )
+        } ?: RefundedSalesSummary()
+
         SalesReportResponse(
             range = SalesReportRange(
                 startDate = filter.startDate.toString(),
@@ -364,14 +399,19 @@ class AnalyticsRepository {
             ),
             totals = baseTotals.copy(
                 outstandingAmount = receivables.remainingAmount,
-                grossProfit = grossProfit
+                grossProfit = grossProfit,
+                refundAmount = refunded.financialRefundAmount,
+                netRevenue = baseTotals.grossRevenue
+                    .subtract(baseTotals.discountAmount)
+                    .subtract(refunded.financialRefundAmount)
             ),
             paymentMethods = paymentMethods,
             transactionStatuses = transactionStatuses,
             topProducts = topProducts,
             cashiers = cashiers,
             receivables = receivables,
-            voided = voided
+            voided = voided,
+            refunded = refunded
         )
     }
 
@@ -384,16 +424,20 @@ class AnalyticsRepository {
         val zoneId = ZoneId.of("Asia/Jakarta")
         val startAt = filter.startDate.atStartOfDay(zoneId).toOffsetDateTime()
         val endExclusive = filter.endDate.plusDays(1).atStartOfDay(zoneId).toOffsetDateTime()
-        val transactionWhere = buildTransactionWhere("t", startAt, endExclusive, filter, includeVoided = true)
+        val transactionWhere = buildTransactionWhere("t", startAt, endExclusive, filter, includeTerminalStatuses = true)
         val paging = "LIMIT $limit OFFSET $offset"
 
         when (type) {
             CsvExportType.TRANSACTIONS -> CsvPage(
-                headers = listOf("nomor_transaksi", "tanggal", "status", "kasir", "pelanggan", "total", "dibayar", "metode_pembayaran", "catatan"),
+                headers = listOf("nomor_transaksi", "tanggal", "status", "kasir", "pelanggan", "subtotal_kotor", "diskon_item", "tipe_diskon_transaksi", "nilai_diskon_transaksi", "diskon_transaksi", "total_diskon", "total_bersih", "dibayar", "metode_pembayaran", "catatan"),
                 rows = queryList(
                     """
                     SELECT t.receipt_number, t.created_at::text, t.status::text, u.name AS cashier,
-                           COALESCE(c.name, 'Umum') AS customer, t.total::text, t.paid_amount::text,
+                           COALESCE(c.name, 'Umum') AS customer, t.gross_subtotal::text,
+                           t.item_discount_total::text,
+                           COALESCE(t.transaction_discount_type, '') AS transaction_discount_type,
+                           t.transaction_discount_value::text, t.transaction_discount_amount::text,
+                           t.total_discount_amount::text, t.total::text, t.paid_amount::text,
                            COALESCE(STRING_AGG(DISTINCT p.method::text, '|' ORDER BY p.method::text), '') AS methods,
                            COALESCE(t.notes, '') AS notes
                     FROM sales.transactions t
@@ -405,17 +449,18 @@ class AnalyticsRepository {
                     ORDER BY t.created_at, t.id
                     $paging
                     """
-                ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("cashier"), r.str("customer"), r.str("total"), r.str("paid_amount"), r.str("methods"), r.str("notes")) }
+                ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("cashier"), r.str("customer"), r.str("gross_subtotal"), r.str("item_discount_total"), r.str("transaction_discount_type"), r.str("transaction_discount_value"), r.str("transaction_discount_amount"), r.str("total_discount_amount"), r.str("total"), r.str("paid_amount"), r.str("methods"), r.str("notes")) }
             )
 
             CsvExportType.SALES_DETAILS -> CsvPage(
-                headers = listOf("nomor_transaksi", "tanggal", "status", "sku", "produk", "kategori", "satuan", "jumlah", "harga_snapshot", "hpp_snapshot", "diskon", "subtotal"),
+                headers = listOf("nomor_transaksi", "tanggal", "status", "sku", "produk", "kategori", "satuan", "jumlah", "harga_snapshot", "hpp_snapshot", "total_kotor", "tipe_diskon", "nilai_diskon", "nominal_diskon", "total_bersih"),
                 rows = queryList(
                     """
                     SELECT t.receipt_number, t.created_at::text, t.status::text, p.sku, p.name AS product,
                            c.name AS category, u.symbol AS unit, ti.quantity::text,
                            ti.price_at_transaction::text, ti.cogs_at_transaction::text,
-                           ti.discount::text, ti.subtotal::text
+                           ti.gross_line_total::text, COALESCE(ti.discount_type, '') AS discount_type,
+                           ti.discount_value::text, ti.discount::text, ti.subtotal::text
                     FROM sales.transaction_items ti
                     JOIN sales.transactions t ON t.id = ti.transaction_id
                     JOIN inventory.products p ON p.id = ti.product_id
@@ -425,7 +470,7 @@ class AnalyticsRepository {
                     ORDER BY t.created_at, t.id, ti.id
                     $paging
                     """
-                ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("sku"), r.str("product"), r.str("category"), r.str("unit"), r.str("quantity"), r.str("price_at_transaction"), r.str("cogs_at_transaction"), r.str("discount"), r.str("subtotal")) }
+                ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("sku"), r.str("product"), r.str("category"), r.str("unit"), r.str("quantity"), r.str("price_at_transaction"), r.str("cogs_at_transaction"), r.str("gross_line_total"), r.str("discount_type"), r.str("discount_value"), r.str("discount"), r.str("subtotal")) }
             )
 
             CsvExportType.STOCK -> {
@@ -548,14 +593,14 @@ class AnalyticsRepository {
         startAt: OffsetDateTime,
         endExclusive: OffsetDateTime,
         filter: SalesReportFilter,
-        includeVoided: Boolean
+        includeTerminalStatuses: Boolean
     ): String {
         val conditions = mutableListOf(
             "$transactionAlias.type = 'penjualan'::system.trx_type",
             "$transactionAlias.created_at >= ${startAt.toSqlTimestamptz()}",
             "$transactionAlias.created_at < ${endExclusive.toSqlTimestamptz()}"
         )
-        if (!includeVoided) conditions += "$transactionAlias.status::text <> 'voided'"
+        if (!includeTerminalStatuses) conditions += "$transactionAlias.status::text NOT IN ('voided', 'refunded')"
         filter.cashierId?.let { conditions += "$transactionAlias.user_id = ${it.toSqlUuid()}" }
         filter.sessionId?.let { conditions += "$transactionAlias.session_id = ${it.toSqlUuid()}" }
         filter.customerId?.let { conditions += "$transactionAlias.customer_id = ${it.toSqlUuid()}" }

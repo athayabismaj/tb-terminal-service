@@ -1,8 +1,8 @@
 package com.service.tbterminal.analytics
 
 import com.service.tbterminal.shared.ApiResponse
-import com.service.tbterminal.shared.Role
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.Permission
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
@@ -30,7 +30,7 @@ fun Application.analyticsRoutes() {
                 // ==========================================
                 get("/dashboard") {
                     // MUTLAK: Hanya ADMIN dan OWNER
-                    call.requireRole(Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.VIEW_ANALYTICS)
                     val metrics = service.getDashboardMetrics()
                     call.respond(HttpStatusCode.OK, ApiResponse.success(metrics))
                 }
@@ -40,7 +40,7 @@ fun Application.analyticsRoutes() {
                 // ==========================================
                 get("/sales") {
                     // MUTLAK: Hanya ADMIN dan OWNER
-                    call.requireRole(Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.VIEW_ANALYTICS)
                     
                     val startDate = call.request.queryParameters["startDate"]
                     val endDate = call.request.queryParameters["endDate"]
@@ -54,7 +54,7 @@ fun Application.analyticsRoutes() {
                 // ==========================================
                 get("/sales/report") {
                     // MUTLAK: Hanya ADMIN dan OWNER
-                    call.requireRole(Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.VIEW_ANALYTICS)
 
                     val report = service.getSalesReport(
                         startDateStr = call.request.queryParameters["startDate"],
@@ -72,7 +72,7 @@ fun Application.analyticsRoutes() {
                 }
 
                 get("/exports/{type}.csv") {
-                    call.requireRole(Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.VIEW_ANALYTICS)
                     val typePath = call.parameters["type"].orEmpty()
                     val type = CsvExportType.fromPath(typePath)
                         ?: throw com.service.tbterminal.shared.ValidationException("Jenis ekspor tidak didukung")

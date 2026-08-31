@@ -143,6 +143,6 @@ class AnalyticsService(private val repo: AnalyticsRepository) {
     private companion object {
         const val MAX_REPORT_DAYS = 366L
         val PAYMENT_METHODS = setOf("tunai", "transfer", "qris", "dp", "hutang")
-        val TRANSACTION_STATUSES = setOf("lunas", "dp", "hutang", "voided")
+        val TRANSACTION_STATUSES = setOf("lunas", "dp", "hutang", "voided", "refunded")
     }
 }
