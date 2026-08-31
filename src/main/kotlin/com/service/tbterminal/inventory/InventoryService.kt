@@ -182,11 +182,24 @@ class InventoryService(private val repository: InventoryRepository) {
 
         val categoryId = parseInventoryUUID(request.categoryId)
         val unitId = parseInventoryUUID(request.baseUnitId)
+        val secondaryUnitId = request.secondaryUnitId
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?.let(::parseInventoryUUID)
+        val secondaryUnitFactor = parseUnitConversionFactor(request.secondaryUnitFactor)
+        if (!request.secondaryUnitFactor.isNullOrBlank() && secondaryUnitFactor == null) {
+            throw ValidationException("Faktor konversi wajib berupa angka valid")
+        }
 
         // Verifikasi Produk, Kategori dan Satuan
         repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
         repository.getCategoryById(categoryId) ?: throw ValidationException("Kategori tidak valid atau tidak ditemukan")
         repository.getUnitById(unitId) ?: throw ValidationException("Satuan tidak valid atau tidak ditemukan")
+        validateUnitConversion(unitId, secondaryUnitId, secondaryUnitFactor)
+            ?.let { throw ValidationException(it) }
+        secondaryUnitId?.let { secondaryId ->
+            repository.getUnitById(secondaryId) ?: throw ValidationException("Satuan kedua tidak valid atau tidak ditemukan")
+        }
 
         repository.updateProduct(
             id = uuid,
@@ -198,7 +211,9 @@ class InventoryService(private val repository: InventoryRepository) {
             priceContractor = request.priceContractor,
             discount = request.discount,
             minStock = request.minStock,
-            photoFilename = request.photoFilename
+            photoFilename = request.photoFilename,
+            secondaryUnitId = secondaryUnitId,
+            secondaryUnitFactor = secondaryUnitFactor
         )
 
         return repository.getProductById(uuid)!!

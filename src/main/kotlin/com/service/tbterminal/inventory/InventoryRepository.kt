@@ -36,7 +36,9 @@ interface InventoryRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
     ): UUID
 
     suspend fun updateProduct(
@@ -49,7 +51,9 @@ interface InventoryRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
     ): Boolean
 
     suspend fun restoreProductAndOverwrite(
@@ -62,7 +66,9 @@ interface InventoryRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
     ): Boolean
 
     suspend fun softDeleteProduct(id: UUID): Boolean
@@ -150,8 +156,10 @@ class InventoryRepositoryImpl : InventoryRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
-    ) = products.createProductAndInitStock(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
+    ) = products.createProductAndInitStock(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename, secondaryUnitId, secondaryUnitFactor)
 
     override suspend fun updateProduct(
         id: UUID,
@@ -163,8 +171,10 @@ class InventoryRepositoryImpl : InventoryRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
-    ) = products.updateProduct(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
+    ) = products.updateProduct(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename, secondaryUnitId, secondaryUnitFactor)
 
     override suspend fun restoreProductAndOverwrite(
         id: UUID,
@@ -176,8 +186,10 @@ class InventoryRepositoryImpl : InventoryRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
-    ) = products.restoreProductAndOverwrite(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
+    ) = products.restoreProductAndOverwrite(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename, secondaryUnitId, secondaryUnitFactor)
 
     override suspend fun softDeleteProduct(id: UUID) = products.softDeleteProduct(id)
     override suspend fun activateProduct(id: UUID) = products.activateProduct(id)

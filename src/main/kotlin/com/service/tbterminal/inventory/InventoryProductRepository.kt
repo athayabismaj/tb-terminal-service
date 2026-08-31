@@ -5,6 +5,7 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.like
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.andWhere
+import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.lowerCase
 import org.jetbrains.exposed.sql.or
@@ -53,7 +54,9 @@ internal class InventoryProductRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
     ): UUID = newSuspendedTransaction(Dispatchers.IO) {
         val productId = insertProduct(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
         StockTable.insert {
@@ -61,6 +64,7 @@ internal class InventoryProductRepository {
             it[unitId] = baseUnitId
             it[quantity] = BigDecimal.ZERO
         }
+        replaceUnitConversion(productId, baseUnitId, secondaryUnitId, secondaryUnitFactor)
         productId
     }
 
@@ -74,9 +78,13 @@ internal class InventoryProductRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
     ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
-        updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
+        val updated = updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
+        if (updated) replaceUnitConversion(id, baseUnitId, secondaryUnitId, secondaryUnitFactor)
+        updated
     }
 
     suspend fun restoreProductAndOverwrite(
@@ -89,10 +97,14 @@ internal class InventoryProductRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?
+        photoFilename: String?,
+        secondaryUnitId: UUID?,
+        secondaryUnitFactor: BigDecimal?
     ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = true }
-        updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
+        val updated = updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
+        if (updated) replaceUnitConversion(id, baseUnitId, secondaryUnitId, secondaryUnitFactor)
+        updated
     }
 
     suspend fun softDeleteProduct(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
@@ -158,6 +170,24 @@ internal class InventoryProductRepository {
         }
     }
 
+    private fun replaceUnitConversion(
+        productId: UUID,
+        baseUnitId: UUID,
+        secondaryUnitId: UUID?,
+        factor: BigDecimal?
+    ) {
+        UnitConversionsTable.deleteWhere { UnitConversionsTable.productId eq productId }
+        if (secondaryUnitId != null && factor != null) {
+            UnitConversionsTable.insert {
+                it[id] = UUID.randomUUID()
+                it[this.productId] = productId
+                it[fromUnitId] = secondaryUnitId
+                it[toUnitId] = baseUnitId
+                it[this.factor] = factor
+            }
+        }
+    }
+
     private fun org.jetbrains.exposed.sql.Query.applySearch(search: String?): org.jetbrains.exposed.sql.Query {
         if (search.isNullOrBlank()) return this
         val searchTerm = "%${search.lowercase()}%"
@@ -167,6 +197,10 @@ internal class InventoryProductRepository {
     }
 
     private fun toProductResponse(row: ResultRow): ProductResponse {
+        val conversion = UnitConversionsTable
+            .select { UnitConversionsTable.productId eq row[ProductsTable.id] }
+            .limit(1)
+            .singleOrNull()
         return ProductResponse(
             id = row[ProductsTable.id].toString(),
             categoryId = row[ProductsTable.categoryId].toString(),
@@ -179,7 +213,9 @@ internal class InventoryProductRepository {
             discount = row[ProductsTable.discount],
             minStock = row[ProductsTable.minStock],
             photoFilename = row[ProductsTable.photoFilename],
-            isActive = row[ProductsTable.isActive]
+            isActive = row[ProductsTable.isActive],
+            secondaryUnitId = conversion?.get(UnitConversionsTable.fromUnitId)?.toString(),
+            secondaryUnitFactor = conversion?.get(UnitConversionsTable.factor)?.stripTrailingZeros()?.toPlainString()
         )
     }
 
