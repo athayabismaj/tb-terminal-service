@@ -16,14 +16,24 @@ internal data class CheckoutPaymentAmounts(
 )
 
 internal fun validateCheckoutRequest(request: CheckoutRequest): String {
-    if (request.items.isEmpty()) throw ValidationException("Keranjang belanja tidak boleh kosong")
-    if (request.items.size > 100) throw ValidationException("Maksimal 100 item berbeda per transaksi")
+    validateCheckoutItems(request.items)
     val key = request.idempotencyKey.trim()
     if (!IDEMPOTENCY_KEY_PATTERN.matches(key)) {
         throw ValidationException("idempotencyKey wajib 8-100 karakter dan hanya boleh berisi huruf, angka, titik, garis bawah, titik dua, atau tanda hubung")
     }
+    if (request.amountPaid < BigDecimal.ZERO) throw ValidationException("Jumlah bayar tidak boleh negatif")
+    if (request.amountPaid.scale() > 2) throw ValidationException("Jumlah bayar maksimal memiliki 2 angka desimal")
+    if (request.notes != null && request.notes.length > 1000) throw ValidationException("Catatan maksimal 1000 karakter")
+    request.checkoutAttemptId?.let { validateUuid(it, "checkoutAttemptId") }
+    request.managerApprovalId?.let { validateUuid(it, "managerApprovalId") }
+    return key
+}
+
+internal fun validateCheckoutItems(items: List<CheckoutItemRequest>) {
+    if (items.isEmpty()) throw ValidationException("Keranjang belanja tidak boleh kosong")
+    if (items.size > 100) throw ValidationException("Maksimal 100 item berbeda per transaksi")
     val seenProducts = mutableSetOf<String>()
-    request.items.forEach { item ->
+    items.forEach { item ->
         runCatching { UUID.fromString(item.productId) }.getOrElse {
             throw ValidationException("Format Product ID tidak valid: ${item.productId}")
         }
@@ -34,11 +44,16 @@ internal fun validateCheckoutRequest(request: CheckoutRequest): String {
         if (item.qty.scale() > 2) throw ValidationException("Quantity maksimal memiliki 2 angka desimal")
         if (item.discount < BigDecimal.ZERO) throw ValidationException("Diskon tidak boleh negatif")
         if (item.discount.scale() > 2) throw ValidationException("Diskon maksimal memiliki 2 angka desimal")
+        item.discountRequest?.value?.let { value ->
+            if (value < BigDecimal.ZERO) throw ValidationException("Nilai diskon tidak boleh negatif")
+        }
     }
-    if (request.amountPaid < BigDecimal.ZERO) throw ValidationException("Jumlah bayar tidak boleh negatif")
-    if (request.amountPaid.scale() > 2) throw ValidationException("Jumlah bayar maksimal memiliki 2 angka desimal")
-    if (request.notes != null && request.notes.length > 1000) throw ValidationException("Catatan maksimal 1000 karakter")
-    return key
+}
+
+private fun validateUuid(raw: String, field: String) {
+    if (runCatching { UUID.fromString(raw.trim()) }.isFailure) {
+        throw ValidationException("Format $field tidak valid")
+    }
 }
 
 internal fun resolveCheckoutPayment(
@@ -48,11 +63,19 @@ internal fun resolveCheckoutPayment(
     customerId: UUID?,
     dueDays: Int
 ): CheckoutPaymentAmounts {
-    if (total <= BigDecimal.ZERO) throw ValidationException("Total transaksi harus lebih dari nol")
+    if (total < BigDecimal.ZERO) throw ValidationException("Total transaksi tidak boleh negatif")
     if (requestedAmount.scale() > 2) throw ValidationException("Jumlah bayar maksimal memiliki 2 angka desimal")
     val amount = requestedAmount.normalizeCheckoutMoney()
     val normalizedTotal = total.normalizeCheckoutMoney()
     val credit = paymentMethod == PaymentMethod.HUTANG || paymentMethod == PaymentMethod.DP
+    if (normalizedTotal.compareTo(BigDecimal.ZERO) == 0) {
+        if (credit) throw ValidationException("Transaksi bernilai nol tidak dapat menggunakan HUTANG atau DP")
+        if (amount.compareTo(BigDecimal.ZERO) != 0) throw ValidationException("Pembayaran transaksi nol harus bernilai nol")
+        return CheckoutPaymentAmounts(
+            TrxStatus.LUNAS, BigDecimal.ZERO.setScale(2), BigDecimal.ZERO.setScale(2),
+            BigDecimal.ZERO.setScale(2), BigDecimal.ZERO.setScale(2)
+        )
+    }
     if (credit && customerId == null) throw ValidationException("Transaksi hutang/DP memerlukan pelanggan terdaftar")
     if (credit && dueDays !in 1..3650) throw ValidationException("Termin piutang harus antara 1 dan 3650 hari")
 
@@ -96,15 +119,26 @@ internal fun checkoutRequestFingerprint(request: CheckoutRequest, normalizedKey:
         append(request.paymentMethod.trim().lowercase()).append('|')
         append(request.amountPaid.normalizeCheckoutMoney().toPlainString()).append('|')
         append(request.dueDays).append('|').append(request.notes?.trim().orEmpty()).append('|')
+        append(request.checkoutAttemptId?.trim().orEmpty()).append('|')
+        append(request.managerApprovalId?.trim().orEmpty()).append('|')
+        appendDiscount(request.transactionDiscount)
+        append('|')
         request.items.sortedBy { it.productId.lowercase() }.forEach { item ->
             append(item.productId.lowercase()).append(':')
             append(item.qty.stripTrailingZeros().toPlainString()).append(':')
-            append(item.discount.normalizeCheckoutMoney().toPlainString()).append(';')
+            append(item.discount.normalizeCheckoutMoney().toPlainString()).append(':')
+            appendDiscount(item.discountRequest)
+            append(';')
         }
     }
     return MessageDigest.getInstance("SHA-256")
         .digest(canonical.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
+}
+
+private fun StringBuilder.appendDiscount(discount: DiscountRequest?) {
+    append(discount?.type?.name.orEmpty()).append(':')
+    append(discount?.value?.stripTrailingZeros()?.toPlainString().orEmpty())
 }
 
 internal fun BigDecimal.normalizeCheckoutMoney(): BigDecimal = setScale(2, java.math.RoundingMode.HALF_UP)

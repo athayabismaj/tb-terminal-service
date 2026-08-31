@@ -73,6 +73,22 @@ class CheckoutValidationTest {
         }
     }
 
+    @Test
+    fun `fully discounted transaction accepts zero non credit payment only`() {
+        val free = resolveCheckoutPayment(
+            PaymentMethod.TUNAI, BigDecimal.ZERO, BigDecimal.ZERO, null, 30
+        )
+        assertEquals(TrxStatus.LUNAS, free.status)
+        assertEquals(BigDecimal("0.00"), free.paidAmount)
+
+        assertFailsWith<ValidationException> {
+            resolveCheckoutPayment(PaymentMethod.HUTANG, BigDecimal.ZERO, BigDecimal.ZERO, customerId, 30)
+        }
+        assertFailsWith<ValidationException> {
+            resolveCheckoutPayment(PaymentMethod.TUNAI, BigDecimal.ONE, BigDecimal.ZERO, null, 30)
+        }
+    }
+
     private fun request(
         quantity: String = "1.00",
         idempotencyKey: String = "checkout-test-key",
