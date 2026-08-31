@@ -325,6 +325,7 @@ class SystemRepository {
                 receiptHeader = row[StoreSettingsTable.receiptHeader],
                 receiptFooter = row[StoreSettingsTable.receiptFooter],
                 printerSize = row[StoreSettingsTable.printerSize].dbValue,
+                cashierDiscountLimitPercent = row[StoreSettingsTable.cashierDiscountLimitPercent],
                 updatedAt = row[StoreSettingsTable.updatedAt].toString()
             )
         }
@@ -347,51 +348,51 @@ class SystemRepository {
             receiptHeader = newRow[StoreSettingsTable.receiptHeader],
             receiptFooter = newRow[StoreSettingsTable.receiptFooter],
             printerSize = newRow[StoreSettingsTable.printerSize].dbValue,
+            cashierDiscountLimitPercent = newRow[StoreSettingsTable.cashierDiscountLimitPercent],
             updatedAt = newRow[StoreSettingsTable.updatedAt].toString()
         )
     }
 
-    suspend fun updateStoreSettings(
+    suspend fun updateStoreProfile(
         userId: UUID,
         storeName: String,
         address: String?,
         phone: String?,
         receiptHeader: String?,
         receiptFooter: String?,
-        printerSize: PrinterSize
-    ): StoreSettingsResponse = newSuspendedTransaction(Dispatchers.IO) {
-        
-        // Memastikan row pertama ada, agar bisa di-update
-        val existing = StoreSettingsTable.selectAll().firstOrNull()
-        if (existing == null) {
-            getStoreSettings() // Akan membuat row default
-        }
+        cashierDiscountLimitPercent: java.math.BigDecimal? = null
+    ): StoreSettingsResponse {
+        getStoreSettings()
+        return newSuspendedTransaction(Dispatchers.IO) {
+            StoreSettingsTable.update({ Op.TRUE }) {
+                it[this.storeName] = storeName
+                it[this.address] = address
+                it[this.phone] = phone
+                it[this.receiptHeader] = receiptHeader
+                it[this.receiptFooter] = receiptFooter
+                cashierDiscountLimitPercent?.let { limit ->
+                    it[this.cashierDiscountLimitPercent] = limit
+                }
+                it[this.updatedBy] = userId
+                it[this.updatedAt] = OffsetDateTime.now()
+            }
 
-        StoreSettingsTable.update({ Op.TRUE }) {
-            it[this.storeName] = storeName
-            it[this.address] = address
-            it[this.phone] = phone
-            it[this.receiptHeader] = receiptHeader
-            it[this.receiptFooter] = receiptFooter
-            it[this.printerSize] = printerSize
-            it[this.updatedBy] = userId
-            it[this.updatedAt] = OffsetDateTime.now()
+            StoreSettingsTable.selectAll().first().toStoreSettingsResponse()
         }
-
-        val updatedRow = StoreSettingsTable.selectAll().first()
-        
-        StoreSettingsResponse(
-            id = updatedRow[StoreSettingsTable.id].toString(),
-            storeName = updatedRow[StoreSettingsTable.storeName],
-            address = updatedRow[StoreSettingsTable.address],
-            phone = updatedRow[StoreSettingsTable.phone],
-            receiptHeader = updatedRow[StoreSettingsTable.receiptHeader],
-            receiptFooter = updatedRow[StoreSettingsTable.receiptFooter],
-            printerSize = updatedRow[StoreSettingsTable.printerSize].dbValue,
-            updatedAt = updatedRow[StoreSettingsTable.updatedAt].toString()
-        )
     }
 }
+
+private fun ResultRow.toStoreSettingsResponse() = StoreSettingsResponse(
+    id = this[StoreSettingsTable.id].toString(),
+    storeName = this[StoreSettingsTable.storeName],
+    address = this[StoreSettingsTable.address],
+    phone = this[StoreSettingsTable.phone],
+    receiptHeader = this[StoreSettingsTable.receiptHeader],
+    receiptFooter = this[StoreSettingsTable.receiptFooter],
+    printerSize = this[StoreSettingsTable.printerSize].dbValue,
+    cashierDiscountLimitPercent = this[StoreSettingsTable.cashierDiscountLimitPercent],
+    updatedAt = this[StoreSettingsTable.updatedAt].toString()
+)
 
 private data class AuditActorRow(
     val name: String,

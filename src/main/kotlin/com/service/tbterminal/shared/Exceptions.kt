@@ -32,3 +32,20 @@ class SkuDuplicateException(message: String = "SKU sudah digunakan") : RuntimeEx
 
 /** Cash session / shift kasir tidak ditemukan atau tidak aktif */
 class SessionNotFoundException(message: String = "Sesi kasir tidak aktif") : RuntimeException(message)
+
+enum class ManagerApprovalError(val code: String) {
+    REQUIRED("MANAGER_APPROVAL_REQUIRED"),
+    INVALID("MANAGER_APPROVAL_INVALID"),
+    EXPIRED("MANAGER_APPROVAL_EXPIRED"),
+    ALREADY_USED("MANAGER_APPROVAL_ALREADY_USED"),
+    APPROVER_FORBIDDEN("MANAGER_APPROVER_FORBIDDEN"),
+    SCOPE_MISMATCH("MANAGER_APPROVAL_SCOPE_MISMATCH"),
+    ACTION_MISMATCH("MANAGER_APPROVAL_ACTION_MISMATCH"),
+    REQUESTER_MISMATCH("MANAGER_APPROVAL_REQUESTER_MISMATCH"),
+    SELF_APPROVAL_FORBIDDEN("MANAGER_APPROVAL_SELF_APPROVAL_FORBIDDEN")
+}
+
+class ManagerApprovalException(
+    val reason: ManagerApprovalError,
+    message: String
+) : RuntimeException(message)

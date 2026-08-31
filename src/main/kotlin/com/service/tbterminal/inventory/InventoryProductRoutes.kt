@@ -1,9 +1,9 @@
 package com.service.tbterminal.inventory
 
 import com.service.tbterminal.shared.ApiResponse
-import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.Permission
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.recordOperationalAudit
@@ -33,7 +33,7 @@ internal fun Route.productRoutes(service: InventoryService, systemService: Syste
         }
 
         post {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val actorUserId = call.getUserId()
             val product = service.createProduct(call.receive())
             systemService.recordOperationalAudit(
@@ -48,7 +48,7 @@ internal fun Route.productRoutes(service: InventoryService, systemService: Syste
         }
 
         put("/{id}") {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val id = call.parameters["id"] ?: return@put call.respond(HttpStatusCode.BadRequest)
             val actorUserId = call.getUserId()
             val previous = service.getProductById(id)
@@ -76,7 +76,7 @@ internal fun Route.productRoutes(service: InventoryService, systemService: Syste
         }
 
         delete("/{id}") {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val id = call.parameters["id"] ?: return@delete call.respond(HttpStatusCode.BadRequest)
             val actorUserId = call.getUserId()
             service.deleteProduct(id)
@@ -92,7 +92,7 @@ internal fun Route.productRoutes(service: InventoryService, systemService: Syste
         }
 
         patch("/{id}/activate") {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val id = call.parameters["id"] ?: return@patch call.respond(HttpStatusCode.BadRequest)
             val actorUserId = call.getUserId()
             val product = service.activateProduct(id)

@@ -167,6 +167,8 @@ data class StoreSettingsResponse(
     val receiptHeader: String?,
     val receiptFooter: String?,
     val printerSize: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val cashierDiscountLimitPercent: java.math.BigDecimal = java.math.BigDecimal("10.00"),
     val updatedAt: String
 )
 
@@ -177,5 +179,41 @@ data class StoreSettingsUpdateRequest(
     val phone: String? = null,
     val receiptHeader: String? = null,
     val receiptFooter: String? = null,
-    val printerSize: String
+    val printerSize: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val cashierDiscountLimitPercent: java.math.BigDecimal? = null
+)
+
+/** Profil toko global. Konfigurasi printer/perangkat tidak termasuk di sini. */
+@Serializable
+data class StoreProfileResponse(
+    val id: String,
+    val storeName: String,
+    val address: String?,
+    val phone: String?,
+    val receiptHeader: String?,
+    val receiptFooter: String?,
+    val updatedAt: String
+)
+
+@Serializable
+data class StoreProfileUpdateRequest(
+    val storeName: String,
+    val address: String? = null,
+    val phone: String? = null,
+    val receiptHeader: String? = null,
+    val receiptFooter: String? = null
+)
+
+/** Ringkasan konfigurasi keamanan yang aman ditampilkan dan tidak memuat secret. */
+@Serializable
+data class SecuritySettingsResponse(
+    val environment: String,
+    val accessTokenMinutes: Long,
+    val refreshTokenDays: Long,
+    val backupEnabled: Boolean,
+    val restoreEnabled: Boolean,
+    val backupRetentionDays: Long,
+    val backupIntervalHours: Long,
+    val backupMaxUploadMb: Long
 )

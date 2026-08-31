@@ -2,9 +2,9 @@ package com.service.tbterminal.receivable
 
 import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.ErrorResponse
-import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.Permission
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.recordOperationalAudit
@@ -30,7 +30,7 @@ fun Application.receivableRoutes() {
                 route("/customers") {
 
                     get("/{id}/payments") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val customerId = call.parameters["id"]
                             ?: return@get call.respond(HttpStatusCode.BadRequest, ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan"))
                         val payments = service.getPayments(
@@ -49,7 +49,7 @@ fun Application.receivableRoutes() {
 
                     // GET list pelanggan — akses semua role
                     get {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val search = call.request.queryParameters["search"]
@@ -60,7 +60,7 @@ fun Application.receivableRoutes() {
 
                     // GET detail pelanggan — akses semua role
                     get("/{id}") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val id = call.parameters["id"]
                             ?: return@get call.respond(
                                 HttpStatusCode.BadRequest,
@@ -72,7 +72,7 @@ fun Application.receivableRoutes() {
 
                     // POST buat pelanggan baru — hanya ADMIN/OWNER
                     post {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_RECEIVABLES)
                         val actorUserId = call.getUserId()
                         val request = call.receive<CustomerRequest>()
                         val customer = service.createCustomer(request)
@@ -89,7 +89,7 @@ fun Application.receivableRoutes() {
 
                     // PUT update pelanggan — hanya ADMIN/OWNER
                     put("/{id}") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_RECEIVABLES)
                         val actorUserId = call.getUserId()
                         val id = call.parameters["id"]
                             ?: return@put call.respond(
@@ -111,7 +111,7 @@ fun Application.receivableRoutes() {
 
                     // DELETE soft delete pelanggan — hanya ADMIN/OWNER
                     delete("/{id}") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_RECEIVABLES)
                         val actorUserId = call.getUserId()
                         val id = call.parameters["id"]
                             ?: return@delete call.respond(
@@ -137,7 +137,7 @@ fun Application.receivableRoutes() {
                 route("/receivables") {
 
                     get("/{id}/payments") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val receivableId = call.parameters["id"]
                             ?: return@get call.respond(HttpStatusCode.BadRequest, ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan"))
                         val payments = service.getPayments(
@@ -155,7 +155,7 @@ fun Application.receivableRoutes() {
 
                     // GET list piutang — akses semua role
                     get {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val customerId = call.request.queryParameters["customerId"]
@@ -171,7 +171,7 @@ fun Application.receivableRoutes() {
                     }
 
                     get("/summary/customers") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val dueFilter = call.request.queryParameters["dueFilter"]
@@ -180,7 +180,7 @@ fun Application.receivableRoutes() {
                     }
 
                     post("/opening-balance") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_RECEIVABLES)
                         val userId = call.getUserId()
                         val request = call.receive<CreateStandaloneReceivableRequest>()
                         val receivable = service.createStandaloneReceivable(
@@ -194,7 +194,7 @@ fun Application.receivableRoutes() {
                     }
 
                     post("/adjustment") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_RECEIVABLES)
                         val userId = call.getUserId()
                         val request = call.receive<CreateStandaloneReceivableRequest>()
                         val receivable = service.createStandaloneReceivable(
@@ -209,7 +209,7 @@ fun Application.receivableRoutes() {
 
                     // GET detail piutang — akses semua role
                     get("/{id}") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val id = call.parameters["id"]
                             ?: return@get call.respond(
                                 HttpStatusCode.BadRequest,
@@ -227,7 +227,7 @@ fun Application.receivableRoutes() {
 
                     // GET riwayat pembayaran piutang - audit operasional admin/owner
                     get {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val payments = service.getPayments(
@@ -247,14 +247,14 @@ fun Application.receivableRoutes() {
                     }
 
                     get("/{id}/receipt") {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val paymentId = call.parameters["id"]
                             ?: return@get call.respond(HttpStatusCode.BadRequest, ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan"))
                         call.respond(HttpStatusCode.OK, ApiResponse.success(service.getPaymentReceipt(paymentId)))
                     }
 
                     post("/{id}/reversal") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_RECEIVABLES)
                         val paymentId = call.parameters["id"]
                             ?: return@post call.respond(HttpStatusCode.BadRequest, ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan"))
                         val reversal = service.reversePayment(
@@ -267,7 +267,7 @@ fun Application.receivableRoutes() {
 
                     // POST bayar piutang — akses semua role (kasir di lapangan bisa terima cicilan)
                     post {
-                        call.requireRole(Role.KASIR, Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val userId = call.getUserId()
                         val request = call.receive<PaymentRequest>()
                         val payment = service.pay(userId, request)

@@ -2,9 +2,11 @@ package com.service.tbterminal.system
 
 import com.service.tbterminal.inventory.PaginatedResponse
 import com.service.tbterminal.shared.ApiResponse
+import com.service.tbterminal.shared.AccessPolicy
 import com.service.tbterminal.shared.EnvironmentConfig
 import com.service.tbterminal.shared.JwtHelper
 import com.service.tbterminal.shared.NotFoundException
+import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.ValidationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -111,17 +113,20 @@ class SystemService(private val repo: SystemRepository) {
         return ApiResponse.success(Unit, "Unlock berhasil")
     }
 
-    suspend fun getRoles(): List<RoleResponse> {
+    suspend fun getRoles(actorRole: String): List<RoleResponse> {
+        AccessPolicy.require(actorRole, Permission.MANAGE_ROLES)
         return repo.getRoles()
     }
 
-    suspend fun getUsers(page: Int, limit: Int, search: String?): PaginatedResponse<UserResponse> {
+    suspend fun getUsers(actorRole: String, page: Int, limit: Int, search: String?): PaginatedResponse<UserResponse> {
+        AccessPolicy.require(actorRole, Permission.MANAGE_USERS)
         val safePage = if (page < 1) 1 else page
         val safeLimit = limit.coerceIn(1, 100)
         return repo.getPaginatedUsers(safePage, safeLimit, search)
     }
 
-    suspend fun getAuditLogs(page: Int, limit: Int, action: String?, range: String?): PaginatedResponse<AuditLogResponse> {
+    suspend fun getAuditLogs(actorRole: String, page: Int, limit: Int, action: String?, range: String?): PaginatedResponse<AuditLogResponse> {
+        AccessPolicy.require(actorRole, Permission.VIEW_AUDIT_LOG)
         val safePage = if (page < 1) 1 else page
         val safeLimit = limit.coerceIn(1, 100)
         val auditAction = action
@@ -135,12 +140,14 @@ class SystemService(private val repo: SystemRepository) {
         return repo.getPaginatedAuditLogs(safePage, safeLimit, auditAction, since)
     }
 
-    suspend fun getUserById(id: String): UserResponse {
+    suspend fun getUserById(actorRole: String, id: String): UserResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_USERS)
         val uuid = parseUUID(id)
         return repo.getUserById(uuid) ?: throw NotFoundException("User tidak ditemukan")
     }
 
-    suspend fun createUser(request: UserCreateRequest): UserResponse {
+    suspend fun createUser(actorRole: String, request: UserCreateRequest): UserResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_USERS)
         validateUserIdentity(request.name, request.username, request.email)
         if (request.password.isBlank()) throw ValidationException("Password tidak boleh kosong")
         if (request.password.length < 6) throw ValidationException("Password minimal 6 karakter")
@@ -167,7 +174,8 @@ class SystemService(private val repo: SystemRepository) {
         return repo.getUserById(newId)!!
     }
 
-    suspend fun updateUser(id: String, request: UserUpdateRequest): UserResponse {
+    suspend fun updateUser(actorRole: String, id: String, request: UserUpdateRequest): UserResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_USERS)
         val uuid = parseUUID(id)
         val existingUser = repo.getUserById(uuid) ?: throw NotFoundException("User tidak ditemukan")
 
@@ -205,7 +213,8 @@ class SystemService(private val repo: SystemRepository) {
         return repo.getUserById(uuid)!!
     }
 
-    suspend fun deleteUser(id: String) {
+    suspend fun deleteUser(actorRole: String, id: String) {
+        AccessPolicy.require(actorRole, Permission.MANAGE_USERS)
         val uuid = parseUUID(id)
         repo.getUserById(uuid) ?: throw NotFoundException("User tidak ditemukan")
         repo.softDeleteUser(uuid)
@@ -284,26 +293,71 @@ class SystemService(private val repo: SystemRepository) {
     // STORE SETTINGS
     // ==========================================
 
-    suspend fun getStoreSettings(): StoreSettingsResponse {
+    suspend fun getStoreSettings(actorRole: String): StoreSettingsResponse {
+        AccessPolicy.require(actorRole, Permission.READ_STORE_PROFILE)
         return repo.getStoreSettings()
     }
 
-    suspend fun updateStoreSettings(userId: UUID, request: StoreSettingsUpdateRequest): StoreSettingsResponse {
+    suspend fun updateStoreSettings(actorRole: String, userId: UUID, request: StoreSettingsUpdateRequest): StoreSettingsResponse {
+        AccessPolicy.require(actorRole, Permission.UPDATE_STORE_PROFILE)
         if (request.storeName.isBlank()) {
             throw ValidationException("Nama toko tidak boleh kosong")
         }
+        request.cashierDiscountLimitPercent?.let { limit ->
+            if (limit < java.math.BigDecimal.ZERO || limit > java.math.BigDecimal("100") || limit.scale() > 2) {
+                throw ValidationException("Batas diskon Kasir harus 0-100 dan maksimal 2 angka desimal")
+            }
+        }
 
-        val printerSize = PrinterSize.entries.firstOrNull { it.dbValue == request.printerSize }
-            ?: throw ValidationException("Ukuran printer tidak valid. Gunakan '58mm' atau '80mm'")
-
-        return repo.updateStoreSettings(
+        // printerSize dipertahankan pada DTO legacy agar klien lama tidak gagal
+        // melakukan decoding. Nilainya tidak lagi menjadi konfigurasi global server.
+        return repo.updateStoreProfile(
             userId = userId,
             storeName = request.storeName.trim(),
             address = request.address?.trim(),
             phone = request.phone?.trim(),
             receiptHeader = request.receiptHeader?.trim(),
             receiptFooter = request.receiptFooter?.trim(),
-            printerSize = printerSize
+            cashierDiscountLimitPercent = request.cashierDiscountLimitPercent
+                ?.setScale(2, java.math.RoundingMode.HALF_UP)
+        )
+    }
+
+    suspend fun getStoreProfile(actorRole: String): StoreProfileResponse {
+        AccessPolicy.require(actorRole, Permission.READ_STORE_PROFILE)
+        return repo.getStoreSettings().toStoreProfileResponse()
+    }
+
+    suspend fun updateStoreProfile(
+        actorRole: String,
+        userId: UUID,
+        request: StoreProfileUpdateRequest
+    ): StoreProfileResponse {
+        AccessPolicy.require(actorRole, Permission.UPDATE_STORE_PROFILE)
+        if (request.storeName.isBlank()) {
+            throw ValidationException("Nama toko tidak boleh kosong")
+        }
+        return repo.updateStoreProfile(
+            userId = userId,
+            storeName = request.storeName.trim(),
+            address = request.address?.trim(),
+            phone = request.phone?.trim(),
+            receiptHeader = request.receiptHeader?.trim(),
+            receiptFooter = request.receiptFooter?.trim()
+        ).toStoreProfileResponse()
+    }
+
+    fun getSecuritySettings(actorRole: String): SecuritySettingsResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_SECURITY_SETTINGS)
+        return SecuritySettingsResponse(
+            environment = EnvironmentConfig.environment,
+            accessTokenMinutes = EnvironmentConfig.accessTokenMinutes,
+            refreshTokenDays = EnvironmentConfig.refreshTokenDays,
+            backupEnabled = EnvironmentConfig.backupEnabled,
+            restoreEnabled = EnvironmentConfig.restoreEnabled,
+            backupRetentionDays = EnvironmentConfig.backupRetentionDays,
+            backupIntervalHours = EnvironmentConfig.backupIntervalHours,
+            backupMaxUploadMb = EnvironmentConfig.backupMaxUploadMb
         )
     }
 
@@ -352,3 +406,13 @@ class SystemService(private val repo: SystemRepository) {
         val DEFAULT_PINS = setOf("1234", "123456", "0000", "000000")
     }
 }
+
+private fun StoreSettingsResponse.toStoreProfileResponse() = StoreProfileResponse(
+    id = id,
+    storeName = storeName,
+    address = address,
+    phone = phone,
+    receiptHeader = receiptHeader,
+    receiptFooter = receiptFooter,
+    updatedAt = updatedAt
+)

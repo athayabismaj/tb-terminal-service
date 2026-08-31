@@ -2,9 +2,9 @@ package com.service.tbterminal.purchasing
 
 import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.ErrorResponse
-import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.Permission
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.recordOperationalAudit
@@ -32,7 +32,7 @@ fun Application.purchasingRoutes() {
                 route("/suppliers") {
 
                     get {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val search = call.request.queryParameters["search"]
@@ -42,7 +42,7 @@ fun Application.purchasingRoutes() {
                     }
 
                     get("/{id}") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val id = call.parameters["id"]
                             ?: return@get call.respond(
                                 HttpStatusCode.BadRequest,
@@ -53,7 +53,7 @@ fun Application.purchasingRoutes() {
                     }
 
                     post {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val actorUserId = call.getUserId()
                         val request = call.receive<SupplierRequest>()
                         val supplier = service.createSupplier(request)
@@ -69,7 +69,7 @@ fun Application.purchasingRoutes() {
                     }
 
                     put("/{id}") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val actorUserId = call.getUserId()
                         val id = call.parameters["id"]
                             ?: return@put call.respond(
@@ -90,7 +90,7 @@ fun Application.purchasingRoutes() {
                     }
 
                     delete("/{id}") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val actorUserId = call.getUserId()
                         val id = call.parameters["id"]
                             ?: return@delete call.respond(
@@ -117,7 +117,7 @@ fun Application.purchasingRoutes() {
 
                     // GET list nota beli — ADMIN/OWNER
                     get {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val supplierId = call.request.queryParameters["supplierId"]
@@ -128,7 +128,7 @@ fun Application.purchasingRoutes() {
 
                     // GET detail nota beli — ADMIN/OWNER
                     get("/{id}") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val id = call.parameters["id"]
                             ?: return@get call.respond(
                                 HttpStatusCode.BadRequest,
@@ -140,7 +140,7 @@ fun Application.purchasingRoutes() {
 
                     // POST buat nota beli — ADMIN/OWNER
                     post {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val userId = call.getUserId()
                         val request = call.receive<PurchaseRequest>()
                         val purchase = service.purchase(userId, request)
@@ -170,7 +170,7 @@ fun Application.purchasingRoutes() {
 
                     // GET list hutang — ADMIN/OWNER
                     get {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val supplierId = call.request.queryParameters["supplierId"]
@@ -182,7 +182,7 @@ fun Application.purchasingRoutes() {
 
                     // GET detail hutang — ADMIN/OWNER
                     get("/{id}") {
-                        call.requireRole(Role.ADMIN, Role.OWNER)
+                    call.requirePermission(Permission.MANAGE_PURCHASING)
                         val id = call.parameters["id"]
                             ?: return@get call.respond(
                                 HttpStatusCode.BadRequest,
@@ -195,7 +195,7 @@ fun Application.purchasingRoutes() {
                     // POST bayar hutang supplier — ADMIN/OWNER
                     route("/payments") {
                         post {
-                            call.requireRole(Role.ADMIN, Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
                             val userId = call.getUserId()
                             val request = call.receive<SupplierPaymentRequest>()
                             val payment = service.paySupplier(userId, request)

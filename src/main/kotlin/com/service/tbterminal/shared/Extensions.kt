@@ -22,18 +22,11 @@ fun ApplicationCall.getUserRole(): String {
         ?: throw UnauthorizedException("Role user tidak tersedia")
 }
 
-/**
- * Extension untuk memvalidasi Role User dari JWT Principal.
- * Melempar ForbiddenException jika user tidak memiliki role yang diizinkan.
- */
-fun ApplicationCall.requireRole(vararg allowedRoles: String) {
+/** Memvalidasi izin bisnis melalui matriks akses terpusat. */
+fun ApplicationCall.requirePermission(permission: Permission) {
     val principal = principal<AuthenticatedUserPrincipal>()
         ?: throw UnauthorizedException("Role user tidak tersedia")
-    val role = principal.role
-
-    if (role !in allowedRoles) {
-        throw ForbiddenException("Akses ditolak: Membutuhkan role ${allowedRoles.joinToString(" atau ")}")
-    }
+    AccessPolicy.require(principal.role, permission)
 }
 
 /**

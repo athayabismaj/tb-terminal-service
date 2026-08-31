@@ -1,9 +1,9 @@
 package com.service.tbterminal.inventory
 
 import com.service.tbterminal.shared.ApiResponse
-import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.Permission
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.recordOperationalAudit
@@ -52,7 +52,7 @@ internal fun Route.stockRoutes(service: InventoryService, systemService: SystemS
         }
 
         post("/opname") {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val actorUserId = call.getUserId()
             val request = call.receive<StockOpnameRequest>()
             service.executeOpname(actorUserId.toString(), request)
@@ -68,7 +68,7 @@ internal fun Route.stockRoutes(service: InventoryService, systemService: SystemS
         }
 
         post("/opening-balance") {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val actorUserId = call.getUserId()
             val result = service.createOpeningStock(actorUserId.toString(), call.receive())
             systemService.recordOperationalAudit(

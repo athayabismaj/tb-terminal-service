@@ -1,9 +1,9 @@
 package com.service.tbterminal.inventory
 
 import com.service.tbterminal.shared.ApiResponse
-import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.Permission
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.recordOperationalAudit
@@ -40,7 +40,7 @@ internal fun Route.unitRoutes(service: InventoryService, systemService: SystemSe
         }
 
         post {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val actorUserId = call.getUserId()
             val unit = service.createUnit(call.receive())
             systemService.recordOperationalAudit(
@@ -55,7 +55,7 @@ internal fun Route.unitRoutes(service: InventoryService, systemService: SystemSe
         }
 
         put("/{id}") {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val id = call.parameters["id"] ?: return@put call.respond(HttpStatusCode.BadRequest)
             val actorUserId = call.getUserId()
             val unit = service.updateUnit(id, call.receive())
@@ -71,7 +71,7 @@ internal fun Route.unitRoutes(service: InventoryService, systemService: SystemSe
         }
 
         delete("/{id}") {
-            call.requireRole(Role.OWNER, Role.ADMIN)
+            call.requirePermission(Permission.MANAGE_INVENTORY)
             val id = call.parameters["id"] ?: return@delete call.respond(HttpStatusCode.BadRequest)
             val actorUserId = call.getUserId()
             service.deleteUnit(id)

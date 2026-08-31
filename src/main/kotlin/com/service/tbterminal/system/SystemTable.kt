@@ -77,6 +77,9 @@ object StoreSettingsTable : Table("system.store_settings") {
         fromDb = { PrinterSize.entries.first { e -> e.dbValue == it.toString() } },
         toDb = { value -> postgresEnum("system.printer_size", value.dbValue) }
     )
+    val cashierDiscountLimitPercent = decimal("cashier_discount_limit_percent", 5, 2)
+        .default(java.math.BigDecimal("10.00"))
+        .default(java.math.BigDecimal("10.00"))
     val updatedBy = uuid("updated_by").references(UsersTable.id).nullable()
     val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 

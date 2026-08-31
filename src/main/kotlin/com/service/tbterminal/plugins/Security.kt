@@ -28,6 +28,10 @@ fun Application.configureSecurity() {
             rateLimiter(limit = 5, refillPeriod = 1.minutes)
             requestKey { call -> call.request.local.remoteHost }
         }
+        register(RateLimitName("manager-approval")) {
+            rateLimiter(limit = 5, refillPeriod = 1.minutes)
+            requestKey { call -> call.request.local.remoteHost }
+        }
     }
 
     authentication {

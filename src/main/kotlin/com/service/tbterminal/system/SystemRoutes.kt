@@ -12,8 +12,10 @@ import org.koin.ktor.ext.inject
 import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.AuthenticatedUserPrincipal
 import com.service.tbterminal.shared.ErrorResponse
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.Permission
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.shared.getUserId
+import com.service.tbterminal.shared.getUserRole
 
 fun Application.systemRoutes() {
     val service: SystemService by inject()
@@ -119,19 +121,19 @@ fun Application.systemRoutes() {
                 
                 // ROLES
                 get("/roles") {
-                    call.requireRole(com.service.tbterminal.shared.Role.OWNER)
-                    val roles = service.getRoles()
+                    call.requirePermission(Permission.MANAGE_ROLES)
+                    val roles = service.getRoles(call.getUserRole())
                     call.respond(HttpStatusCode.OK, ApiResponse.success(roles))
                 }
 
                 get("/audit-logs") {
-                    call.requireRole(com.service.tbterminal.shared.Role.ADMIN, com.service.tbterminal.shared.Role.OWNER)
+                    call.requirePermission(Permission.VIEW_AUDIT_LOG)
                     val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                     val action = call.request.queryParameters["action"]
                     val range = call.request.queryParameters["range"]
 
-                    val logs = service.getAuditLogs(page, limit, action, range)
+                    val logs = service.getAuditLogs(call.getUserRole(), page, limit, action, range)
                     call.respond(HttpStatusCode.OK, ApiResponse.success(logs))
                 }
 
@@ -171,21 +173,21 @@ fun Application.systemRoutes() {
 
                     // List Users
                     get {
-                        call.requireRole(com.service.tbterminal.shared.Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_USERS)
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val search = call.request.queryParameters["search"]
                         
-                        val users = service.getUsers(page, limit, search)
+                        val users = service.getUsers(call.getUserRole(), page, limit, search)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(users))
                     }
 
                     // Create User
                     post {
-                        call.requireRole(com.service.tbterminal.shared.Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_USERS)
                         val actorUserId = call.getUserId()
                         val request = call.receive<UserCreateRequest>()
-                        val user = service.createUser(request)
+                        val user = service.createUser(call.getUserRole(), request)
                         service.recordAuditLog(
                             actorUserId = actorUserId,
                             action = AuditAction.INSERT,
@@ -199,14 +201,14 @@ fun Application.systemRoutes() {
 
                     // Update User
                     put("/{id}") {
-                        call.requireRole(com.service.tbterminal.shared.Role.OWNER)
+                        call.requirePermission(Permission.MANAGE_USERS)
                         val actorUserId = call.getUserId()
                         val id = call.parameters["id"] ?: return@put call.respond(
                             HttpStatusCode.BadRequest,
                             ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
                         )
                         val request = call.receive<UserUpdateRequest>()
-                        val user = service.updateUser(id, request)
+                        val user = service.updateUser(call.getUserRole(), id, request)
                         service.recordAuditLog(
                             actorUserId = actorUserId,
                             action = AuditAction.UPDATE,
@@ -220,13 +222,13 @@ fun Application.systemRoutes() {
 
                     // Delete User (Soft Delete)
                     delete("/{id}") {
-                        call.requireRole(com.service.tbterminal.shared.Role.OWNER) // Hanya owner yg boleh hapus
+                        call.requirePermission(Permission.MANAGE_USERS)
                         val actorUserId = call.getUserId()
                         val id = call.parameters["id"] ?: return@delete call.respond(
                             HttpStatusCode.BadRequest,
                             ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
                         )
-                        service.deleteUser(id)
+                        service.deleteUser(call.getUserRole(), id)
                         service.recordAuditLog(
                             actorUserId = actorUserId,
                             action = AuditAction.DELETE,
@@ -245,16 +247,17 @@ fun Application.systemRoutes() {
                 route("/settings") {
                     // KASIR butuh untuk baca footer dan ukuran printer sebelum print struk
                     get {
-                        val settings = service.getStoreSettings()
+                        call.requirePermission(Permission.READ_STORE_PROFILE)
+                        val settings = service.getStoreSettings(call.getUserRole())
                         call.respond(HttpStatusCode.OK, ApiResponse.success(settings))
                     }
 
                     // Update hanya boleh ADMIN/OWNER
                     put {
-                        call.requireRole(com.service.tbterminal.shared.Role.ADMIN, com.service.tbterminal.shared.Role.OWNER)
+                        call.requirePermission(Permission.UPDATE_STORE_PROFILE)
                         val userId = call.getUserId()
                         val request = call.receive<StoreSettingsUpdateRequest>()
-                        val updated = service.updateStoreSettings(userId, request)
+                        val updated = service.updateStoreSettings(call.getUserRole(), userId, request)
                         service.recordAuditLog(
                             actorUserId = userId,
                             action = AuditAction.UPDATE,
@@ -265,6 +268,43 @@ fun Application.systemRoutes() {
                         )
                         call.respond(HttpStatusCode.OK, ApiResponse.success(updated, "Pengaturan toko berhasil diperbarui"))
                     }
+                }
+
+                route("/store-profile") {
+                    get {
+                        call.requirePermission(Permission.READ_STORE_PROFILE)
+                        call.respond(
+                            HttpStatusCode.OK,
+                            ApiResponse.success(service.getStoreProfile(call.getUserRole()))
+                        )
+                    }
+
+                    put {
+                        call.requirePermission(Permission.UPDATE_STORE_PROFILE)
+                        val userId = call.getUserId()
+                        val updated = service.updateStoreProfile(
+                            actorRole = call.getUserRole(),
+                            userId = userId,
+                            request = call.receive()
+                        )
+                        service.recordAuditLog(
+                            actorUserId = userId,
+                            action = AuditAction.UPDATE,
+                            schemaName = "system",
+                            tableName = "store_settings",
+                            recordId = updated.id,
+                            ipAddress = call.clientIpAddress()
+                        )
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(updated, "Profil toko berhasil diperbarui"))
+                    }
+                }
+
+                get("/security-settings") {
+                    call.requirePermission(Permission.MANAGE_SECURITY_SETTINGS)
+                    call.respond(
+                        HttpStatusCode.OK,
+                        ApiResponse.success(service.getSecuritySettings(call.getUserRole()))
+                    )
                 }
             }
         }
