@@ -32,6 +32,11 @@ ALTER TABLE receivable.receivable_payments
     ADD COLUMN balance_after NUMERIC(15,2),
     ADD COLUMN status_after system.receivable_status;
 
+-- V29 makes payment rows immutable. Temporarily remove that guard only while
+-- existing rows are backfilled, then restore it immediately afterward.
+DROP TRIGGER IF EXISTS trg_prevent_receivable_payment_mutation
+    ON receivable.receivable_payments;
+
 WITH snapshots AS (
     SELECT p.id,
            r.amount - COALESCE(
@@ -63,6 +68,10 @@ SET payment_number = 'LEGACY-' || REPLACE(p.id::TEXT, '-', ''),
 FROM snapshots s, receivable.receivables r
 WHERE s.id = p.id
   AND r.id = p.receivable_id;
+
+CREATE TRIGGER trg_prevent_receivable_payment_mutation
+BEFORE UPDATE OR DELETE ON receivable.receivable_payments
+FOR EACH ROW EXECUTE FUNCTION receivable.fn_prevent_receivable_hard_delete();
 
 ALTER TABLE receivable.receivable_payments
     ALTER COLUMN payment_number SET DEFAULT receivable.next_receivable_payment_number(),
