@@ -12,12 +12,23 @@ ALTER TABLE sales.transaction_items
     ADD COLUMN discount_type VARCHAR(20),
     ADD COLUMN discount_value NUMERIC(15,2);
 
+-- V31 protects historical sale details from mutation. Temporarily remove only
+-- that guard while the migration backfills the new immutable snapshot fields.
+-- Flyway runs this migration transactionally, so a failed backfill also rolls
+-- back the trigger removal.
+DROP TRIGGER IF EXISTS trg_prevent_transaction_item_mutation
+    ON sales.transaction_items;
+
 -- Legacy `discount` was per-unit. Convert it once to the new line-level amount.
 UPDATE sales.transaction_items
 SET gross_line_total = ROUND(quantity * price_at_transaction, 2),
     discount_type = CASE WHEN discount > 0 THEN 'FIXED_AMOUNT' ELSE NULL END,
     discount_value = CASE WHEN discount > 0 THEN ROUND(discount * quantity, 2) ELSE 0 END,
     discount = ROUND(discount * quantity, 2);
+
+CREATE TRIGGER trg_prevent_transaction_item_mutation
+BEFORE UPDATE OR DELETE ON sales.transaction_items
+FOR EACH ROW EXECUTE FUNCTION sales.fn_prevent_sales_detail_mutation();
 
 ALTER TABLE sales.transaction_items
     ALTER COLUMN gross_line_total SET NOT NULL,

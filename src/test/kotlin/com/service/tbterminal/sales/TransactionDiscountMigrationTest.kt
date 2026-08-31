@@ -20,5 +20,8 @@ class TransactionDiscountMigrationTest {
         ).forEach { token -> assertTrue(migration.contains(token), "Migration harus memiliki $token") }
         assertTrue(migration.contains("REFERENCES system.manager_approvals"))
         assertTrue(migration.contains("prevent_sales_history_delete"))
+        assertTrue(migration.contains("DROP TRIGGER IF EXISTS trg_prevent_transaction_item_mutation"))
+        assertTrue(migration.contains("CREATE TRIGGER trg_prevent_transaction_item_mutation"))
+        assertTrue(migration.contains("fn_prevent_sales_detail_mutation"))
     }
 }
