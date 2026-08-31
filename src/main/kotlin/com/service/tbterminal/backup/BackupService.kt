@@ -1,9 +1,11 @@
 package com.service.tbterminal.backup
 
 import com.service.tbterminal.shared.EnvironmentConfig
+import com.service.tbterminal.shared.AccessPolicy
 import com.service.tbterminal.plugins.DatabaseHealth
 import com.service.tbterminal.shared.ForbiddenException
 import com.service.tbterminal.shared.NotFoundException
+import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.ValidationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -24,11 +26,25 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 class BackupService(private val repo: BackupRepository) {
-    suspend fun list(limit: Int): List<BackupJobResponse> = repo.list(limit)
-    suspend fun get(id: UUID): BackupJobResponse =
+    suspend fun list(actorRole: String, limit: Int): List<BackupJobResponse> {
+        AccessPolicy.require(actorRole, Permission.MANAGE_DATABASE_BACKUPS)
+        return repo.list(limit)
+    }
+
+    suspend fun get(actorRole: String, id: UUID): BackupJobResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_DATABASE_BACKUPS)
+        return getInternal(id)
+    }
+
+    private suspend fun getInternal(id: UUID): BackupJobResponse =
         repo.find(id)?.response ?: throw NotFoundException("Job backup/restore tidak ditemukan")
 
-    suspend fun queueBackup(requestedBy: UUID?): BackupJobResponse {
+    suspend fun queueBackup(actorRole: String, requestedBy: UUID): BackupJobResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_DATABASE_BACKUPS)
+        return queueBackupInternal(requestedBy)
+    }
+
+    private suspend fun queueBackupInternal(requestedBy: UUID?): BackupJobResponse {
         val directory = requireBackupDirectory()
         val fileName = "tb-terminal-${OffsetDateTime.now().format(FILE_TIME)}-${UUID.randomUUID()}.dump"
         return repo.create("BACKUP", "PENDING", fileName, requestedBy).response
@@ -74,11 +90,12 @@ class BackupService(private val repo: BackupRepository) {
     }
 
     suspend fun createBackup(requestedBy: UUID?): BackupJobResponse {
-        val queued = queueBackup(requestedBy)
+        val queued = queueBackupInternal(requestedBy)
         return executeBackup(UUID.fromString(queued.id))
     }
 
-    suspend fun stageRestore(input: ByteReadChannel, requestedBy: UUID): RestoreValidationResponse {
+    suspend fun stageRestore(actorRole: String, input: ByteReadChannel, requestedBy: UUID): RestoreValidationResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_DATABASE_BACKUPS)
         val directory = requireBackupDirectory()
         val id = UUID.randomUUID()
         val fileName = "restore-$id.dump"
@@ -115,7 +132,13 @@ class BackupService(private val repo: BackupRepository) {
         }
     }
 
-    suspend fun queueRestore(id: UUID, request: RestoreConfirmRequest, actorId: UUID): BackupJobResponse {
+    suspend fun queueRestore(
+        actorRole: String,
+        id: UUID,
+        request: RestoreConfirmRequest,
+        actorId: UUID
+    ): BackupJobResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_DATABASE_BACKUPS)
         if (!EnvironmentConfig.restoreEnabled) throw ForbiddenException("Restore server dinonaktifkan; set RESTORE_ENABLED=true saat maintenance")
         val job = repo.find(id) ?: throw NotFoundException("Permintaan restore tidak ditemukan")
         if (job.response.operation != "RESTORE" || job.response.status != "VALIDATED") throw ValidationException("Permintaan restore tidak siap dijalankan")
@@ -131,7 +154,8 @@ class BackupService(private val repo: BackupRepository) {
         return repo.find(id)!!.response
     }
 
-    suspend fun executeRestore(id: UUID, actorId: UUID): BackupJobResponse {
+    suspend fun executeRestore(actorRole: String, id: UUID, actorId: UUID): BackupJobResponse {
+        AccessPolicy.require(actorRole, Permission.MANAGE_DATABASE_BACKUPS)
         val job = repo.find(id) ?: throw NotFoundException("Permintaan restore tidak ditemukan")
         if (job.response.operation != "RESTORE" || job.response.status != "PENDING") {
             throw ValidationException("Permintaan restore tidak siap dijalankan")
@@ -177,7 +201,8 @@ class BackupService(private val repo: BackupRepository) {
         }
     }
 
-    suspend fun downloadablePath(id: UUID): Path {
+    suspend fun downloadablePath(actorRole: String, id: UUID): Path {
+        AccessPolicy.require(actorRole, Permission.MANAGE_DATABASE_BACKUPS)
         val job = repo.find(id) ?: throw NotFoundException("Backup tidak ditemukan")
         if (job.response.operation != "BACKUP" || job.response.status != "SUCCEEDED" || job.response.removedAt != null) {
             throw ValidationException("File backup tidak tersedia")

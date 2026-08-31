@@ -7,6 +7,7 @@ JWT_ISSUER=tb-terminal
 JWT_AUDIENCE=tb-terminal-client
 JWT_ACCESS_TOKEN_MINUTES=15
 JWT_REFRESH_TOKEN_DAYS=7
+MANAGER_APPROVAL_TTL_MINUTES=5
 # Simpan di volume privat di luar checkout source. Jangan commit dump.
 BACKUP_ENABLED=false
 BACKUP_DIRECTORY=D:/private/tb-terminal-backups

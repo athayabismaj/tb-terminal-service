@@ -49,6 +49,9 @@ object EnvironmentConfig {
     val refreshTokenDays: Long by lazy {
         resolve("JWT_REFRESH_TOKEN_DAYS", "7").toLongOrNull()?.coerceIn(1, 30) ?: 7
     }
+    val managerApprovalTtlMinutes: Long by lazy {
+        resolve("MANAGER_APPROVAL_TTL_MINUTES", "5").toLongOrNull()?.coerceIn(1, 15) ?: 5
+    }
 
     // PostgreSQL backup files must live outside the application repository/public web roots.
     val backupDirectory: String by lazy { resolve("BACKUP_DIRECTORY", "") }

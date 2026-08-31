@@ -1,10 +1,11 @@
 package com.service.tbterminal.backup
 
 import com.service.tbterminal.shared.ApiResponse
-import com.service.tbterminal.shared.Role
+import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.ValidationException
 import com.service.tbterminal.shared.getUserId
-import com.service.tbterminal.shared.requireRole
+import com.service.tbterminal.shared.getUserRole
+import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.recordOperationalAudit
@@ -36,18 +37,18 @@ fun Application.backupRoutes() {
         authenticate("jwt-auth") {
             route("/api/system/database-backups") {
                 get {
-                    call.requireRole(Role.OWNER, Role.ADMIN)
+                    call.requirePermission(Permission.MANAGE_DATABASE_BACKUPS)
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 30
-                    call.respond(ApiResponse.success(service.list(limit)))
+                    call.respond(ApiResponse.success(service.list(call.getUserRole(), limit)))
                 }
                 get("/{id}") {
-                    call.requireRole(Role.OWNER, Role.ADMIN)
-                    call.respond(ApiResponse.success(service.get(call.uuidParameter())))
+                    call.requirePermission(Permission.MANAGE_DATABASE_BACKUPS)
+                    call.respond(ApiResponse.success(service.get(call.getUserRole(), call.uuidParameter())))
                 }
                 post {
-                    call.requireRole(Role.OWNER, Role.ADMIN)
+                    call.requirePermission(Permission.MANAGE_DATABASE_BACKUPS)
                     val actor = call.getUserId()
-                    val result = service.queueBackup(actor)
+                    val result = service.queueBackup(call.getUserRole(), actor)
                     systemService.recordOperationalAudit(call, actor, AuditAction.INSERT, "system", "database_backup_jobs", result.id)
                     application.launch {
                         runCatching { service.executeBackup(UUID.fromString(result.id)) }
@@ -56,9 +57,9 @@ fun Application.backupRoutes() {
                     call.respond(HttpStatusCode.Accepted, ApiResponse.success(result))
                 }
                 get("/{id}/download") {
-                    call.requireRole(Role.OWNER, Role.ADMIN)
+                    call.requirePermission(Permission.MANAGE_DATABASE_BACKUPS)
                     val id = call.uuidParameter()
-                    val path = service.downloadablePath(id)
+                    val path = service.downloadablePath(call.getUserRole(), id)
                     call.response.header(
                         HttpHeaders.ContentDisposition,
                         ContentDisposition.Attachment.withParameter(ContentDisposition.Parameters.FileName, path.fileName.toString()).toString()
@@ -66,13 +67,14 @@ fun Application.backupRoutes() {
                     call.respondFile(path.toFile())
                 }
                 post("/restore/validate") {
-                    call.requireRole(Role.OWNER, Role.ADMIN)
+                    call.requirePermission(Permission.MANAGE_DATABASE_BACKUPS)
                     val actor = call.getUserId()
+                    val actorRole = call.getUserRole()
                     var result: RestoreValidationResponse? = null
                     call.receiveMultipart().forEachPart { part ->
                         try {
                             if (part is PartData.FileItem && result == null) {
-                                result = service.stageRestore(part.provider(), actor)
+                                result = service.stageRestore(actorRole, part.provider(), actor)
                             }
                         } finally {
                             part.dispose()
@@ -83,16 +85,17 @@ fun Application.backupRoutes() {
                     call.respond(HttpStatusCode.Created, ApiResponse.success(validated))
                 }
                 post("/restore/{id}/confirm") {
-                    call.requireRole(Role.OWNER, Role.ADMIN)
+                    call.requirePermission(Permission.MANAGE_DATABASE_BACKUPS)
                     val actor = call.getUserId()
+                    val actorRole = call.getUserRole()
                     val id = call.uuidParameter()
                     val auditIpAddress = call.request.headers["X-Forwarded-For"]
                         ?.substringBefore(",")?.trim()?.takeIf(String::isNotBlank)
                         ?: call.request.headers["X-Real-IP"]?.trim()?.takeIf(String::isNotBlank)
-                    val result = service.queueRestore(id, call.receive(), actor)
+                    val result = service.queueRestore(actorRole, id, call.receive(), actor)
                     systemService.recordOperationalAudit(call, actor, AuditAction.UPDATE, "system", "database_backup_jobs", result.id)
                     application.launch {
-                        runCatching { service.executeRestore(id, actor) }
+                        runCatching { service.executeRestore(actorRole, id, actor) }
                             .onSuccess { restored ->
                                 runCatching {
                                     systemService.recordAuditLog(
