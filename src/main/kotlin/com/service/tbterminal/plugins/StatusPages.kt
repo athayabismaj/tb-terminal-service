@@ -3,6 +3,7 @@ package com.service.tbterminal.plugins
 import com.service.tbterminal.shared.*
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.plugins.BadRequestException
 import io.ktor.server.plugins.ContentTransformationException
 import io.ktor.server.plugins.statuspages.*
 import io.ktor.server.response.*
@@ -20,6 +21,12 @@ fun Application.configureStatusPages() {
             call.respond(
                 HttpStatusCode.BadRequest,
                 ErrorResponse("INVALID_REQUEST", "Format request atau response tidak valid")
+            )
+        }
+        exception<BadRequestException> { call, _ ->
+            call.respond(
+                HttpStatusCode.BadRequest,
+                ErrorResponse("INVALID_REQUEST", "Format request tidak valid")
             )
         }
         exception<NotFoundException> { call, cause ->
@@ -74,6 +81,18 @@ fun Application.configureStatusPages() {
             call.respond(
                 HttpStatusCode.Conflict,
                 ErrorResponse("SESSION_NOT_FOUND", cause.message ?: "Sesi kasir tidak aktif")
+            )
+        }
+        exception<ManagerApprovalException> { call, cause ->
+            val status = when (cause.reason) {
+                ManagerApprovalError.EXPIRED,
+                ManagerApprovalError.ALREADY_USED -> HttpStatusCode.Conflict
+
+                else -> HttpStatusCode.Forbidden
+            }
+            call.respond(
+                status,
+                ErrorResponse(cause.reason.code, cause.message ?: "Manager approval tidak valid")
             )
         }
         exception<ExposedSQLException> { call, cause ->
