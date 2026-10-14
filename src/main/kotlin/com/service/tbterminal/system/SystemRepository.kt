@@ -175,6 +175,16 @@ class SystemRepository {
         updated > 0
     }
 
+    suspend fun updateOwnProfile(id: UUID, name: String, email: String?): Boolean =
+        newSuspendedTransaction(Dispatchers.IO) {
+            val updated = UsersTable.update({ UsersTable.id eq id }) {
+                it[this.name] = name
+                it[this.email] = email
+                it[this.updatedAt] = OffsetDateTime.now()
+            }
+            updated > 0
+        }
+
     suspend fun updatePin(id: UUID, pinHash: String): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updated = UsersTable.update({ UsersTable.id eq id }) {
             it[this.pinHash] = pinHash

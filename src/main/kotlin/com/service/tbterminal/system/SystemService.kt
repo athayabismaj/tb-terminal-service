@@ -146,6 +146,23 @@ class SystemService(private val repo: SystemRepository) {
         return repo.getUserById(uuid) ?: throw NotFoundException("User tidak ditemukan")
     }
 
+    suspend fun getMyProfile(userId: UUID): UserDto {
+        val user = repo.findUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
+        return UserDto.from(user)
+    }
+
+    suspend fun updateMyProfile(userId: UUID, request: UpdateMyProfileRequest): UserDto {
+        val normalizedName = request.name.trim()
+        val normalizedEmail = request.email?.trim()?.takeIf(String::isNotEmpty)
+        validateProfileIdentity(normalizedName, normalizedEmail)
+
+        repo.findUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
+        if (!repo.updateOwnProfile(userId, normalizedName, normalizedEmail)) {
+            throw NotFoundException("User tidak ditemukan")
+        }
+        return getMyProfile(userId)
+    }
+
     suspend fun createUser(actorRole: String, request: UserCreateRequest): UserResponse {
         AccessPolicy.require(actorRole, Permission.MANAGE_USERS)
         validateUserIdentity(request.name, request.username, request.email)
@@ -398,7 +415,17 @@ class SystemService(private val repo: SystemRepository) {
         if (!normalizedUsername.matches(Regex("^[A-Za-z0-9._-]+$"))) {
             throw ValidationException("Username hanya boleh berisi huruf, angka, titik, garis bawah, atau strip")
         }
-        if (email != null && email.trim().length > 150) throw ValidationException("Email maksimal 150 karakter")
+        validateProfileIdentity(normalizedName, email?.trim()?.takeIf(String::isNotEmpty))
+    }
+
+    private fun validateProfileIdentity(name: String, email: String?) {
+        if (name.length !in 2..100) throw ValidationException("Nama harus 2-100 karakter")
+        if (email != null) {
+            if (email.length > 150) throw ValidationException("Email maksimal 150 karakter")
+            if (!email.matches(Regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$"))) {
+                throw ValidationException("Format email tidak valid")
+            }
+        }
     }
 
     private companion object {

@@ -10,7 +10,6 @@ import io.ktor.server.plugins.ratelimit.RateLimitName
 import io.ktor.server.plugins.ratelimit.rateLimit
 import org.koin.ktor.ext.inject
 import com.service.tbterminal.shared.ApiResponse
-import com.service.tbterminal.shared.AuthenticatedUserPrincipal
 import com.service.tbterminal.shared.ErrorResponse
 import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.requirePermission
@@ -97,18 +96,22 @@ fun Application.systemRoutes() {
                 }
 
                 get("/me") {
-                    val principal = call.principal<AuthenticatedUserPrincipal>()
-                    val username = principal?.username
-                    val role = principal?.role
-                    
-                    if (username != null && role != null) {
-                        call.respond(HttpStatusCode.OK, ApiResponse.success(mapOf("username" to username, "role" to role)))
-                    } else {
-                        call.respond(
-                            HttpStatusCode.Unauthorized,
-                            ErrorResponse("UNAUTHORIZED", "Token tidak valid")
-                        )
-                    }
+                    val profile = service.getMyProfile(call.getUserId())
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(profile))
+                }
+
+                put("/me") {
+                    val userId = call.getUserId()
+                    val profile = service.updateMyProfile(userId, call.receive<UpdateMyProfileRequest>())
+                    service.recordOperationalAudit(
+                        call = call,
+                        actorUserId = userId,
+                        action = AuditAction.UPDATE,
+                        schemaName = "system",
+                        tableName = "user_profile",
+                        recordId = userId.toString()
+                    )
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(profile, "Profil berhasil diperbarui"))
                 }
             }
         }

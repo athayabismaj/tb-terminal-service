@@ -58,6 +58,12 @@ data class UserDto(
     }
 }
 
+@Serializable
+data class UpdateMyProfileRequest(
+    val name: String,
+    val email: String? = null
+)
+
 // Internal row model mapped from DB
 data class UserRow(
     val id: UUID,
