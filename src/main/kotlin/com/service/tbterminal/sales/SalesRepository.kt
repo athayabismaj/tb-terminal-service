@@ -37,6 +37,7 @@ import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransacti
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.util.UUID
 
 interface SalesRepository {
@@ -749,6 +750,7 @@ class SalesRepositoryImpl(
         // 1. Insert transaksi utama
         // Checkout attempt menjadi resource UUID approval sekaligus transaction UUID final.
         val trxId = command.checkoutAttemptId ?: UUID.randomUUID()
+        val nowJakarta = OffsetDateTime.now(ZoneId.of("Asia/Jakarta"))
         TransactionsTable.insert {
             it[this.id] = trxId
             it[this.sessionId] = sessionId
@@ -771,6 +773,7 @@ class SalesRepositoryImpl(
             it[this.idempotencyKey] = command.idempotencyKey
             it[this.requestFingerprint] = command.requestFingerprint
             it[this.notes] = command.notes?.trim()?.takeIf(String::isNotBlank)
+            it[this.occurredAt] = nowJakarta
         }
 
         // 2. Loop insert transaction_items (trigger fn_sync_stock akan berjalan otomatis)
@@ -896,7 +899,7 @@ class SalesRepositoryImpl(
             amountTendered = trxRow[TransactionsTable.amountTendered],
             changeAmount = trxRow[TransactionsTable.changeAmount],
             notes = trxRow[TransactionsTable.notes],
-            createdAt = trxRow[TransactionsTable.createdAt].toString(),
+            createdAt = (trxRow[TransactionsTable.occurredAt] ?: trxRow[TransactionsTable.createdAt]).toString(),
             items = items
         )
     }
@@ -1347,8 +1350,62 @@ class SalesRepositoryImpl(
         val customerName = trxRow.getOrNull(CustomersTable.name)
         val userId = trxRow[TransactionsTable.userId]
         val cashierName = getUserName(userId)
-        val paymentMethods = PaymentsTable.select { PaymentsTable.transactionId eq id }
-            .map { it[PaymentsTable.method].dbValue }.distinct()
+
+        val receivableRow = ReceivablesTable.select {
+            (ReceivablesTable.transactionId eq id) and (ReceivablesTable.isActive eq true)
+        }.singleOrNull()
+
+        val transactionTotal = trxRow[TransactionsTable.total]
+        val transactionPaid = trxRow[TransactionsTable.paidAmount]
+        val storedStatus = trxRow[TransactionsTable.status]
+
+        val receivableAmount = receivableRow?.get(ReceivablesTable.amount)
+        val receivablePaid = receivableRow?.get(ReceivablesTable.paidAmount) ?: BigDecimal.ZERO
+        val remainingAmount = if (storedStatus == TrxStatus.VOIDED) BigDecimal.ZERO else receivableAmount
+            ?.subtract(receivablePaid)
+            ?.max(BigDecimal.ZERO)
+            ?: transactionTotal.subtract(transactionPaid).max(BigDecimal.ZERO)
+        val effectivePaidAmount = if (storedStatus == TrxStatus.VOIDED) BigDecimal.ZERO else transactionTotal
+            .subtract(remainingAmount)
+            .max(BigDecimal.ZERO)
+            .min(transactionTotal)
+        val effectiveStatus = when {
+            storedStatus == TrxStatus.VOIDED -> TrxStatus.VOIDED
+            remainingAmount <= BigDecimal.ZERO -> TrxStatus.LUNAS
+            effectivePaidAmount > BigDecimal.ZERO -> TrxStatus.DP
+            else -> storedStatus
+        }
+
+        if (storedStatus != TrxStatus.VOIDED && (transactionPaid.compareTo(effectivePaidAmount) != 0 || storedStatus != effectiveStatus)) {
+            TransactionsTable.update({ TransactionsTable.id eq id }) {
+                it[this.paidAmount] = effectivePaidAmount
+                it[this.status] = effectiveStatus
+            }
+        }
+
+        val directPayments = PaymentsTable.select { PaymentsTable.transactionId eq id }
+            .map { it[PaymentsTable.method].dbValue to it[PaymentsTable.amount] }
+
+        val recPaymentMethods = receivableRow?.let { rec ->
+            val reversedIds = ReceivablePaymentsTable.select {
+                (ReceivablePaymentsTable.receivableId eq rec[ReceivablesTable.id]) and
+                    (ReceivablePaymentsTable.entryType eq ReceivablePaymentEntryType.REVERSAL) and
+                    ReceivablePaymentsTable.reversedPaymentId.isNotNull()
+            }.mapNotNull { it[ReceivablePaymentsTable.reversedPaymentId] }.toSet()
+
+            ReceivablePaymentsTable.select {
+                (ReceivablePaymentsTable.receivableId eq rec[ReceivablesTable.id]) and
+                    (ReceivablePaymentsTable.entryType eq ReceivablePaymentEntryType.PAYMENT)
+            }.filter { it[ReceivablePaymentsTable.id] !in reversedIds }
+                .map { it[ReceivablePaymentsTable.method].dbValue }
+        }.orEmpty()
+
+        val paymentMethods = resolveEffectivePaymentMethods(
+            status = effectiveStatus,
+            directPayments = directPayments,
+            receivableMethods = recPaymentMethods
+        )
+
         val voidRow = TransactionVoidsTable.select { TransactionVoidsTable.transactionId eq id }.singleOrNull()
         val voidedBy = voidRow?.get(TransactionVoidsTable.voidedBy)
 
@@ -1362,7 +1419,7 @@ class SalesRepositoryImpl(
             cashierName = cashierName,
             paymentMethods = paymentMethods,
             type = trxRow[TransactionsTable.type].dbValue,
-            status = trxRow[TransactionsTable.status].dbValue,
+            status = effectiveStatus.dbValue,
             grossSubtotal = trxRow[TransactionsTable.grossSubtotal],
             itemDiscountTotal = trxRow[TransactionsTable.itemDiscountTotal],
             transactionDiscountType = trxRow[TransactionsTable.transactionDiscountType]?.name,
@@ -1375,11 +1432,11 @@ class SalesRepositoryImpl(
             discountManagerApprovalId = trxRow[TransactionsTable.discountManagerApprovalId]?.toString(),
             total = trxRow[TransactionsTable.total],
             dpAmount = trxRow[TransactionsTable.dpAmount],
-            paidAmount = trxRow[TransactionsTable.paidAmount],
+            paidAmount = effectivePaidAmount,
             amountTendered = trxRow[TransactionsTable.amountTendered],
             changeAmount = trxRow[TransactionsTable.changeAmount],
             notes = trxRow[TransactionsTable.notes],
-            createdAt = trxRow[TransactionsTable.createdAt].toString(),
+            createdAt = (trxRow[TransactionsTable.occurredAt] ?: trxRow[TransactionsTable.createdAt]).toString(),
             voidedAt = voidRow?.get(TransactionVoidsTable.createdAt)?.toString(),
             voidedBy = voidedBy?.toString(),
             voidedByName = voidedBy?.let(::getUserName),
@@ -1723,8 +1780,18 @@ class SalesRepositoryImpl(
         cashierId?.let { value -> query = query.andWhere { TransactionsTable.userId eq value } }
         customerId?.let { value -> query = query.andWhere { TransactionsTable.customerId eq value } }
         status?.let { value -> query = query.andWhere { TransactionsTable.status eq value } }
-        startAt?.let { value -> query = query.andWhere { TransactionsTable.createdAt greaterEq value } }
-        endExclusive?.let { value -> query = query.andWhere { TransactionsTable.createdAt less value } }
+        startAt?.let { value ->
+            query = query.andWhere {
+                (TransactionsTable.occurredAt.isNotNull() and (TransactionsTable.occurredAt greaterEq value)) or
+                    (TransactionsTable.occurredAt.isNull() and (TransactionsTable.createdAt greaterEq value))
+            }
+        }
+        endExclusive?.let { value ->
+            query = query.andWhere {
+                (TransactionsTable.occurredAt.isNotNull() and (TransactionsTable.occurredAt less value)) or
+                    (TransactionsTable.occurredAt.isNull() and (TransactionsTable.createdAt less value))
+            }
+        }
         receiptNumber?.let { value ->
             query = query.andWhere { TransactionsTable.receiptNumber.lowerCase() like "%${value.lowercase()}%" }
         }
@@ -1751,14 +1818,31 @@ class SalesRepositoryImpl(
 
         val total = query.count()
         val totalPages = Math.ceil(total.toDouble() / limit).toInt()
-        val rows = query.orderBy(TransactionsTable.createdAt, SortOrder.DESC)
+        val rows = query.orderBy(TransactionsTable.occurredAt to SortOrder.DESC, TransactionsTable.createdAt to SortOrder.DESC)
             .limit(limit, offset)
             .toList()
         val transactionIds = rows.map { it[TransactionsTable.id] }
-        val paymentMethods = if (transactionIds.isEmpty()) emptyMap() else PaymentsTable
+        val directPaymentsMap = if (transactionIds.isEmpty()) emptyMap() else PaymentsTable
             .select { PaymentsTable.transactionId inList transactionIds }
             .groupBy { it[PaymentsTable.transactionId] }
-            .mapValues { (_, payments) -> payments.map { it[PaymentsTable.method].dbValue }.distinct() }
+            .mapValues { (_, payments) -> payments.map { it[PaymentsTable.method].dbValue to it[PaymentsTable.amount] } }
+
+        val receivableIds = rows.mapNotNull { it.getOrNull(ReceivablesTable.id) }.distinct()
+        val recPaymentsByReceivableId = if (receivableIds.isEmpty()) emptyMap() else {
+            val reversed = ReceivablePaymentsTable.select {
+                (ReceivablePaymentsTable.receivableId inList receivableIds) and
+                    (ReceivablePaymentsTable.entryType eq ReceivablePaymentEntryType.REVERSAL) and
+                    ReceivablePaymentsTable.reversedPaymentId.isNotNull()
+            }.mapNotNull { it[ReceivablePaymentsTable.reversedPaymentId] }.toSet()
+
+            ReceivablePaymentsTable.select {
+                (ReceivablePaymentsTable.receivableId inList receivableIds) and
+                    (ReceivablePaymentsTable.entryType eq ReceivablePaymentEntryType.PAYMENT)
+            }.filter { it[ReceivablePaymentsTable.id] !in reversed }
+                .groupBy { it[ReceivablePaymentsTable.receivableId] }
+                .mapValues { (_, list) -> list.map { it[ReceivablePaymentsTable.method].dbValue } }
+        }
+
         val cashierNames = getUserNames(rows.map { it[TransactionsTable.userId] })
         val voids = if (transactionIds.isEmpty()) emptyMap() else TransactionVoidsTable
             .select { TransactionVoidsTable.transactionId inList transactionIds }
@@ -1786,6 +1870,14 @@ class SalesRepositoryImpl(
                 val transactionId = row[TransactionsTable.id]
                 val voidRow = voids[transactionId]
 
+                val direct = directPaymentsMap[transactionId].orEmpty()
+                val recMethods = row.getOrNull(ReceivablesTable.id)?.let { recPaymentsByReceivableId[it] }.orEmpty()
+                val resolvedPaymentMethods = resolveEffectivePaymentMethods(
+                    status = effectiveStatus,
+                    directPayments = direct,
+                    receivableMethods = recMethods
+                )
+
                 TransactionSummary(
                     id = transactionId.toString(),
                     receiptId = row[TransactionsTable.receiptNumber],
@@ -1794,13 +1886,13 @@ class SalesRepositoryImpl(
                     customerName = row[CustomersTable.name],
                     cashierId = row[TransactionsTable.userId].toString(),
                     cashierName = cashierNames[row[TransactionsTable.userId]],
-                    paymentMethods = paymentMethods[transactionId].orEmpty(),
+                    paymentMethods = resolvedPaymentMethods,
                     type = row[TransactionsTable.type].dbValue,
                     status = effectiveStatus.dbValue,
                     total = transactionTotal,
                     paidAmount = effectivePaidAmount,
                     remainingAmount = remainingAmount,
-                    createdAt = row[TransactionsTable.createdAt].toString(),
+                    createdAt = (row[TransactionsTable.occurredAt] ?: row[TransactionsTable.createdAt]).toString(),
                     voidedAt = voidRow?.get(TransactionVoidsTable.createdAt)?.toString(),
                     voidReason = voidRow?.get(TransactionVoidsTable.reason)
                 )
@@ -1838,13 +1930,19 @@ class SalesRepositoryImpl(
             query = query.andWhere { CashExpensesTable.sessionId eq sessionId }
         }
         parseStartDate(startDate)?.let { date ->
-            query = query.andWhere { CashExpensesTable.createdAt greaterEq date }
+            query = query.andWhere {
+                (CashExpensesTable.occurredAt.isNotNull() and (CashExpensesTable.occurredAt greaterEq date)) or
+                    (CashExpensesTable.occurredAt.isNull() and (CashExpensesTable.createdAt greaterEq date))
+            }
         }
         parseEndDate(endDate)?.let { date ->
-            query = query.andWhere { CashExpensesTable.createdAt less date }
+            query = query.andWhere {
+                (CashExpensesTable.occurredAt.isNotNull() and (CashExpensesTable.occurredAt less date)) or
+                    (CashExpensesTable.occurredAt.isNull() and (CashExpensesTable.createdAt less date))
+            }
         }
         val total = query.count()
-        val rows = query.orderBy(CashExpensesTable.createdAt, SortOrder.DESC)
+        val rows = query.orderBy(CashExpensesTable.occurredAt to SortOrder.DESC, CashExpensesTable.createdAt to SortOrder.DESC)
             .limit(limit, offset)
             .toList()
         val userNames = getUserNames(rows.map { it[CashExpensesTable.userId] })
@@ -1976,3 +2074,38 @@ private fun parseEndDate(value: String?): OffsetDateTime? {
 }
 
 private fun BigDecimal.normalizeMoney(): BigDecimal = setScale(2, RoundingMode.HALF_UP)
+
+internal fun resolveEffectivePaymentMethods(
+    status: TrxStatus,
+    directPayments: List<Pair<String, BigDecimal>>,
+    receivableMethods: List<String>
+): List<String> {
+    val positiveDirectMethods = directPayments.filter { it.second > BigDecimal.ZERO }.map { it.first }
+    val allActiveMethods = (positiveDirectMethods + receivableMethods).map { it.lowercase() }.distinct()
+
+    return when (status) {
+        TrxStatus.LUNAS -> {
+            val nonDebtMethods = allActiveMethods.filter { it != "hutang" && it != "dp" }
+            if (nonDebtMethods.isNotEmpty()) {
+                nonDebtMethods
+            } else {
+                listOf("tunai")
+            }
+        }
+        TrxStatus.DP -> {
+            val nonHutang = allActiveMethods.filter { it != "hutang" }
+            if (nonHutang.isNotEmpty()) {
+                nonHutang
+            } else {
+                listOf("tunai")
+            }
+        }
+        TrxStatus.HUTANG -> {
+            if (allActiveMethods.isNotEmpty()) allActiveMethods else listOf("hutang")
+        }
+        TrxStatus.VOIDED, TrxStatus.REFUNDED -> {
+            val nonDebt = allActiveMethods.filter { it != "hutang" }
+            if (nonDebt.isNotEmpty()) nonDebt else directPayments.map { it.first }.distinct().ifEmpty { listOf("tunai") }
+        }
+    }
+}

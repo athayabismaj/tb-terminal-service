@@ -138,7 +138,7 @@ class IntegrationTest {
                 statement.execute("TRUNCATE TABLE receivable.receivable_payments, receivable.receivables CASCADE")
                 statement.execute("TRUNCATE TABLE sales.cash_sessions CASCADE")
                 statement.execute("DELETE FROM receivable.customers WHERE name LIKE 'Integration Receivable %'")
-                statement.execute("UPDATE system.users SET token_version = 0 WHERE username = 'owner'")
+                statement.execute("UPDATE system.users SET token_version = 0, name = 'Pemilik Toko', email = NULL WHERE username = 'owner'")
             }
         }
     }
@@ -1417,6 +1417,38 @@ class IntegrationTest {
             bearer(token)
         }
         assertEquals(HttpStatusCode.Unauthorized, revokedRequest.status, revokedRequest.bodyAsText())
+    }
+
+    @Test
+    fun test_authenticated_user_can_read_and_update_only_safe_profile_fields() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+
+        val initial = client.get("/api/auth/me") { bearer(token) }
+        assertEquals(HttpStatusCode.OK, initial.status, initial.bodyAsText())
+        val initialData = Json.parseToJsonElement(initial.bodyAsText()).jsonObject.getValue("data").jsonObject
+        assertEquals("owner", initialData.getValue("username").jsonPrimitive.content)
+        assertEquals("owner", initialData.getValue("role").jsonPrimitive.content)
+
+        val updated = client.put("/api/auth/me") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody("""{"name":"Pemilik Baru","email":"pemilik@tbterminal.test"}""")
+        }
+        assertEquals(HttpStatusCode.OK, updated.status, updated.bodyAsText())
+        val updatedData = Json.parseToJsonElement(updated.bodyAsText()).jsonObject.getValue("data").jsonObject
+        assertEquals("Pemilik Baru", updatedData.getValue("name").jsonPrimitive.content)
+        assertEquals("pemilik@tbterminal.test", updatedData.getValue("email").jsonPrimitive.content)
+        assertEquals("owner", updatedData.getValue("username").jsonPrimitive.content)
+        assertEquals("owner", updatedData.getValue("role").jsonPrimitive.content)
+        assertEquals(1, auditActionCount("system", "user_profile", ownerId(), "UPDATE"))
+
+        val invalid = client.put("/api/auth/me") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody("""{"name":"P","email":"bukan-email"}""")
+        }
+        assertEquals(HttpStatusCode.BadRequest, invalid.status, invalid.bodyAsText())
     }
 
     @Test

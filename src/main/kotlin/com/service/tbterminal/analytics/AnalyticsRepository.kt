@@ -24,7 +24,7 @@ class AnalyticsRepository {
             queryList(
                 """
                 SELECT
-                    (t.created_at AT TIME ZONE 'Asia/Jakarta')::date AS sale_date,
+                    (COALESCE(t.occurred_at, t.created_at) AT TIME ZONE 'Asia/Jakarta')::date AS sale_date,
                     COUNT(t.id) FILTER (WHERE t.status::text NOT IN ('voided', 'refunded')) AS total_transactions,
                     COALESCE(SUM(t.total) FILTER (WHERE t.status::text NOT IN ('voided', 'refunded')), 0)::numeric AS total_revenue,
                     COALESCE(SUM(t.dp_amount) FILTER (WHERE t.status::text NOT IN ('voided', 'refunded')), 0)::numeric AS total_dp,
@@ -36,8 +36,8 @@ class AnalyticsRepository {
                 FROM sales.transactions t
                 LEFT JOIN sales.transaction_refunds rf ON rf.transaction_id = t.id
                 WHERE t.type = 'penjualan'::system.trx_type
-                  AND t.created_at >= ${startAt.toSqlTimestamptz()}
-                  AND t.created_at < ${endExclusive.toSqlTimestamptz()}
+                  AND COALESCE(t.occurred_at, t.created_at) >= ${startAt.toSqlTimestamptz()}
+                  AND COALESCE(t.occurred_at, t.created_at) < ${endExclusive.toSqlTimestamptz()}
                 GROUP BY sale_date
                 ORDER BY sale_date DESC
                 """
@@ -597,8 +597,8 @@ class AnalyticsRepository {
     ): String {
         val conditions = mutableListOf(
             "$transactionAlias.type = 'penjualan'::system.trx_type",
-            "$transactionAlias.created_at >= ${startAt.toSqlTimestamptz()}",
-            "$transactionAlias.created_at < ${endExclusive.toSqlTimestamptz()}"
+            "COALESCE($transactionAlias.occurred_at, $transactionAlias.created_at) >= ${startAt.toSqlTimestamptz()}",
+            "COALESCE($transactionAlias.occurred_at, $transactionAlias.created_at) < ${endExclusive.toSqlTimestamptz()}"
         )
         if (!includeTerminalStatuses) conditions += "$transactionAlias.status::text NOT IN ('voided', 'refunded')"
         filter.cashierId?.let { conditions += "$transactionAlias.user_id = ${it.toSqlUuid()}" }

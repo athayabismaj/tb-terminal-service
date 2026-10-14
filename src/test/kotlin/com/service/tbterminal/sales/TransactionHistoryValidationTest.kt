@@ -85,4 +85,47 @@ class TransactionHistoryValidationTest {
         assertEquals(ManagerApprovalResourceType.TRANSACTION, scope.resourceType)
         assertEquals(transactionId, scope.resourceId)
     }
+
+    @Test
+    fun `resolveEffectivePaymentMethods correctly resolves settled debt transactions to actual payment method`() {
+        // Pure hutang settled via cash
+        val settledHutang = resolveEffectivePaymentMethods(
+            status = TrxStatus.LUNAS,
+            directPayments = listOf("hutang" to java.math.BigDecimal.ZERO, "tunai" to java.math.BigDecimal("50000.00")),
+            receivableMethods = listOf("tunai")
+        )
+        assertEquals(listOf("tunai"), settledHutang)
+
+        // Pure hutang settled without direct payment row yet (only receivable payment recorded)
+        val settledViaReceivableOnly = resolveEffectivePaymentMethods(
+            status = TrxStatus.LUNAS,
+            directPayments = listOf("hutang" to java.math.BigDecimal.ZERO),
+            receivableMethods = listOf("tunai")
+        )
+        assertEquals(listOf("tunai"), settledViaReceivableOnly)
+
+        // DP settled via cash
+        val settledDp = resolveEffectivePaymentMethods(
+            status = TrxStatus.LUNAS,
+            directPayments = listOf("dp" to java.math.BigDecimal("50000.00"), "tunai" to java.math.BigDecimal("50000.00")),
+            receivableMethods = listOf("tunai")
+        )
+        assertEquals(listOf("tunai"), settledDp)
+
+        // Active unpaid hutang
+        val unpaidHutang = resolveEffectivePaymentMethods(
+            status = TrxStatus.HUTANG,
+            directPayments = listOf("hutang" to java.math.BigDecimal.ZERO),
+            receivableMethods = emptyList()
+        )
+        assertEquals(listOf("hutang"), unpaidHutang)
+
+        // Partial DP still outstanding
+        val activeDp = resolveEffectivePaymentMethods(
+            status = TrxStatus.DP,
+            directPayments = listOf("dp" to java.math.BigDecimal("50000.00")),
+            receivableMethods = emptyList()
+        )
+        assertEquals(listOf("dp"), activeDp)
+    }
 }
