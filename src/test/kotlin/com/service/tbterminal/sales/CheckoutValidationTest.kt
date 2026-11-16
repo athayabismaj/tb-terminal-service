@@ -89,6 +89,86 @@ class CheckoutValidationTest {
         }
     }
 
+    @Test
+    fun `split payment supports cash plus electronic methods with change calculation`() {
+        val resolution = resolveCheckoutPayments(
+            paymentMethod = null,
+            requestedAmount = BigDecimal.ZERO,
+            paymentLines = listOf(
+                CheckoutPaymentLineRequest(method = "qris", amount = BigDecimal("150000.00"), reference = "QR-01"),
+                CheckoutPaymentLineRequest(method = "tunai", amount = BigDecimal("200000.00"))
+            ),
+            total = BigDecimal("300000.00"),
+            customerId = null,
+            dueDays = 30
+        )
+
+        assertEquals(TrxStatus.LUNAS, resolution.status)
+        assertEquals(BigDecimal("300000.00"), resolution.paidAmount)
+        assertEquals(BigDecimal("350000.00"), resolution.amountTendered)
+        assertEquals(BigDecimal("50000.00"), resolution.changeAmount)
+        assertEquals(BigDecimal("150000.00"), resolution.cashAppliedTotal)
+        assertEquals(2, resolution.appliedLines.size)
+        assertEquals(BigDecimal("150000.00"), resolution.appliedLines[0].amount)
+        assertEquals(BigDecimal("150000.00"), resolution.appliedLines[1].amount)
+    }
+
+    @Test
+    fun `split payment supports DP and rejects invalid combinations`() {
+        val dpResolution = resolveCheckoutPayments(
+            paymentMethod = PaymentMethod.DP,
+            requestedAmount = BigDecimal.ZERO,
+            paymentLines = listOf(
+                CheckoutPaymentLineRequest(method = "tunai", amount = BigDecimal("100000.00")),
+                CheckoutPaymentLineRequest(method = "transfer", amount = BigDecimal("200000.00"), reference = "TRF-99")
+            ),
+            total = BigDecimal("500000.00"),
+            customerId = customerId,
+            dueDays = 30
+        )
+        assertEquals(TrxStatus.DP, dpResolution.status)
+        assertEquals(BigDecimal("300000.00"), dpResolution.paidAmount)
+        assertEquals(BigDecimal("200000.00"), dpResolution.receivableAmount)
+        assertEquals(BigDecimal("100000.00"), dpResolution.cashAppliedTotal)
+
+        // Non-cash exceeding total must fail
+        assertFailsWith<ValidationException> {
+            resolveCheckoutPayments(
+                paymentMethod = null,
+                requestedAmount = BigDecimal.ZERO,
+                paymentLines = listOf(
+                    CheckoutPaymentLineRequest(method = "transfer", amount = BigDecimal("350000.00")),
+                    CheckoutPaymentLineRequest(method = "qris", amount = BigDecimal("200000.00"))
+                ),
+                total = BigDecimal("500000.00"),
+                customerId = null,
+                dueDays = 30
+            )
+        }
+
+        // Multiple cash rows in split payment must fail
+        assertFailsWith<ValidationException> {
+            validateCheckoutRequest(
+                request().copy(
+                    payments = listOf(
+                        CheckoutPaymentLineRequest(method = "tunai", amount = BigDecimal("50.00")),
+                        CheckoutPaymentLineRequest(method = "tunai", amount = BigDecimal("50.00"))
+                    )
+                )
+            )
+        }
+    }
+
+    @Test
+    fun `item note over 300 characters is rejected`() {
+        val longNote = "a".repeat(301)
+        assertFailsWith<ValidationException> {
+            validateCheckoutRequest(
+                request(items = listOf(CheckoutItemRequest(productId = productId, qty = BigDecimal("1.00"), note = longNote)))
+            )
+        }
+    }
+
     private fun request(
         quantity: String = "1.00",
         idempotencyKey: String = "checkout-test-key",

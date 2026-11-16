@@ -135,8 +135,10 @@ fun Application.systemRoutes() {
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                     val action = call.request.queryParameters["action"]
                     val range = call.request.queryParameters["range"]
+                    val startDate = call.request.queryParameters["startDate"]
+                    val endDate = call.request.queryParameters["endDate"]
 
-                    val logs = service.getAuditLogs(call.getUserRole(), page, limit, action, range)
+                    val logs = service.getAuditLogs(call.getUserRole(), page, limit, action, range, startDate, endDate)
                     call.respond(HttpStatusCode.OK, ApiResponse.success(logs))
                 }
 

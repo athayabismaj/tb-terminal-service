@@ -156,6 +156,48 @@ class SalesService(private val repository: SalesRepository) {
         return repository.getSessionById(sessionId)!!
     }
 
+    suspend fun forceCloseSession(adminUserId: UUID, sessionIdStr: String, request: CloseSessionRequest): CashSessionResponse {
+        val sessionUuid = try {
+            UUID.fromString(sessionIdStr)
+        } catch (_: Exception) {
+            throw ValidationException("Format session ID tidak valid")
+        }
+
+        val session = repository.getSessionById(sessionUuid)
+            ?: throw NotFoundException("Sesi kasir tidak ditemukan")
+
+        if (session.status != "OPEN") {
+            throw ValidationException("Sesi kasir ini sudah ditutup sebelumnya")
+        }
+
+        if (request.endingCashPhysical < java.math.BigDecimal.ZERO) {
+            throw ValidationException("Uang fisik akhir tidak boleh kurang dari nol")
+        }
+        if (request.endingCashPhysical.scale() > MONEY_SCALE) {
+            throw ValidationException("Uang fisik akhir maksimal memiliki 2 angka desimal")
+        }
+        val notes = request.notes?.trim()?.takeIf(String::isNotBlank)
+        if (notes != null && notes.length > MAX_NOTES_LENGTH) {
+            throw ValidationException("Catatan maksimal $MAX_NOTES_LENGTH karakter")
+        }
+
+        val systemCash = session.systemCash ?: session.openingCash
+        val closingCash = request.endingCashPhysical.normalizeMoney()
+        val difference = closingCash.subtract(systemCash).normalizeMoney()
+
+        val success = repository.closeSession(
+            sessionId = sessionUuid,
+            closingCash = closingCash,
+            systemCash = systemCash,
+            difference = difference,
+            notes = notes,
+            closedByUserId = adminUserId
+        )
+
+        if (!success) throw NotFoundException("Gagal menutup sesi kasir")
+        return repository.getSessionById(sessionUuid)!!
+    }
+
     // ==========================================
     // POS — CHECKOUT ENGINE
     // ==========================================
@@ -163,11 +205,21 @@ class SalesService(private val repository: SalesRepository) {
     suspend fun checkout(userId: UUID, actorRole: String, request: CheckoutRequest): TransactionResponse {
         val idempotencyKey = validateCheckoutRequest(request)
 
-        val paymentMethod = PaymentMethod.entries.firstOrNull { it.dbValue == request.paymentMethod.lowercase() }
-            ?: throw ValidationException(
-                "Metode pembayaran '${request.paymentMethod}' tidak valid. " +
-                "Gunakan: tunai, transfer, qris, hutang, atau dp"
-            )
+        val paymentMethod = if (request.payments == null) {
+            PaymentMethod.entries.firstOrNull { it.dbValue == request.paymentMethod.trim().lowercase() }
+                ?: throw ValidationException(
+                    "Metode pembayaran '${request.paymentMethod}' tidak valid. " +
+                        "Gunakan: tunai, transfer, qris, hutang, atau dp"
+                )
+        } else {
+            request.paymentMethod.trim().takeIf { it.isNotEmpty() }?.let { raw ->
+                PaymentMethod.entries.firstOrNull { it.dbValue == raw.lowercase() }
+                    ?: throw ValidationException(
+                        "Metode pembayaran '$raw' tidak valid. " +
+                            "Gunakan: tunai, transfer, qris, hutang, atau dp"
+                    )
+            }
+        }
 
         val customerId: UUID? = request.customerId?.let {
             try { UUID.fromString(it) } catch (e: IllegalArgumentException) {
@@ -197,6 +249,7 @@ class SalesService(private val repository: SalesRepository) {
                     transactionDiscount = request.transactionDiscount,
                     paymentMethod = paymentMethod,
                     amountPaid = request.amountPaid,
+                    paymentLines = request.payments,
                     notes = request.notes,
                     dueDays = request.dueDays,
                     idempotencyKey = idempotencyKey,
@@ -248,11 +301,22 @@ class SalesService(private val repository: SalesRepository) {
         val customerId = request.customerId?.takeIf { it.isNotBlank() }?.let {
             parseUuid(it, "Customer ID")
         }
-        val paymentMethod = PaymentMethod.entries.firstOrNull { it.dbValue == request.paymentMethod.lowercase() }
-            ?: throw ValidationException(
-                "Metode pembayaran '${request.paymentMethod}' tidak valid. " +
-                    "Gunakan: tunai, transfer, qris, hutang, atau dp"
-            )
+        request.payments?.let { validateSplitPaymentLines(it) }
+        val paymentMethod = if (request.payments == null) {
+            PaymentMethod.entries.firstOrNull { it.dbValue == request.paymentMethod.trim().lowercase() }
+                ?: throw ValidationException(
+                    "Metode pembayaran '${request.paymentMethod}' tidak valid. " +
+                        "Gunakan: tunai, transfer, qris, hutang, atau dp"
+                )
+        } else {
+            request.paymentMethod.trim().takeIf { it.isNotEmpty() }?.let { raw ->
+                PaymentMethod.entries.firstOrNull { it.dbValue == raw.lowercase() }
+                    ?: throw ValidationException(
+                        "Metode pembayaran '$raw' tidak valid. " +
+                            "Gunakan: tunai, transfer, qris, hutang, atau dp"
+                    )
+            }
+        }
         val occurredAt = parseSyncOccurredAt(request.occurredAt)
 
         if (request.items.isEmpty()) {
@@ -267,6 +331,15 @@ class SalesService(private val repository: SalesRepository) {
         val total = request.total.normalizeMoney()
         val paidAmount = request.paidAmount.normalizeMoney()
         val remainingAmount = request.remainingAmount.normalizeMoney()
+        val taxRate = request.taxRate.normalizeMoney()
+        val taxableBase = request.taxableBase.normalizeMoney()
+        val taxAmount = request.taxAmount.normalizeMoney()
+        val roundingAmount = request.roundingAmount.normalizeMoney()
+        val parsedTaxMode = if (request.taxEnabled) {
+            request.taxMode?.trim()?.uppercase()?.let { modeName ->
+                runCatching { com.service.tbterminal.system.TaxMode.valueOf(modeName) }.getOrNull()
+            } ?: throw ValidationException("taxMode offline wajib EXCLUDE atau INCLUDE saat taxEnabled aktif")
+        } else null
 
         if (discount.compareTo(BigDecimal.ZERO) != 0 ||
             request.items.any { it.discount.compareTo(BigDecimal.ZERO) != 0 }
@@ -291,6 +364,9 @@ class SalesService(private val repository: SalesRepository) {
         if (remainingAmount < BigDecimal.ZERO) {
             throw ValidationException("Sisa tagihan tidak boleh negatif")
         }
+        if (taxRate < BigDecimal.ZERO || taxRate > BigDecimal("100") || taxableBase < BigDecimal.ZERO || taxAmount < BigDecimal.ZERO) {
+            throw ValidationException("Snapshot pajak checkout offline tidak valid")
+        }
         if (paidAmount > total) {
             throw ValidationException("Jumlah bayar tidak boleh melebihi total transaksi")
         }
@@ -307,6 +383,10 @@ class SalesService(private val repository: SalesRepository) {
             if (productNameSnapshot.length > 255) {
                 throw ValidationException("productNameSnapshot tidak boleh lebih dari 255 karakter")
             }
+            val itemNote = item.note?.trim()?.takeIf { it.isNotEmpty() }
+            if (itemNote != null && itemNote.length > 300) {
+                throw ValidationException("Catatan item maksimal 300 karakter")
+            }
             OfflineCheckoutSyncItemCommand(
                 productId = productId,
                 productNameSnapshot = productNameSnapshot,
@@ -317,7 +397,8 @@ class SalesService(private val repository: SalesRepository) {
                 discountType = null,
                 discountValue = BigDecimal.ZERO.setScale(MONEY_SCALE),
                 discount = item.discount,
-                subtotal = item.subtotal
+                subtotal = item.subtotal,
+                note = itemNote
             )
         }
 
@@ -337,11 +418,31 @@ class SalesService(private val repository: SalesRepository) {
         if (lineDiscountTotal.compareTo(discount) != 0) {
             throw ValidationException("Diskon checkout offline harus berasal dari diskon item")
         }
-        if (subtotal.subtract(discount).normalizeMoney().compareTo(total) != 0) {
-            throw ValidationException("Total checkout offline tidak sesuai dengan subtotal dikurangi diskon")
+        if (subtotal.subtract(discount).normalizeMoney().compareTo(netItemTotal) != 0) {
+            throw ValidationException("Net item total checkout offline tidak sesuai dengan subtotal dikurangi diskon")
         }
-        if (netItemTotal.compareTo(total) != 0) {
-            throw ValidationException("Total checkout offline tidak sesuai dengan subtotal item")
+
+        val expectedTaxAdded = if (request.taxEnabled && parsedTaxMode == com.service.tbterminal.system.TaxMode.EXCLUDE) {
+            val expectedTax = taxableBase.multiply(taxRate).divide(BigDecimal("100"), MONEY_SCALE, RoundingMode.HALF_UP)
+            if (taxableBase.compareTo(netItemTotal) != 0 || taxAmount.compareTo(expectedTax) != 0) {
+                throw ValidationException("Nominal pajak EXCLUDE checkout offline tidak sesuai")
+            }
+            taxAmount
+        } else if (request.taxEnabled && parsedTaxMode == com.service.tbterminal.system.TaxMode.INCLUDE) {
+            if (taxableBase.add(taxAmount).normalizeMoney().compareTo(netItemTotal) != 0) {
+                throw ValidationException("Nominal pajak INCLUDE checkout offline tidak sesuai")
+            }
+            BigDecimal.ZERO.setScale(MONEY_SCALE)
+        } else {
+            if (taxRate.compareTo(BigDecimal.ZERO) != 0 || taxableBase.compareTo(BigDecimal.ZERO) != 0 || taxAmount.compareTo(BigDecimal.ZERO) != 0) {
+                throw ValidationException("Snapshot pajak harus nol saat taxEnabled false")
+            }
+            BigDecimal.ZERO.setScale(MONEY_SCALE)
+        }
+
+        val expectedTotal = netItemTotal.add(expectedTaxAdded).add(roundingAmount).normalizeMoney()
+        if (expectedTotal.compareTo(total) != 0) {
+            throw ValidationException("Total checkout offline tidak sesuai dengan item, pajak, dan pembulatan")
         }
 
         val requiresCustomer = paymentMethod == PaymentMethod.HUTANG ||
@@ -358,13 +459,21 @@ class SalesService(private val repository: SalesRepository) {
             cashSessionId = cashSessionId,
             customerId = customerId,
             paymentMethod = paymentMethod,
+            paymentLines = request.payments,
             total = total,
             paidAmount = paidAmount,
             remainingAmount = remainingAmount,
             occurredAt = occurredAt,
             note = request.note,
             dueDays = request.dueDays,
-            items = itemCommands
+            items = itemCommands,
+            taxEnabled = request.taxEnabled,
+            taxMode = parsedTaxMode,
+            taxRate = if (request.taxEnabled) taxRate else BigDecimal.ZERO.setScale(MONEY_SCALE),
+            taxLabel = if (request.taxEnabled) request.taxLabel?.trim()?.takeIf { it.isNotEmpty() } ?: TaxAndRoundingCalculator.DEFAULT_TAX_LABEL else null,
+            taxableBase = if (request.taxEnabled) taxableBase else BigDecimal.ZERO.setScale(MONEY_SCALE),
+            taxAmount = if (request.taxEnabled) taxAmount else BigDecimal.ZERO.setScale(MONEY_SCALE),
+            roundingAmount = roundingAmount
         )
 
         return try {

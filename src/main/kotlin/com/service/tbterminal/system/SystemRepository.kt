@@ -228,7 +228,8 @@ class SystemRepository {
         page: Int,
         limit: Int,
         action: AuditAction?,
-        since: OffsetDateTime?
+        since: OffsetDateTime?,
+        until: OffsetDateTime? = null
     ): PaginatedResponse<AuditLogResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val offset = ((page - 1) * limit).toLong()
         var query = AuditLogsTable.selectAll()
@@ -239,6 +240,10 @@ class SystemRepository {
 
         if (since != null) {
             query = query.andWhere { AuditLogsTable.createdAt greaterEq since }
+        }
+
+        if (until != null) {
+            query = query.andWhere { AuditLogsTable.createdAt less until }
         }
 
         val totalCount = query.count()
@@ -327,17 +332,7 @@ class SystemRepository {
         val row = StoreSettingsTable.selectAll().firstOrNull()
 
         if (row != null) {
-            return@newSuspendedTransaction StoreSettingsResponse(
-                id = row[StoreSettingsTable.id].toString(),
-                storeName = row[StoreSettingsTable.storeName],
-                address = row[StoreSettingsTable.address],
-                phone = row[StoreSettingsTable.phone],
-                receiptHeader = row[StoreSettingsTable.receiptHeader],
-                receiptFooter = row[StoreSettingsTable.receiptFooter],
-                printerSize = row[StoreSettingsTable.printerSize].dbValue,
-                cashierDiscountLimitPercent = row[StoreSettingsTable.cashierDiscountLimitPercent],
-                updatedAt = row[StoreSettingsTable.updatedAt].toString()
-            )
+            return@newSuspendedTransaction row.toStoreSettingsResponse()
         }
 
         // Jika kosong, insert default row
@@ -349,18 +344,7 @@ class SystemRepository {
         }
 
         val newRow = StoreSettingsTable.select { StoreSettingsTable.id eq newId }.single()
-        
-        StoreSettingsResponse(
-            id = newRow[StoreSettingsTable.id].toString(),
-            storeName = newRow[StoreSettingsTable.storeName],
-            address = newRow[StoreSettingsTable.address],
-            phone = newRow[StoreSettingsTable.phone],
-            receiptHeader = newRow[StoreSettingsTable.receiptHeader],
-            receiptFooter = newRow[StoreSettingsTable.receiptFooter],
-            printerSize = newRow[StoreSettingsTable.printerSize].dbValue,
-            cashierDiscountLimitPercent = newRow[StoreSettingsTable.cashierDiscountLimitPercent],
-            updatedAt = newRow[StoreSettingsTable.updatedAt].toString()
-        )
+        newRow.toStoreSettingsResponse()
     }
 
     suspend fun updateStoreProfile(
@@ -370,7 +354,15 @@ class SystemRepository {
         phone: String?,
         receiptHeader: String?,
         receiptFooter: String?,
-        cashierDiscountLimitPercent: java.math.BigDecimal? = null
+        cashierDiscountLimitPercent: java.math.BigDecimal? = null,
+        taxEnabled: Boolean? = null,
+        taxRate: java.math.BigDecimal? = null,
+        taxMode: TaxMode? = null,
+        taxLabel: String? = null,
+        updateStoreNpwp: Boolean = false,
+        storeNpwp: String? = null,
+        cashRoundingUnit: Int? = null,
+        cashRoundingRule: CashRoundingRule? = null
     ): StoreSettingsResponse {
         getStoreSettings()
         return newSuspendedTransaction(Dispatchers.IO) {
@@ -382,6 +374,27 @@ class SystemRepository {
                 it[this.receiptFooter] = receiptFooter
                 cashierDiscountLimitPercent?.let { limit ->
                     it[this.cashierDiscountLimitPercent] = limit
+                }
+                taxEnabled?.let { enabled ->
+                    it[this.taxEnabled] = enabled
+                }
+                taxRate?.let { rate ->
+                    it[this.taxRate] = rate
+                }
+                taxMode?.let { mode ->
+                    it[this.taxMode] = mode
+                }
+                taxLabel?.let { label ->
+                    it[this.taxLabel] = label
+                }
+                if (updateStoreNpwp) {
+                    it[this.storeNpwp] = storeNpwp
+                }
+                cashRoundingUnit?.let { unit ->
+                    it[this.cashRoundingUnit] = unit
+                }
+                cashRoundingRule?.let { rule ->
+                    it[this.cashRoundingRule] = rule
                 }
                 it[this.updatedBy] = userId
                 it[this.updatedAt] = OffsetDateTime.now()
@@ -401,6 +414,13 @@ private fun ResultRow.toStoreSettingsResponse() = StoreSettingsResponse(
     receiptFooter = this[StoreSettingsTable.receiptFooter],
     printerSize = this[StoreSettingsTable.printerSize].dbValue,
     cashierDiscountLimitPercent = this[StoreSettingsTable.cashierDiscountLimitPercent],
+    taxEnabled = this[StoreSettingsTable.taxEnabled],
+    taxRate = this[StoreSettingsTable.taxRate],
+    taxMode = this[StoreSettingsTable.taxMode].name,
+    taxLabel = this[StoreSettingsTable.taxLabel],
+    storeNpwp = this[StoreSettingsTable.storeNpwp],
+    cashRoundingUnit = this[StoreSettingsTable.cashRoundingUnit],
+    cashRoundingRule = this[StoreSettingsTable.cashRoundingRule].name,
     updatedAt = this[StoreSettingsTable.updatedAt].toString()
 )
 

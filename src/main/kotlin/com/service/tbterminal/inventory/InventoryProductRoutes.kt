@@ -106,6 +106,28 @@ internal fun Route.productRoutes(service: InventoryService, systemService: Syste
             )
             call.respond(HttpStatusCode.OK, ApiResponse.success(product, "Produk berhasil diaktifkan kembali"))
         }
+
+        get("/{id}/price-tiers") {
+            val id = call.parameters["id"] ?: return@get call.respond(HttpStatusCode.BadRequest)
+            call.respond(HttpStatusCode.OK, ApiResponse.success(service.getProductPriceTiers(id)))
+        }
+
+        put("/{id}/price-tiers") {
+            call.requirePermission(Permission.MANAGE_INVENTORY)
+            val id = call.parameters["id"] ?: return@put call.respond(HttpStatusCode.BadRequest)
+            val actorUserId = call.getUserId()
+            val request = call.receive<UpdateProductPriceTiersRequest>()
+            val updated = service.updateProductPriceTiers(id, request.tiers)
+            systemService.recordOperationalAudit(
+                call = call,
+                actorUserId = actorUserId,
+                action = AuditAction.UPDATE,
+                schemaName = "inventory",
+                tableName = "product_price_tiers",
+                recordId = id
+            )
+            call.respond(HttpStatusCode.OK, ApiResponse.success(updated, "Harga grosir bertingkat berhasil disimpan"))
+        }
     }
 }
 

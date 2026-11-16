@@ -34,7 +34,7 @@ interface PurchasingRepository {
     ): PurchaseResponse
 
     suspend fun getPaginatedPurchases(
-        page: Int, limit: Int, supplierId: UUID?
+        page: Int, limit: Int, supplierId: UUID?, startDate: String? = null, endDate: String? = null
     ): PaginatedResponse<PurchaseSummary>
 
     suspend fun getPurchaseById(id: UUID): PurchaseResponse?
@@ -263,7 +263,7 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     // ==========================================
 
     override suspend fun getPaginatedPurchases(
-        page: Int, limit: Int, supplierId: UUID?
+        page: Int, limit: Int, supplierId: UUID?, startDate: String?, endDate: String?
     ): PaginatedResponse<PurchaseSummary> = newSuspendedTransaction(Dispatchers.IO) {
         val offset = ((page - 1) * limit).toLong()
 
@@ -273,8 +273,16 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             query = query.andWhere { PurchasesTable.supplierId eq supplierId }
         }
 
+        parsePurchaseStartDate(startDate)?.let { date ->
+            query = query.andWhere { PurchasesTable.receivedAt greaterEq date }
+        }
+
+        parsePurchaseEndDate(endDate)?.let { date ->
+            query = query.andWhere { PurchasesTable.receivedAt less date }
+        }
+
         val totalCount = query.count()
-        val totalPages = kotlin.math.ceil(totalCount.toDouble() / limit).toInt()
+        val totalPages = kotlin.math.ceil(totalCount.toDouble() / limit).toInt().coerceAtLeast(1)
 
         val data = query
             .orderBy(PurchasesTable.createdAt, SortOrder.DESC)
@@ -515,4 +523,22 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             updatedAt = row[SuppliersTable.updatedAt].toString()
         )
     }
+}
+
+private fun parsePurchaseStartDate(value: String?): java.time.OffsetDateTime? {
+    if (value.isNullOrBlank()) return null
+    return runCatching {
+        runCatching { java.time.OffsetDateTime.parse(value) }.getOrElse {
+            java.time.LocalDate.parse(value.take(10)).atStartOfDay(java.time.ZoneId.of("Asia/Jakarta")).toOffsetDateTime()
+        }
+    }.getOrNull()
+}
+
+private fun parsePurchaseEndDate(value: String?): java.time.OffsetDateTime? {
+    if (value.isNullOrBlank()) return null
+    return runCatching {
+        runCatching { java.time.OffsetDateTime.parse(value) }.getOrElse {
+            java.time.LocalDate.parse(value.take(10)).plusDays(1).atStartOfDay(java.time.ZoneId.of("Asia/Jakarta")).toOffsetDateTime()
+        }
+    }.getOrNull()
 }

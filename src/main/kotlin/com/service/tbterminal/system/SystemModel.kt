@@ -164,6 +164,17 @@ data class ChangePasswordRequest(
 // DTOs - Store Settings
 // ==========================================
 
+enum class TaxMode {
+    EXCLUDE,
+    INCLUDE
+}
+
+enum class CashRoundingRule {
+    NEAREST,
+    DOWN,
+    UP
+}
+
 @Serializable
 data class StoreSettingsResponse(
     val id: String,
@@ -175,6 +186,14 @@ data class StoreSettingsResponse(
     val printerSize: String,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val cashierDiscountLimitPercent: java.math.BigDecimal = java.math.BigDecimal("10.00"),
+    val taxEnabled: Boolean = false,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxRate: java.math.BigDecimal = java.math.BigDecimal("11.00"),
+    val taxMode: String = TaxMode.EXCLUDE.name,
+    val taxLabel: String = "PPN",
+    val storeNpwp: String? = null,
+    val cashRoundingUnit: Int = 0,
+    val cashRoundingRule: String = CashRoundingRule.NEAREST.name,
     val updatedAt: String
 )
 
@@ -187,7 +206,15 @@ data class StoreSettingsUpdateRequest(
     val receiptFooter: String? = null,
     val printerSize: String,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
-    val cashierDiscountLimitPercent: java.math.BigDecimal? = null
+    val cashierDiscountLimitPercent: java.math.BigDecimal? = null,
+    val taxEnabled: Boolean? = null,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxRate: java.math.BigDecimal? = null,
+    val taxMode: String? = null,
+    val taxLabel: String? = null,
+    val storeNpwp: String? = null,
+    val cashRoundingUnit: Int? = null,
+    val cashRoundingRule: String? = null
 )
 
 /** Profil toko global. Konfigurasi printer/perangkat tidak termasuk di sini. */

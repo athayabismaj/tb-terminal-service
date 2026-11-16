@@ -42,6 +42,13 @@ class DiscountRepositoryImpl : DiscountRepository {
             .associateBy { it[ProductsTable.id] }
         if (products.size != requestedIds.size) throw NotFoundException("Satu atau lebih produk tidak ditemukan")
 
+        val customerUuid = request.customerId?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
+            runCatching { UUID.fromString(raw) }.getOrElse {
+                throw ValidationException("Format Customer ID tidak valid")
+            }
+        }
+        val pricingContext = loadSalesTierPricingContext(customerUuid, requestedIds)
+
         val inputs = request.items.map { item ->
             val productId = UUID.fromString(item.productId)
             val product = requireNotNull(products[productId])
@@ -51,13 +58,31 @@ class DiscountRepositoryImpl : DiscountRepository {
             DiscountItemInput(
                 reference = productId.toString(),
                 quantity = item.qty,
-                unitPrice = product[ProductsTable.priceRetail],
+                unitPrice = pricingContext.resolveUnitPrice(product, item.qty),
                 discount = item.discountRequest,
                 legacyPerUnitDiscount = item.discount
             )
         }
         val calculation = DiscountCalculator.calculate(inputs, request.transactionDiscount)
-        val limit = cashierLimitInCurrentTransaction()
+        val settingsRow = StoreSettingsTable.selectAll().limit(1).singleOrNull()
+        val limit = settingsRow?.get(StoreSettingsTable.cashierDiscountLimitPercent)
+            ?: DEFAULT_CASHIER_DISCOUNT_LIMIT_PERCENT
+        val taxConfig = StoreTaxRoundingConfig(
+            taxEnabled = settingsRow?.get(StoreSettingsTable.taxEnabled) ?: false,
+            taxRate = settingsRow?.get(StoreSettingsTable.taxRate) ?: TaxAndRoundingCalculator.DEFAULT_TAX_RATE,
+            taxMode = settingsRow?.get(StoreSettingsTable.taxMode) ?: com.service.tbterminal.system.TaxMode.EXCLUDE,
+            taxLabel = settingsRow?.get(StoreSettingsTable.taxLabel) ?: TaxAndRoundingCalculator.DEFAULT_TAX_LABEL,
+            cashRoundingUnit = settingsRow?.get(StoreSettingsTable.cashRoundingUnit) ?: 0,
+            cashRoundingRule = settingsRow?.get(StoreSettingsTable.cashRoundingRule)
+                ?: com.service.tbterminal.system.CashRoundingRule.NEAREST
+        )
+        val taxCalc = TaxAndRoundingCalculator.calculateTax(calculation.netTotal, taxConfig)
+        val roundingCalc = TaxAndRoundingCalculator.calculateCashRounding(
+            totalBeforeRounding = taxCalc.totalWithTax,
+            hasCashPayment = true,
+            unit = taxConfig.cashRoundingUnit,
+            rule = taxConfig.cashRoundingRule
+        )
         val approvalRequired = requiresDiscountOverride(actorRole, calculation.effectiveDiscountPercent, limit)
         val attemptId = UUID.randomUUID()
         val expiresAt = OffsetDateTime.now().plusMinutes(PREVIEW_TTL_MINUTES)
@@ -95,7 +120,18 @@ class DiscountRepositoryImpl : DiscountRepository {
             netTotal = calculation.netTotal,
             cashierDiscountLimitPercent = limit,
             approvalRequired = approvalRequired,
-            expiresAt = expiresAt.toString()
+            expiresAt = expiresAt.toString(),
+            taxEnabled = taxCalc.taxEnabled,
+            taxMode = taxCalc.taxMode?.name,
+            taxRate = taxCalc.taxRate,
+            taxLabel = taxCalc.taxLabel,
+            taxableBase = taxCalc.taxableBase,
+            taxAmount = taxCalc.taxAmount,
+            totalWithTax = taxCalc.totalWithTax,
+            cashRoundingUnit = taxConfig.cashRoundingUnit,
+            cashRoundingRule = taxConfig.cashRoundingRule.name,
+            estimatedCashRoundingAmount = roundingCalc.roundingAmount,
+            estimatedTotalWithCashRounding = roundingCalc.finalTotal
         )
     }
 

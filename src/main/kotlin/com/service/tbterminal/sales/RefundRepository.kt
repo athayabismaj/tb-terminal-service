@@ -226,21 +226,33 @@ class RefundRepositoryImpl(
         }
 
         if (initialPaid > BigDecimal.ZERO) {
-            val initialPayment = PaymentsTable.select {
+            val initialPayments = PaymentsTable.select {
                 (PaymentsTable.transactionId eq transactionId) and
-                    (PaymentsTable.amount greater BigDecimal.ZERO)
-            }.orderBy(PaymentsTable.paidAt to SortOrder.ASC).limit(1).singleOrNull()
-                ?: throw ValidationException("Pembayaran awal transaksi tidak ditemukan")
-            val compensationId = insertCompensationPayment(
-                transactionId,
-                initialPayment[PaymentsTable.method],
-                initialPaid,
-                refundId
-            )
-            if (initialPayment[PaymentsTable.method] == PaymentMethod.TUNAI) {
-                reverseCashSession(transactionRow[TransactionsTable.sessionId], initialPaid, actorUserId)
+                    (PaymentsTable.amount greater BigDecimal.ZERO) and
+                    (PaymentsTable.paymentSource eq PaymentSource.CHECKOUT)
+            }.orderBy(PaymentsTable.paidAt to SortOrder.ASC).toList()
+            if (initialPayments.isEmpty()) {
+                throw ValidationException("Pembayaran awal transaksi tidak ditemukan")
             }
-            insertAudit(actorUserId, "sales", "payments", compensationId, AuditAction.INSERT)
+
+            var remainingToReverse = initialPaid
+            initialPayments.forEach { initialPayment ->
+                if (remainingToReverse <= BigDecimal.ZERO) return@forEach
+                val lineAmount = initialPayment[PaymentsTable.amount].min(remainingToReverse)
+                if (lineAmount <= BigDecimal.ZERO) return@forEach
+                val compensationId = insertCompensationPayment(
+                    transactionId = transactionId,
+                    method = initialPayment[PaymentsTable.method],
+                    amount = lineAmount,
+                    refundId = refundId,
+                    source = PaymentSource.REFUND_REVERSAL
+                )
+                if (initialPayment[PaymentsTable.method] == PaymentMethod.TUNAI) {
+                    reverseCashSession(transactionRow[TransactionsTable.sessionId], lineAmount, actorUserId)
+                }
+                insertAudit(actorUserId, "sales", "payments", compensationId, AuditAction.INSERT)
+                remainingToReverse = remainingToReverse.subtract(lineAmount)
+            }
         }
 
         TransactionsTable.update({ TransactionsTable.id eq transactionId }) {
@@ -287,7 +299,8 @@ class RefundRepositoryImpl(
         transactionId: UUID,
         method: PaymentMethod,
         amount: BigDecimal,
-        refundId: UUID
+        refundId: UUID,
+        source: PaymentSource = PaymentSource.REFUND_REVERSAL
     ): UUID {
         val paymentId = UUID.randomUUID()
         PaymentsTable.insert {
@@ -296,6 +309,7 @@ class RefundRepositoryImpl(
             it[this.method] = method
             it[this.amount] = amount.negate()
             it[reference] = "REFUND:$refundId"
+            it[paymentSource] = source
             it[transactionRefundId] = refundId
         }
         return paymentId

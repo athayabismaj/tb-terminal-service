@@ -121,8 +121,10 @@ fun Application.purchasingRoutes() {
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val supplierId = call.request.queryParameters["supplierId"]
+                        val startDate = call.request.queryParameters["startDate"]
+                        val endDate = call.request.queryParameters["endDate"]
 
-                        val purchases = service.getPurchases(page, limit, supplierId)
+                        val purchases = service.getPurchases(page, limit, supplierId, startDate, endDate)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(purchases))
                     }
 

@@ -112,7 +112,28 @@ internal class InventoryStockRepository {
     ): PaginatedResponse<StockDetailResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val query = VStockDetailView.selectAll().applySearch(search)
         val totalCount = query.count()
-        val data = query.limit(limit, offset.toLong()).map(::toStockDetailResponse)
+        val rows = query.limit(limit, offset.toLong()).toList()
+        val productIds = rows.map { it[VStockDetailView.productId] }.distinct()
+        val tiersByProduct = if (productIds.isEmpty()) {
+            emptyMap()
+        } else {
+            ProductPriceTiersTable.select { ProductPriceTiersTable.productId inList productIds }
+                .orderBy(ProductPriceTiersTable.minQty to SortOrder.ASC)
+                .groupBy { it[ProductPriceTiersTable.productId] }
+                .mapValues { (_, list) ->
+                    list.map { tierRow ->
+                        ProductPriceTierDto(
+                            id = tierRow[ProductPriceTiersTable.id].toString(),
+                            minQty = tierRow[ProductPriceTiersTable.minQty],
+                            unitPrice = tierRow[ProductPriceTiersTable.unitPrice],
+                        )
+                    }
+                }
+        }
+        val data = rows.map { row ->
+            val pid = row[VStockDetailView.productId]
+            toStockDetailResponse(row, tiersByProduct[pid].orEmpty())
+        }
         PaginatedResponse(data, totalCount, (offset / limit) + 1, limit, totalPages(totalCount, limit))
     }
 
@@ -199,7 +220,10 @@ internal class InventoryStockRepository {
         }
     }
 
-    private fun toStockDetailResponse(row: ResultRow): StockDetailResponse {
+    private fun toStockDetailResponse(
+        row: ResultRow,
+        priceTiers: List<ProductPriceTierDto> = emptyList(),
+    ): StockDetailResponse {
         return StockDetailResponse(
             productId = row[VStockDetailView.productId].toString(),
             sku = row[VStockDetailView.sku],
@@ -211,7 +235,8 @@ internal class InventoryStockRepository {
             priceBuy = row[VStockDetailView.priceBuy],
             priceRetail = row[VStockDetailView.priceRetail],
             priceContractor = row[VStockDetailView.priceContractor],
-            isActive = row[VStockDetailView.isActive]
+            isActive = row[VStockDetailView.isActive],
+            priceTiers = priceTiers,
         )
     }
 

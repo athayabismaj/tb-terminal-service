@@ -1,6 +1,7 @@
 package com.service.tbterminal.inventory
 
 import org.jetbrains.exposed.sql.ResultRow
+import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.like
 import org.jetbrains.exposed.sql.and
@@ -21,27 +22,53 @@ internal class InventoryProductRepository {
     suspend fun getProducts(page: Int, limit: Int, search: String?): PaginatedResponse<ProductResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val query = ProductsTable.select { ProductsTable.isActive eq true }.applySearch(search)
         val totalCount = query.count()
-        val data = query.limit(limit, ((page - 1) * limit).toLong()).map(::toProductResponse)
+        val rows = query.limit(limit, ((page - 1) * limit).toLong()).toList()
+        val tiersByProduct = loadPriceTiersMap(rows.map { it[ProductsTable.id] })
+        val data = rows.map { row -> toProductResponse(row, tiersByProduct[row[ProductsTable.id]].orEmpty()) }
         PaginatedResponse(data, totalCount, page, limit, totalPages(totalCount, limit))
     }
 
     suspend fun getProductById(id: UUID): ProductResponse? = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.select { (ProductsTable.id eq id) and (ProductsTable.isActive eq true) }
             .singleOrNull()
-            ?.let(::toProductResponse)
+            ?.let { row -> toProductResponse(row, loadPriceTiersMap(listOf(id))[id].orEmpty()) }
     }
 
     suspend fun getProductByIdIncludingInactive(id: UUID): ProductResponse? = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.select { ProductsTable.id eq id }
             .singleOrNull()
-            ?.let(::toProductResponse)
+            ?.let { row -> toProductResponse(row, loadPriceTiersMap(listOf(id))[id].orEmpty()) }
     }
 
     suspend fun getBySku(sku: String, includeInactive: Boolean): ProductResponse? = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.select { ProductsTable.sku eq sku }
             .apply { if (!includeInactive) andWhere { ProductsTable.isActive eq true } }
             .singleOrNull()
-            ?.let(::toProductResponse)
+            ?.let { row ->
+                val id = row[ProductsTable.id]
+                toProductResponse(row, loadPriceTiersMap(listOf(id))[id].orEmpty())
+            }
+    }
+
+    suspend fun getProductPriceTiers(productId: UUID): List<ProductPriceTierDto> = newSuspendedTransaction(Dispatchers.IO) {
+        loadPriceTiersMap(listOf(productId))[productId].orEmpty()
+    }
+
+    suspend fun replaceProductPriceTiers(
+        productId: UUID,
+        tiers: List<ProductPriceTierDto>
+    ): List<ProductPriceTierDto> = newSuspendedTransaction(Dispatchers.IO) {
+        val sorted = TieredPricingResolver.validateAndSortTiers(tiers)
+        ProductPriceTiersTable.deleteWhere { ProductPriceTiersTable.productId eq productId }
+        sorted.forEach { tier ->
+            ProductPriceTiersTable.insert {
+                it[id] = UUID.randomUUID()
+                it[this.productId] = productId
+                it[minQty] = tier.minQty
+                it[unitPrice] = tier.unitPrice
+            }
+        }
+        loadPriceTiersMap(listOf(productId))[productId].orEmpty()
     }
 
     suspend fun createProductAndInitStock(
@@ -196,7 +223,26 @@ internal class InventoryProductRepository {
         }
     }
 
-    private fun toProductResponse(row: ResultRow): ProductResponse {
+    private fun loadPriceTiersMap(productIds: List<UUID>): Map<UUID, List<ProductPriceTierDto>> {
+        if (productIds.isEmpty()) return emptyMap()
+        return ProductPriceTiersTable.select { ProductPriceTiersTable.productId inList productIds.distinct() }
+            .orderBy(ProductPriceTiersTable.minQty to SortOrder.ASC)
+            .groupBy { it[ProductPriceTiersTable.productId] }
+            .mapValues { (_, rows) ->
+                rows.map { r ->
+                    ProductPriceTierDto(
+                        id = r[ProductPriceTiersTable.id].toString(),
+                        minQty = r[ProductPriceTiersTable.minQty],
+                        unitPrice = r[ProductPriceTiersTable.unitPrice],
+                    )
+                }
+            }
+    }
+
+    private fun toProductResponse(
+        row: ResultRow,
+        priceTiers: List<ProductPriceTierDto> = emptyList(),
+    ): ProductResponse {
         val conversion = UnitConversionsTable
             .select { UnitConversionsTable.productId eq row[ProductsTable.id] }
             .limit(1)
@@ -215,7 +261,8 @@ internal class InventoryProductRepository {
             photoFilename = row[ProductsTable.photoFilename],
             isActive = row[ProductsTable.isActive],
             secondaryUnitId = conversion?.get(UnitConversionsTable.fromUnitId)?.toString(),
-            secondaryUnitFactor = conversion?.get(UnitConversionsTable.factor)?.stripTrailingZeros()?.toPlainString()
+            secondaryUnitFactor = conversion?.get(UnitConversionsTable.factor)?.stripTrailingZeros()?.toPlainString(),
+            priceTiers = priceTiers,
         )
     }
 

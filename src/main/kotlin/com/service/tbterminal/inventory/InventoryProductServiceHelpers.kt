@@ -71,6 +71,7 @@ internal suspend fun restoreInactiveProduct(
         secondaryUnitId = draft.secondaryUnitId,
         secondaryUnitFactor = draft.secondaryUnitFactor
     )
+    request.priceTiers?.let { repository.replaceProductPriceTiers(existingUuid, it) }
     return repository.getProductById(existingUuid)!!
 }
 
@@ -93,6 +94,7 @@ internal suspend fun createNewProduct(
         secondaryUnitId = draft.secondaryUnitId,
         secondaryUnitFactor = draft.secondaryUnitFactor
     )
+    request.priceTiers?.let { repository.replaceProductPriceTiers(newId, it) }
     return repository.getProductById(newId)!!
 }
 

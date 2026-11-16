@@ -73,6 +73,8 @@ interface InventoryRepository {
 
     suspend fun softDeleteProduct(id: UUID): Boolean
     suspend fun activateProduct(id: UUID): Boolean
+    suspend fun getProductPriceTiers(productId: UUID): List<ProductPriceTierDto>
+    suspend fun replaceProductPriceTiers(productId: UUID, tiers: List<ProductPriceTierDto>): List<ProductPriceTierDto>
     suspend fun getPaginatedStockDetail(
         limit: Int,
         offset: Int,
@@ -193,6 +195,9 @@ class InventoryRepositoryImpl : InventoryRepository {
 
     override suspend fun softDeleteProduct(id: UUID) = products.softDeleteProduct(id)
     override suspend fun activateProduct(id: UUID) = products.activateProduct(id)
+    override suspend fun getProductPriceTiers(productId: UUID) = products.getProductPriceTiers(productId)
+    override suspend fun replaceProductPriceTiers(productId: UUID, tiers: List<ProductPriceTierDto>) =
+        products.replaceProductPriceTiers(productId, tiers)
     override suspend fun getPaginatedStockDetail(limit: Int, offset: Int, search: String?) =
         stock.getPaginatedStockDetail(limit, offset, search)
 

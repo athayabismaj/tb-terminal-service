@@ -165,11 +165,17 @@ class PurchasingService(
         )
     }
 
-    suspend fun getPurchases(page: Int, limit: Int, supplierId: String?): PaginatedResponse<PurchaseSummary> {
+    suspend fun getPurchases(
+        page: Int,
+        limit: Int,
+        supplierId: String?,
+        startDate: String? = null,
+        endDate: String? = null
+    ): PaginatedResponse<PurchaseSummary> {
         val safePage = if (page < 1) 1 else page
         val safeLimit = if (limit < 1) 20 else limit
         val supplierUuid = supplierId?.let { parseUUID(it) }
-        return repository.getPaginatedPurchases(safePage, safeLimit, supplierUuid)
+        return repository.getPaginatedPurchases(safePage, safeLimit, supplierUuid, startDate, endDate)
     }
 
     suspend fun getPurchaseById(id: String): PurchaseResponse {

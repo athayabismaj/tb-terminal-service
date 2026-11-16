@@ -1,6 +1,7 @@
 package com.service.tbterminal.sales
 
 import com.service.tbterminal.shared.ApiResponse
+import com.service.tbterminal.shared.ForbiddenException
 import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.getUserRole
@@ -57,18 +58,24 @@ fun Application.salesRoutes() {
                         }
                     }
 
-                    // POST buka sesi kasir baru
+                    // POST buka sesi kasir baru (hanya kasir)
                     post("/open") {
                         call.requirePermission(Permission.OPERATE_POS)
+                        if (call.getUserRole() != Role.KASIR) {
+                            throw ForbiddenException("Hanya kasir yang dapat membuka sesi kasir baru")
+                        }
                         val userId = call.getUserId()
                         val request = call.receive<OpenSessionRequest>()
                         val session = service.openSession(userId, request)
                         call.respond(HttpStatusCode.Created, ApiResponse.success(session, "Sesi kasir berhasil dibuka"))
                     }
 
-                    // POST sync sesi kas lokal yang dibuka saat offline
+                    // POST sync sesi kas lokal yang dibuka saat offline (hanya kasir)
                     post("/sync/open") {
                         call.requirePermission(Permission.OPERATE_POS)
+                        if (call.getUserRole() != Role.KASIR) {
+                            throw ForbiddenException("Hanya kasir yang dapat membuka sesi kasir baru")
+                        }
                         val userId = call.getUserId()
                         val request = call.receive<OfflineCashSessionOpenSyncRequest>()
                         val syncResult = service.syncOpenCashSession(userId, request)
@@ -146,6 +153,25 @@ fun Application.salesRoutes() {
                         val sessionId = call.parameters["sessionId"]
                             ?: throw com.service.tbterminal.shared.ValidationException("Session ID wajib diisi")
                         call.respond(HttpStatusCode.OK, ApiResponse.success(service.getSessionById(sessionId)))
+                    }
+
+                    // POST tutup sesi kasir menggantung oleh Admin / Owner (Supervisi)
+                    post("/{sessionId}/force-close") {
+                        call.requirePermission(Permission.MANAGE_CASH_SESSIONS)
+                        val adminUserId = call.getUserId()
+                        val sessionId = call.parameters["sessionId"]
+                            ?: throw com.service.tbterminal.shared.ValidationException("Session ID wajib diisi")
+                        val request = call.receive<CloseSessionRequest>()
+                        val session = service.forceCloseSession(adminUserId, sessionId, request)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = adminUserId,
+                            action = AuditAction.UPDATE,
+                            schemaName = "sales",
+                            tableName = "cash_sessions",
+                            recordId = sessionId
+                        )
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(session, "Sesi kasir berhasil ditutup oleh supervisor"))
                     }
                 }
 

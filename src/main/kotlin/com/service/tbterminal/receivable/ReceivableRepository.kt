@@ -5,6 +5,7 @@ import com.service.tbterminal.sales.TransactionsTable
 import com.service.tbterminal.sales.TrxStatus
 import com.service.tbterminal.sales.PaymentsTable
 import com.service.tbterminal.sales.PaymentMethod
+import com.service.tbterminal.sales.PaymentSource
 import com.service.tbterminal.sales.CashSessionsTable
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.ValidationException
@@ -421,6 +422,7 @@ class ReceivableRepositoryImpl : ReceivableRepository {
                 it[this.transactionId] = transactionId
                 it[this.method] = method.toSalesPaymentMethod()
                 it[this.amount] = paymentAmount
+                it[this.paymentSource] = PaymentSource.RECEIVABLE
             }
             insertAudit(userId, AuditAction.INSERT, "payments", salesPaymentId, schema = "sales")
             insertAudit(userId, AuditAction.UPDATE, "transactions", transactionId, schema = "sales")
@@ -518,6 +520,7 @@ class ReceivableRepositoryImpl : ReceivableRepository {
                 it[method] = original[ReceivablePaymentsTable.method].toSalesPaymentMethod()
                 it[amount] = original[ReceivablePaymentsTable.amount].negate()
                 it[reference] = "REVERSAL:${original[ReceivablePaymentsTable.paymentNumber]}"
+                it[paymentSource] = PaymentSource.RECEIVABLE
             }
             insertAudit(userId, AuditAction.INSERT, "payments", salesReversalId, schema = "sales")
             insertAudit(userId, AuditAction.UPDATE, "transactions", transactionId, schema = "sales")

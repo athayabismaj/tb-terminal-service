@@ -145,6 +145,8 @@ class AnalyticsRepository {
                     t.total,
                     t.gross_subtotal,
                     t.total_discount_amount,
+                    t.tax_amount,
+                    t.rounding_amount,
                     CASE
                         WHEN r.id IS NULL THEN GREATEST(t.total - t.paid_amount, 0)
                         ELSE GREATEST(r.amount - r.paid_amount, 0)
@@ -157,6 +159,8 @@ class AnalyticsRepository {
                 COUNT(id) AS transaction_count,
                 COALESCE(SUM(gross_subtotal), 0)::numeric AS gross_revenue,
                 COALESCE(SUM(total_discount_amount), 0)::numeric AS discount_amount,
+                COALESCE(SUM(tax_amount), 0)::numeric AS tax_amount,
+                COALESCE(SUM(rounding_amount), 0)::numeric AS rounding_amount,
                 COALESCE(SUM(LEAST(total, GREATEST(total - remaining_amount, 0))), 0)::numeric AS paid_amount
             FROM transaction_report
             """
@@ -165,6 +169,8 @@ class AnalyticsRepository {
                 transactionCount = row.getLong("transaction_count"),
                 grossRevenue = row.getBigDecimalOrZero("gross_revenue"),
                 discountAmount = row.getBigDecimalOrZero("discount_amount"),
+                taxAmount = row.getBigDecimalOrZero("tax_amount"),
+                roundingAmount = row.getBigDecimalOrZero("rounding_amount"),
                 paidAmount = row.getBigDecimalOrZero("paid_amount"),
                 outstandingAmount = BigDecimal.ZERO,
                 grossProfit = BigDecimal.ZERO
@@ -429,7 +435,7 @@ class AnalyticsRepository {
 
         when (type) {
             CsvExportType.TRANSACTIONS -> CsvPage(
-                headers = listOf("nomor_transaksi", "tanggal", "status", "kasir", "pelanggan", "subtotal_kotor", "diskon_item", "tipe_diskon_transaksi", "nilai_diskon_transaksi", "diskon_transaksi", "total_diskon", "total_bersih", "dibayar", "metode_pembayaran", "catatan"),
+                headers = listOf("nomor_transaksi", "tanggal", "status", "kasir", "pelanggan", "subtotal_kotor", "diskon_item", "tipe_diskon_transaksi", "nilai_diskon_transaksi", "diskon_transaksi", "total_diskon", "pajak", "pembulatan", "total_bersih", "dibayar", "metode_pembayaran", "catatan"),
                 rows = queryList(
                     """
                     SELECT t.receipt_number, t.created_at::text, t.status::text, u.name AS cashier,
@@ -437,7 +443,8 @@ class AnalyticsRepository {
                            t.item_discount_total::text,
                            COALESCE(t.transaction_discount_type, '') AS transaction_discount_type,
                            t.transaction_discount_value::text, t.transaction_discount_amount::text,
-                           t.total_discount_amount::text, t.total::text, t.paid_amount::text,
+                           t.total_discount_amount::text, t.tax_amount::text, t.rounding_amount::text,
+                           t.total::text, t.paid_amount::text,
                            COALESCE(STRING_AGG(DISTINCT p.method::text, '|' ORDER BY p.method::text), '') AS methods,
                            COALESCE(t.notes, '') AS notes
                     FROM sales.transactions t
@@ -449,18 +456,19 @@ class AnalyticsRepository {
                     ORDER BY t.created_at, t.id
                     $paging
                     """
-                ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("cashier"), r.str("customer"), r.str("gross_subtotal"), r.str("item_discount_total"), r.str("transaction_discount_type"), r.str("transaction_discount_value"), r.str("transaction_discount_amount"), r.str("total_discount_amount"), r.str("total"), r.str("paid_amount"), r.str("methods"), r.str("notes")) }
+                ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("cashier"), r.str("customer"), r.str("gross_subtotal"), r.str("item_discount_total"), r.str("transaction_discount_type"), r.str("transaction_discount_value"), r.str("transaction_discount_amount"), r.str("total_discount_amount"), r.str("tax_amount"), r.str("rounding_amount"), r.str("total"), r.str("paid_amount"), r.str("methods"), r.str("notes")) }
             )
 
             CsvExportType.SALES_DETAILS -> CsvPage(
-                headers = listOf("nomor_transaksi", "tanggal", "status", "sku", "produk", "kategori", "satuan", "jumlah", "harga_snapshot", "hpp_snapshot", "total_kotor", "tipe_diskon", "nilai_diskon", "nominal_diskon", "total_bersih"),
+                headers = listOf("nomor_transaksi", "tanggal", "status", "sku", "produk", "kategori", "satuan", "jumlah", "harga_snapshot", "hpp_snapshot", "total_kotor", "tipe_diskon", "nilai_diskon", "nominal_diskon", "total_bersih", "catatan_item"),
                 rows = queryList(
                     """
                     SELECT t.receipt_number, t.created_at::text, t.status::text, p.sku, p.name AS product,
                            c.name AS category, u.symbol AS unit, ti.quantity::text,
                            ti.price_at_transaction::text, ti.cogs_at_transaction::text,
                            ti.gross_line_total::text, COALESCE(ti.discount_type, '') AS discount_type,
-                           ti.discount_value::text, ti.discount::text, ti.subtotal::text
+                           ti.discount_value::text, ti.discount::text, ti.subtotal::text,
+                           COALESCE(ti.note, '') AS item_note
                     FROM sales.transaction_items ti
                     JOIN sales.transactions t ON t.id = ti.transaction_id
                     JOIN inventory.products p ON p.id = ti.product_id
@@ -470,7 +478,7 @@ class AnalyticsRepository {
                     ORDER BY t.created_at, t.id, ti.id
                     $paging
                     """
-                ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("sku"), r.str("product"), r.str("category"), r.str("unit"), r.str("quantity"), r.str("price_at_transaction"), r.str("cogs_at_transaction"), r.str("gross_line_total"), r.str("discount_type"), r.str("discount_value"), r.str("discount"), r.str("subtotal")) }
+                ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("sku"), r.str("product"), r.str("category"), r.str("unit"), r.str("quantity"), r.str("price_at_transaction"), r.str("cogs_at_transaction"), r.str("gross_line_total"), r.str("discount_type"), r.str("discount_value"), r.str("discount"), r.str("subtotal"), r.str("item_note")) }
             )
 
             CsvExportType.STOCK -> {

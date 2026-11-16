@@ -18,6 +18,9 @@ import com.service.tbterminal.sales.RefundService
 import com.service.tbterminal.sales.DiscountRepository
 import com.service.tbterminal.sales.DiscountRepositoryImpl
 import com.service.tbterminal.sales.DiscountService
+import com.service.tbterminal.sales.QuotationRepository
+import com.service.tbterminal.sales.QuotationRepositoryImpl
+import com.service.tbterminal.sales.QuotationService
 import com.service.tbterminal.system.SystemRepository
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.UserSessionService
@@ -47,6 +50,8 @@ val appModule = module {
     single { SalesService(get()) }
     single<RefundRepository> { RefundRepositoryImpl(get()) }
     single { RefundService(get()) }
+    single<QuotationRepository> { QuotationRepositoryImpl() }
+    single { QuotationService(get()) }
 
     // Receivable Module
     single<ReceivableRepository> { ReceivableRepositoryImpl() }

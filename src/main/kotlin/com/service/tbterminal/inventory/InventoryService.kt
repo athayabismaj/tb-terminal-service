@@ -216,7 +216,26 @@ class InventoryService(private val repository: InventoryRepository) {
             secondaryUnitFactor = secondaryUnitFactor
         )
 
+        request.priceTiers?.let { repository.replaceProductPriceTiers(uuid, it) }
+
         return repository.getProductById(uuid)!!
+    }
+
+    suspend fun getProductPriceTiers(productId: String): List<ProductPriceTierDto> {
+        val uuid = parseInventoryUUID(productId)
+        repository.getProductByIdIncludingInactive(uuid)
+            ?: throw NotFoundException("Product not found")
+        return repository.getProductPriceTiers(uuid)
+    }
+
+    suspend fun updateProductPriceTiers(
+        productId: String,
+        tiers: List<ProductPriceTierDto>
+    ): List<ProductPriceTierDto> {
+        val uuid = parseInventoryUUID(productId)
+        repository.getProductByIdIncludingInactive(uuid)
+            ?: throw NotFoundException("Product not found")
+        return repository.replaceProductPriceTiers(uuid, tiers)
     }
 
     suspend fun deleteProduct(id: String) {

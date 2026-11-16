@@ -150,6 +150,8 @@ data class SalesReportTotals(
     val transactionCount: Long,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossRevenue: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val discountAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val taxAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val roundingAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val paidAmount: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val outstandingAmount: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossProfit: java.math.BigDecimal,

@@ -125,7 +125,15 @@ class SystemService(private val repo: SystemRepository) {
         return repo.getPaginatedUsers(safePage, safeLimit, search)
     }
 
-    suspend fun getAuditLogs(actorRole: String, page: Int, limit: Int, action: String?, range: String?): PaginatedResponse<AuditLogResponse> {
+    suspend fun getAuditLogs(
+        actorRole: String,
+        page: Int,
+        limit: Int,
+        action: String?,
+        range: String?,
+        startDate: String? = null,
+        endDate: String? = null
+    ): PaginatedResponse<AuditLogResponse> {
         AccessPolicy.require(actorRole, Permission.VIEW_AUDIT_LOG)
         val safePage = if (page < 1) 1 else page
         val safeLimit = limit.coerceIn(1, 100)
@@ -135,9 +143,18 @@ class SystemService(private val repo: SystemRepository) {
                 runCatching { AuditAction.valueOf(rawAction.uppercase()) }
                     .getOrElse { throw ValidationException("Tipe aktivitas tidak valid") }
             }
-        val since = range.toAuditRangeStart()
+        val zone = ZoneId.of("Asia/Jakarta")
+        val since = when {
+            !startDate.isNullOrBlank() -> runCatching { LocalDate.parse(startDate).atStartOfDay(zone).toOffsetDateTime() }.getOrNull()
+            else -> range.toAuditRangeStart()
+        }
+        val until = when {
+            !endDate.isNullOrBlank() -> runCatching { LocalDate.parse(endDate).plusDays(1).atStartOfDay(zone).toOffsetDateTime() }.getOrNull()
+            !startDate.isNullOrBlank() -> runCatching { LocalDate.parse(startDate).plusDays(1).atStartOfDay(zone).toOffsetDateTime() }.getOrNull()
+            else -> null
+        }
 
-        return repo.getPaginatedAuditLogs(safePage, safeLimit, auditAction, since)
+        return repo.getPaginatedAuditLogs(safePage, safeLimit, auditAction, since, until)
     }
 
     suspend fun getUserById(actorRole: String, id: String): UserResponse {
@@ -296,13 +313,14 @@ class SystemService(private val repo: SystemRepository) {
     private fun String?.toAuditRangeStart(): OffsetDateTime? {
         val value = this?.lowercase()?.takeIf(String::isNotBlank) ?: return null
         val now = OffsetDateTime.now()
-        val zone = ZoneId.systemDefault()
+        val zone = ZoneId.of("Asia/Jakarta")
 
         return when (value) {
             "today" -> LocalDate.now(zone).atStartOfDay(zone).toOffsetDateTime()
             "7d" -> now.minus(Duration.ofDays(7))
             "30d" -> now.minus(Duration.ofDays(30))
-            else -> throw ValidationException("Filter tanggal tidak valid")
+            else -> runCatching { LocalDate.parse(value).atStartOfDay(zone).toOffsetDateTime() }.getOrNull()
+                ?: throw ValidationException("Filter tanggal tidak valid")
         }
     }
 
@@ -325,6 +343,39 @@ class SystemService(private val repo: SystemRepository) {
                 throw ValidationException("Batas diskon Kasir harus 0-100 dan maksimal 2 angka desimal")
             }
         }
+        val normalizedTaxRate = request.taxRate?.let { rate ->
+            if (rate < java.math.BigDecimal.ZERO || rate > java.math.BigDecimal("100") || rate.scale() > 2) {
+                throw ValidationException("Tarif pajak harus antara 0-100 dan maksimal 2 angka desimal")
+            }
+            rate.setScale(2, java.math.RoundingMode.HALF_UP)
+        }
+        val parsedTaxMode = request.taxMode?.let { raw ->
+            runCatching { TaxMode.valueOf(raw.trim().uppercase()) }.getOrElse {
+                throw ValidationException("Mode pajak tidak valid. Gunakan EXCLUDE atau INCLUDE")
+            }
+        }
+        val normalizedTaxLabel = request.taxLabel?.let { raw ->
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty() || trimmed.length > 50) {
+                throw ValidationException("Label pajak harus 1-50 karakter")
+            }
+            trimmed
+        }
+        val normalizedNpwp = request.storeNpwp?.trim()?.also { npwp ->
+            if (npwp.length > 50) {
+                throw ValidationException("NPWP toko maksimal 50 karakter")
+            }
+        }?.takeIf { it.isNotEmpty() }
+        request.cashRoundingUnit?.let { unit ->
+            if (unit !in setOf(0, 100, 500, 1000)) {
+                throw ValidationException("Kelipatan pembulatan tunai harus 0, 100, 500, atau 1000")
+            }
+        }
+        val parsedRoundingRule = request.cashRoundingRule?.let { raw ->
+            runCatching { CashRoundingRule.valueOf(raw.trim().uppercase()) }.getOrElse {
+                throw ValidationException("Aturan pembulatan tunai tidak valid. Gunakan NEAREST, DOWN, atau UP")
+            }
+        }
 
         // printerSize dipertahankan pada DTO legacy agar klien lama tidak gagal
         // melakukan decoding. Nilainya tidak lagi menjadi konfigurasi global server.
@@ -336,7 +387,15 @@ class SystemService(private val repo: SystemRepository) {
             receiptHeader = request.receiptHeader?.trim(),
             receiptFooter = request.receiptFooter?.trim(),
             cashierDiscountLimitPercent = request.cashierDiscountLimitPercent
-                ?.setScale(2, java.math.RoundingMode.HALF_UP)
+                ?.setScale(2, java.math.RoundingMode.HALF_UP),
+            taxEnabled = request.taxEnabled,
+            taxRate = normalizedTaxRate,
+            taxMode = parsedTaxMode,
+            taxLabel = normalizedTaxLabel,
+            updateStoreNpwp = request.storeNpwp != null,
+            storeNpwp = normalizedNpwp,
+            cashRoundingUnit = request.cashRoundingUnit,
+            cashRoundingRule = parsedRoundingRule
         )
     }
 

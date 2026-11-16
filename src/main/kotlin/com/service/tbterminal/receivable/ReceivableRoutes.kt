@@ -70,9 +70,9 @@ fun Application.receivableRoutes() {
                         call.respond(HttpStatusCode.OK, ApiResponse.success(customer))
                     }
 
-                    // POST buat pelanggan baru — hanya ADMIN/OWNER
+                    // POST buat pelanggan baru — akses semua role (termasuk kasir saat transaksi/piutang)
                     post {
-                        call.requirePermission(Permission.MANAGE_RECEIVABLES)
+                        call.requirePermission(Permission.USE_RECEIVABLES)
                         val actorUserId = call.getUserId()
                         val request = call.receive<CustomerRequest>()
                         val customer = service.createCustomer(request)

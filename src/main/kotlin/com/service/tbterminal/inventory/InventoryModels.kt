@@ -87,6 +87,28 @@ object UnitConversionsTable : Table("inventory.unit_conversions") {
     override val primaryKey = PrimaryKey(id)
 }
 
+object ProductPriceTiersTable : Table("inventory.product_price_tiers") {
+    val id = uuid("id").databaseGenerated()
+    val productId = uuid("product_id").references(ProductsTable.id)
+    val minQty = decimal("min_qty", 10, 2)
+    val unitPrice = decimal("unit_price", 15, 2)
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+@Serializable
+data class ProductPriceTierDto(
+    val id: String? = null,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val minQty: java.math.BigDecimal,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val unitPrice: java.math.BigDecimal,
+)
+
+@Serializable
+data class UpdateProductPriceTiersRequest(
+    val tiers: List<ProductPriceTierDto> = emptyList(),
+)
+
 object StockTable : Table("inventory.stock") {
     val id = uuid("id").databaseGenerated()
     val productId = uuid("product_id").references(ProductsTable.id)
@@ -112,7 +134,8 @@ data class ProductResponse(
     val photoFilename: String?,
     val isActive: Boolean,
     val secondaryUnitId: String? = null,
-    val secondaryUnitFactor: String? = null
+    val secondaryUnitFactor: String? = null,
+    val priceTiers: List<ProductPriceTierDto> = emptyList()
 )
 
 @Serializable
@@ -128,7 +151,8 @@ data class ProductCreateRequest(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val minStock: java.math.BigDecimal,
     val photoFilename: String? = null,
     val secondaryUnitId: String? = null,
-    val secondaryUnitFactor: String? = null
+    val secondaryUnitFactor: String? = null,
+    val priceTiers: List<ProductPriceTierDto>? = null
 )
 
 @Serializable
@@ -143,7 +167,8 @@ data class ProductUpdateRequest(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val minStock: java.math.BigDecimal,
     val photoFilename: String? = null,
     val secondaryUnitId: String? = null,
-    val secondaryUnitFactor: String? = null
+    val secondaryUnitFactor: String? = null,
+    val priceTiers: List<ProductPriceTierDto>? = null
 )
 
 @Serializable
@@ -222,7 +247,8 @@ data class StockDetailResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceRetail: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val priceContractor: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
-    val isActive: Boolean
+    val isActive: Boolean,
+    val priceTiers: List<ProductPriceTierDto> = emptyList()
 )
 
 @Serializable

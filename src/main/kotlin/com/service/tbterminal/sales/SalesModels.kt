@@ -1,6 +1,7 @@
 package com.service.tbterminal.sales
 
 import com.service.tbterminal.system.ManagerApprovalsTable
+import com.service.tbterminal.system.TaxMode
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
@@ -205,6 +206,13 @@ enum class TrxType(val dbValue: String) {
     RETUR_MASUK("retur_masuk")
 }
 
+enum class PaymentSource {
+    CHECKOUT,
+    RECEIVABLE,
+    VOID_REVERSAL,
+    REFUND_REVERSAL
+}
+
 // ==========================================
 // EXPOSED TABLES — POS
 // ==========================================
@@ -231,6 +239,13 @@ object TransactionsTable : Table("sales.transactions") {
     val transactionDiscountValue = decimal("transaction_discount_value", 15, 2).default(java.math.BigDecimal.ZERO)
     val transactionDiscountAmount = decimal("transaction_discount_amount", 15, 2).default(java.math.BigDecimal.ZERO)
     val totalDiscountAmount = decimal("total_discount_amount", 15, 2).default(java.math.BigDecimal.ZERO)
+    val taxEnabled = bool("tax_enabled").default(false)
+    val taxMode = enumerationByName<TaxMode>("tax_mode", 20).nullable()
+    val taxRate = decimal("tax_rate", 5, 2).default(java.math.BigDecimal.ZERO)
+    val taxLabel = varchar("tax_label", 50).nullable()
+    val taxableBase = decimal("taxable_base", 15, 2).default(java.math.BigDecimal.ZERO)
+    val taxAmount = decimal("tax_amount", 15, 2).default(java.math.BigDecimal.ZERO)
+    val roundingAmount = decimal("rounding_amount", 15, 2).default(java.math.BigDecimal.ZERO)
     val discountManagerApprovalId = uuid("discount_manager_approval_id").references(ManagerApprovalsTable.id).nullable()
     val dpAmount = decimal("dp_amount", 15, 2)
     val paidAmount = decimal("paid_amount", 15, 2)
@@ -263,6 +278,7 @@ object TransactionItemsTable : Table("sales.transaction_items") {
     val discountType = enumerationByName<DiscountType>("discount_type", 20).nullable()
     val discountValue = decimal("discount_value", 15, 2).default(java.math.BigDecimal.ZERO)
     val subtotal = decimal("subtotal", 15, 2)
+    val note = text("note").nullable()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -277,6 +293,7 @@ object PaymentsTable : Table("sales.payments") {
     )
     val amount = decimal("amount", 15, 2)
     val reference = varchar("reference", 100).nullable()
+    val paymentSource = enumerationByName<PaymentSource>("payment_source", 30).default(PaymentSource.CHECKOUT)
     val transactionVoidId = uuid("transaction_void_id").nullable()
     val transactionRefundId = uuid("transaction_refund_id").nullable()
     val paidAt = timestampWithTimeZone("paid_at").databaseGenerated()
@@ -301,6 +318,14 @@ object TransactionVoidsTable : Table("sales.transaction_voids") {
 // ==========================================
 
 @Serializable
+data class CheckoutPaymentLineRequest(
+    val method: String, // "tunai", "transfer", "qris"
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val reference: String? = null
+)
+
+@Serializable
 data class CheckoutItemRequest(
     val productId: String,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
@@ -308,7 +333,8 @@ data class CheckoutItemRequest(
     @Deprecated("Client baru wajib memakai discountRequest; field ini hanya untuk backward compatibility")
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
-    val discountRequest: DiscountRequest? = null
+    val discountRequest: DiscountRequest? = null,
+    val note: String? = null
 )
 
 @Serializable
@@ -316,9 +342,10 @@ data class CheckoutRequest(
     val idempotencyKey: String,
     val customerId: String? = null,       // null = pelanggan umum
     val items: List<CheckoutItemRequest>,
-    val paymentMethod: String,             // "tunai", "transfer", "qris", "hutang", "dp"
+    val paymentMethod: String = "",       // "tunai", "transfer", "qris", "hutang", "dp" (atau opsional saat pakai payments)
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
-    val amountPaid: java.math.BigDecimal,
+    val amountPaid: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    val payments: List<CheckoutPaymentLineRequest>? = null,
     val notes: String? = null,
     val dueDays: Int = 30,                // Termin piutang jika TEMPO/HUTANG (hari)
     val transactionDiscount: DiscountRequest? = null,
@@ -329,7 +356,8 @@ data class CheckoutRequest(
 @Serializable
 data class CheckoutPreviewRequest(
     val items: List<CheckoutItemRequest>,
-    val transactionDiscount: DiscountRequest? = null
+    val transactionDiscount: DiscountRequest? = null,
+    val customerId: String? = null,
 )
 
 @Serializable
@@ -370,7 +398,24 @@ data class CheckoutPreviewResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val cashierDiscountLimitPercent: java.math.BigDecimal,
     val approvalRequired: Boolean,
-    val expiresAt: String
+    val expiresAt: String,
+    val taxEnabled: Boolean = false,
+    val taxMode: String? = null,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxRate: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    val taxLabel: String? = null,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxableBase: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val totalWithTax: java.math.BigDecimal = netTotal,
+    val cashRoundingUnit: Int = 0,
+    val cashRoundingRule: String = "NEAREST",
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val estimatedCashRoundingAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val estimatedTotalWithCashRounding: java.math.BigDecimal = totalWithTax
 )
 
 @Serializable
@@ -407,7 +452,8 @@ data class OfflineCheckoutItemRequest(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
-    val subtotal: java.math.BigDecimal
+    val subtotal: java.math.BigDecimal,
+    val note: String? = null
 )
 
 @Serializable
@@ -418,7 +464,7 @@ data class OfflineCheckoutSyncRequest(
     val cashierUserId: String,
     val cashSessionId: String,
     val customerId: String? = null,
-    val paymentMethod: String,
+    val paymentMethod: String = "",
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val subtotal: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
@@ -432,7 +478,19 @@ data class OfflineCheckoutSyncRequest(
     val occurredAt: String,
     val note: String? = null,
     val dueDays: Int = 30,
-    val items: List<OfflineCheckoutItemRequest>
+    val items: List<OfflineCheckoutItemRequest>,
+    val payments: List<CheckoutPaymentLineRequest>? = null,
+    val taxEnabled: Boolean = false,
+    val taxMode: String? = null,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxRate: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    val taxLabel: String? = null,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxableBase: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val roundingAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO
 )
 
 @Serializable
@@ -464,7 +522,19 @@ data class TransactionItemResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val discount: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
-    val subtotal: java.math.BigDecimal
+    val subtotal: java.math.BigDecimal,
+    val note: String? = null
+)
+
+@Serializable
+data class TransactionPaymentResponse(
+    val id: String,
+    val method: String,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val amount: java.math.BigDecimal,
+    val reference: String? = null,
+    val paymentSource: String = PaymentSource.CHECKOUT.name,
+    val paidAt: String
 )
 
 @Serializable
@@ -478,6 +548,7 @@ data class TransactionResponse(
     val userId: String,
     val cashierName: String? = null,
     val paymentMethods: List<String> = emptyList(),
+    val payments: List<TransactionPaymentResponse> = emptyList(),
     val type: String,
     val status: String,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
@@ -493,6 +564,17 @@ data class TransactionResponse(
     val totalDiscountAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val effectiveDiscountPercent: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    val taxEnabled: Boolean = false,
+    val taxMode: String? = null,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxRate: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    val taxLabel: String? = null,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxableBase: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val taxAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val roundingAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     val discountManagerApprovalId: String? = null,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val total: java.math.BigDecimal,

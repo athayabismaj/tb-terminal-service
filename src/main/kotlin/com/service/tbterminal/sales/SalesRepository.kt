@@ -20,6 +20,9 @@ import com.service.tbterminal.shared.StockInsufficientException
 import com.service.tbterminal.shared.ValidationException
 import com.service.tbterminal.shared.ManagerApprovalError
 import com.service.tbterminal.shared.ManagerApprovalException
+import com.service.tbterminal.system.CashRoundingRule
+import com.service.tbterminal.system.StoreSettingsTable
+import com.service.tbterminal.system.TaxMode
 import com.service.tbterminal.system.UsersTable
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.AuditLogsTable
@@ -63,7 +66,8 @@ interface SalesRepository {
         closingCash: java.math.BigDecimal,
         systemCash: java.math.BigDecimal,
         difference: java.math.BigDecimal,
-        notes: String?
+        notes: String?,
+        closedByUserId: UUID? = null
     ): Boolean
 
     // POS
@@ -134,7 +138,8 @@ data class ResolvedItem(
     val discountType: DiscountType?,
     val discountValue: java.math.BigDecimal,
     val discount: java.math.BigDecimal,
-    val subtotal: java.math.BigDecimal
+    val subtotal: java.math.BigDecimal,
+    val note: String? = null
 )
 
 data class IdempotentCheckout(
@@ -152,7 +157,8 @@ data class OfflineCheckoutSyncItemCommand(
     val discountType: DiscountType?,
     val discountValue: java.math.BigDecimal,
     val discount: java.math.BigDecimal,
-    val subtotal: java.math.BigDecimal
+    val subtotal: java.math.BigDecimal,
+    val note: String? = null
 )
 
 data class CheckoutCommand(
@@ -161,8 +167,9 @@ data class CheckoutCommand(
     val customerId: UUID?,
     val requestItems: List<CheckoutItemRequest>,
     val transactionDiscount: DiscountRequest?,
-    val paymentMethod: PaymentMethod,
+    val paymentMethod: PaymentMethod?,
     val amountPaid: BigDecimal,
+    val paymentLines: List<CheckoutPaymentLineRequest>? = null,
     val notes: String?,
     val dueDays: Int,
     val idempotencyKey: String,
@@ -177,14 +184,22 @@ data class OfflineCheckoutSyncCommand(
     val cashierUserId: UUID,
     val cashSessionId: UUID,
     val customerId: UUID?,
-    val paymentMethod: PaymentMethod,
+    val paymentMethod: PaymentMethod?,
+    val paymentLines: List<CheckoutPaymentLineRequest>? = null,
     val total: java.math.BigDecimal,
     val paidAmount: java.math.BigDecimal,
     val remainingAmount: java.math.BigDecimal,
     val occurredAt: OffsetDateTime,
     val note: String?,
     val dueDays: Int,
-    val items: List<OfflineCheckoutSyncItemCommand>
+    val items: List<OfflineCheckoutSyncItemCommand>,
+    val taxEnabled: Boolean = false,
+    val taxMode: TaxMode? = null,
+    val taxRate: java.math.BigDecimal = BigDecimal.ZERO,
+    val taxLabel: String? = null,
+    val taxableBase: java.math.BigDecimal = BigDecimal.ZERO,
+    val taxAmount: java.math.BigDecimal = BigDecimal.ZERO,
+    val roundingAmount: java.math.BigDecimal = BigDecimal.ZERO
 )
 
 data class OfflineCashSessionOpenSyncCommand(
@@ -475,7 +490,8 @@ class SalesRepositoryImpl(
         closingCash: java.math.BigDecimal,
         systemCash: java.math.BigDecimal,
         difference: java.math.BigDecimal,
-        notes: String?
+        notes: String?,
+        closedByUserId: UUID?
     ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val session = CashSessionsTable.select { CashSessionsTable.id eq sessionId }
             .forUpdate()
@@ -496,7 +512,7 @@ class SalesRepositoryImpl(
         }
         if (updatedRows > 0) {
             insertCheckoutAudit(
-                session[CashSessionsTable.userId],
+                closedByUserId ?: session[CashSessionsTable.userId],
                 "sales",
                 "cash_sessions",
                 sessionId,
@@ -706,12 +722,41 @@ class SalesRepositoryImpl(
         }
 
         val lockedStockIds = lockAndValidateStocks(command.requestItems)
-        val (resolvedItems, discountCalculation) = resolveItemsForCheckout(command.requestItems, command.transactionDiscount)
-        val totalAmount = discountCalculation.netTotal
+        val (resolvedItems, discountCalculation) = resolveItemsForCheckout(
+            items = command.requestItems,
+            transactionDiscount = command.transactionDiscount,
+            customerId = command.customerId
+        )
+        val settingsRow = StoreSettingsTable.selectAll().limit(1).singleOrNull()
+        val discountLimit = settingsRow?.get(StoreSettingsTable.cashierDiscountLimitPercent)
+            ?: discountRepository.cashierLimitInCurrentTransaction()
+        val taxConfig = StoreTaxRoundingConfig(
+            taxEnabled = settingsRow?.get(StoreSettingsTable.taxEnabled) ?: false,
+            taxRate = settingsRow?.get(StoreSettingsTable.taxRate) ?: TaxAndRoundingCalculator.DEFAULT_TAX_RATE,
+            taxMode = settingsRow?.get(StoreSettingsTable.taxMode) ?: TaxMode.EXCLUDE,
+            taxLabel = settingsRow?.get(StoreSettingsTable.taxLabel) ?: TaxAndRoundingCalculator.DEFAULT_TAX_LABEL,
+            cashRoundingUnit = settingsRow?.get(StoreSettingsTable.cashRoundingUnit) ?: 0,
+            cashRoundingRule = settingsRow?.get(StoreSettingsTable.cashRoundingRule) ?: CashRoundingRule.NEAREST
+        )
+        val taxCalculation = TaxAndRoundingCalculator.calculateTax(discountCalculation.netTotal, taxConfig)
+        val hasCashPayment = if (command.paymentLines != null) {
+            command.paymentLines.any {
+                it.method.trim().lowercase() == PaymentMethod.TUNAI.dbValue && it.amount > BigDecimal.ZERO
+            }
+        } else {
+            command.paymentMethod == PaymentMethod.TUNAI
+        }
+        val roundingCalculation = TaxAndRoundingCalculator.calculateCashRounding(
+            totalBeforeRounding = taxCalculation.totalWithTax,
+            hasCashPayment = hasCashPayment,
+            unit = taxConfig.cashRoundingUnit,
+            rule = taxConfig.cashRoundingRule
+        )
+        val totalAmount = roundingCalculation.finalTotal
         val overrideRequired = requiresDiscountOverride(
             command.actorRole,
             discountCalculation.effectiveDiscountPercent,
-            discountRepository.cashierLimitInCurrentTransaction()
+            discountLimit
         )
         val approvalScope = if (overrideRequired) {
             val attemptId = command.checkoutAttemptId ?: throw ManagerApprovalException(
@@ -738,8 +783,13 @@ class SalesRepositoryImpl(
         }
         val validatedApproval: ManagerApprovalRecord? = if (approvalScope == null) null
         else managerApprovalService.validateApprovalInCurrentTransaction(approvalScope)
-        val payment = resolveCheckoutPayment(
-            command.paymentMethod, command.amountPaid, totalAmount, command.customerId, command.dueDays
+        val payment = resolveCheckoutPayments(
+            paymentMethod = command.paymentMethod,
+            requestedAmount = command.amountPaid,
+            paymentLines = command.paymentLines,
+            total = totalAmount,
+            customerId = command.customerId,
+            dueDays = command.dueDays
         )
         val dueDate = if (payment.status == TrxStatus.HUTANG || payment.status == TrxStatus.DP) {
             lockCustomerAndValidateCredit(command.customerId, payment.receivableAmount, command.dueDays)
@@ -765,6 +815,13 @@ class SalesRepositoryImpl(
             it[this.transactionDiscountValue] = discountCalculation.transactionDiscountValue
             it[this.transactionDiscountAmount] = discountCalculation.transactionDiscountAmount
             it[this.totalDiscountAmount] = discountCalculation.totalDiscountAmount
+            it[this.taxEnabled] = taxCalculation.taxEnabled
+            it[this.taxMode] = taxCalculation.taxMode
+            it[this.taxRate] = taxCalculation.taxRate
+            it[this.taxLabel] = taxCalculation.taxLabel
+            it[this.taxableBase] = taxCalculation.taxableBase
+            it[this.taxAmount] = taxCalculation.taxAmount
+            it[this.roundingAmount] = roundingCalculation.roundingAmount
             it[this.discountManagerApprovalId] = validatedApproval?.id
             it[this.dpAmount] = if (payment.status == TrxStatus.DP) payment.paidAmount else BigDecimal.ZERO
             it[this.paidAmount] = payment.paidAmount
@@ -793,19 +850,23 @@ class SalesRepositoryImpl(
                 it[this.discountValue] = item.discountValue
                 it[this.discount] = item.discount
                 it[this.subtotal] = item.subtotal
+                it[this.note] = item.note
             }
             transactionItemId
         }
 
-        // 3. Insert payment record
-        val paymentId = if (payment.paidAmount > BigDecimal.ZERO) UUID.randomUUID() else null
-        if (paymentId != null) {
+        // 3. Insert payment record(s) (mendukung single & split payment)
+        val paymentIds = payment.appliedLines.map { line ->
+            val newPaymentId = UUID.randomUUID()
             PaymentsTable.insert {
-                it[id] = paymentId
+                it[id] = newPaymentId
                 it[this.transactionId] = trxId
-                it[this.method] = command.paymentMethod
-                it[this.amount] = payment.paidAmount
+                it[this.method] = line.method
+                it[this.amount] = line.amount
+                it[this.reference] = line.reference
+                it[this.paymentSource] = PaymentSource.CHECKOUT
             }
+            newPaymentId
         }
 
         // 4. Jika HUTANG/DP — insert ke receivable.receivables
@@ -825,21 +886,21 @@ class SalesRepositoryImpl(
             }
         }
 
-        if (command.paymentMethod == PaymentMethod.TUNAI && payment.paidAmount > BigDecimal.ZERO) {
+        if (payment.cashAppliedTotal > BigDecimal.ZERO) {
             val currentSystemCash = session[CashSessionsTable.systemCash] ?: session[CashSessionsTable.openingCash]
             CashSessionsTable.update({ CashSessionsTable.id eq sessionId }) {
-                it[this.systemCash] = currentSystemCash.add(payment.paidAmount)
+                it[this.systemCash] = currentSystemCash.add(payment.cashAppliedTotal)
             }
         }
 
         insertCheckoutAudit(command.userId, "sales", "transactions", trxId)
         transactionItemIds.forEach { insertCheckoutAudit(command.userId, "sales", "transaction_items", it) }
-        paymentId?.let { insertCheckoutAudit(command.userId, "sales", "payments", it) }
+        paymentIds.forEach { insertCheckoutAudit(command.userId, "sales", "payments", it) }
         receivableId?.let { insertCheckoutAudit(command.userId, "receivable", "receivables", it) }
         lockedStockIds.values.forEach {
             insertCheckoutAudit(command.userId, "inventory", "stock", it, AuditAction.UPDATE)
         }
-        if (command.paymentMethod == PaymentMethod.TUNAI && payment.paidAmount > BigDecimal.ZERO) {
+        if (payment.cashAppliedTotal > BigDecimal.ZERO) {
             insertCheckoutAudit(command.userId, "sales", "cash_sessions", sessionId, AuditAction.UPDATE)
         }
 
@@ -866,9 +927,27 @@ class SalesRepositoryImpl(
                     discountType = row[TransactionItemsTable.discountType]?.name,
                     discountValue = row[TransactionItemsTable.discountValue],
                     discount = row[TransactionItemsTable.discount],
-                    subtotal = row[TransactionItemsTable.subtotal]
+                    subtotal = row[TransactionItemsTable.subtotal],
+                    note = row[TransactionItemsTable.note]
                 )
             }
+        val paymentResponses = PaymentsTable.select { PaymentsTable.transactionId eq trxId }
+            .orderBy(PaymentsTable.paidAt to SortOrder.ASC)
+            .map { row ->
+                TransactionPaymentResponse(
+                    id = row[PaymentsTable.id].toString(),
+                    method = row[PaymentsTable.method].dbValue,
+                    amount = row[PaymentsTable.amount],
+                    reference = row[PaymentsTable.reference],
+                    paymentSource = row[PaymentsTable.paymentSource].name,
+                    paidAt = row[PaymentsTable.paidAt].toString()
+                )
+            }
+        val resolvedMethods = resolveEffectivePaymentMethods(
+            status = trxRow[TransactionsTable.status],
+            directPayments = paymentResponses.map { it.method to it.amount },
+            receivableMethods = emptyList()
+        )
 
         val customerName = trxRow[TransactionsTable.customerId]?.let { cid ->
             CustomersTable.select { CustomersTable.id eq cid }.singleOrNull()?.get(CustomersTable.name)
@@ -881,6 +960,8 @@ class SalesRepositoryImpl(
             customerId = trxRow[TransactionsTable.customerId]?.toString(),
             customerName = customerName,
             userId = trxRow[TransactionsTable.userId].toString(),
+            paymentMethods = resolvedMethods,
+            payments = paymentResponses,
             type = trxRow[TransactionsTable.type].dbValue,
             status = trxRow[TransactionsTable.status].dbValue,
             grossSubtotal = trxRow[TransactionsTable.grossSubtotal],
@@ -892,6 +973,13 @@ class SalesRepositoryImpl(
             effectiveDiscountPercent = DiscountCalculator.effectivePercent(
                 trxRow[TransactionsTable.grossSubtotal], trxRow[TransactionsTable.totalDiscountAmount]
             ),
+            taxEnabled = trxRow[TransactionsTable.taxEnabled],
+            taxMode = trxRow[TransactionsTable.taxMode]?.name,
+            taxRate = trxRow[TransactionsTable.taxRate],
+            taxLabel = trxRow[TransactionsTable.taxLabel],
+            taxableBase = trxRow[TransactionsTable.taxableBase],
+            taxAmount = trxRow[TransactionsTable.taxAmount],
+            roundingAmount = trxRow[TransactionsTable.roundingAmount],
             discountManagerApprovalId = trxRow[TransactionsTable.discountManagerApprovalId]?.toString(),
             total = trxRow[TransactionsTable.total],
             dpAmount = trxRow[TransactionsTable.dpAmount],
@@ -953,12 +1041,22 @@ class SalesRepositoryImpl(
         val itemTotal = resolvedItems.fold(BigDecimal.ZERO) { total, item -> total.add(item.subtotal) }
             .normalizeMoney()
         val totalAmount = command.total.normalizeMoney()
-
-        if (itemTotal.compareTo(totalAmount) != 0) {
-            throw ValidationException("Total transaksi sync tidak sesuai dengan total item")
+        val expectedTaxAdded = if (command.taxEnabled && command.taxMode == TaxMode.EXCLUDE) {
+            command.taxAmount.normalizeMoney()
+        } else {
+            BigDecimal.ZERO.setScale(2)
         }
-        val payment = resolveCheckoutPayment(
-            command.paymentMethod, command.paidAmount, totalAmount, command.customerId, command.dueDays
+        val expectedTotal = itemTotal.add(expectedTaxAdded).add(command.roundingAmount).normalizeMoney()
+        if (expectedTotal.compareTo(totalAmount) != 0) {
+            throw ValidationException("Total transaksi sync tidak sesuai dengan item, pajak, dan pembulatan")
+        }
+        val payment = resolveCheckoutPayments(
+            paymentMethod = command.paymentMethod,
+            requestedAmount = command.paidAmount,
+            paymentLines = command.paymentLines,
+            total = totalAmount,
+            customerId = command.customerId,
+            dueDays = command.dueDays
         )
         val dueDate = if (payment.status == TrxStatus.HUTANG || payment.status == TrxStatus.DP) {
             lockCustomerAndValidateCredit(
@@ -972,7 +1070,6 @@ class SalesRepositoryImpl(
         }
 
         val trxId = UUID.randomUUID()
-        val paymentId = if (payment.paidAmount > BigDecimal.ZERO) UUID.randomUUID() else null
         val receivableId = if (dueDate != null && command.customerId != null) UUID.randomUUID() else null
         val syncedAt = OffsetDateTime.now()
 
@@ -990,6 +1087,13 @@ class SalesRepositoryImpl(
             it[this.transactionDiscountValue] = BigDecimal.ZERO
             it[this.transactionDiscountAmount] = BigDecimal.ZERO
             it[this.totalDiscountAmount] = BigDecimal.ZERO
+            it[this.taxEnabled] = command.taxEnabled
+            it[this.taxMode] = if (command.taxEnabled) command.taxMode else null
+            it[this.taxRate] = if (command.taxEnabled) command.taxRate else BigDecimal.ZERO
+            it[this.taxLabel] = if (command.taxEnabled) command.taxLabel else null
+            it[this.taxableBase] = if (command.taxEnabled) command.taxableBase else BigDecimal.ZERO
+            it[this.taxAmount] = if (command.taxEnabled) command.taxAmount else BigDecimal.ZERO
+            it[this.roundingAmount] = command.roundingAmount
             it[this.discountManagerApprovalId] = null
             it[this.dpAmount] = if (payment.status == TrxStatus.DP) payment.paidAmount else BigDecimal.ZERO
             it[this.paidAmount] = payment.paidAmount
@@ -1018,17 +1122,22 @@ class SalesRepositoryImpl(
                 it[this.discountValue] = item.discountValue
                 it[this.discount] = item.discount
                 it[this.subtotal] = item.subtotal
+                it[this.note] = item.note
             }
             transactionItemId
         }
 
-        if (paymentId != null) {
+        val paymentIds = payment.appliedLines.map { line ->
+            val newPaymentId = UUID.randomUUID()
             PaymentsTable.insert {
-                it[id] = paymentId
+                it[id] = newPaymentId
                 it[this.transactionId] = trxId
-                it[this.method] = command.paymentMethod
-                it[this.amount] = payment.paidAmount
+                it[this.method] = line.method
+                it[this.amount] = line.amount
+                it[this.reference] = line.reference
+                it[this.paymentSource] = PaymentSource.CHECKOUT
             }
+            newPaymentId
         }
 
         if (dueDate != null && command.customerId != null && receivableId != null) {
@@ -1046,10 +1155,10 @@ class SalesRepositoryImpl(
             }
         }
 
-        if (command.paymentMethod == PaymentMethod.TUNAI && payment.paidAmount > BigDecimal.ZERO) {
+        if (payment.cashAppliedTotal > BigDecimal.ZERO) {
             val currentSystemCash = session[CashSessionsTable.systemCash] ?: session[CashSessionsTable.openingCash]
             CashSessionsTable.update({ CashSessionsTable.id eq command.cashSessionId }) {
-                it[this.systemCash] = currentSystemCash.add(payment.paidAmount)
+                it[this.systemCash] = currentSystemCash.add(payment.cashAppliedTotal)
             }
         }
 
@@ -1057,12 +1166,12 @@ class SalesRepositoryImpl(
         transactionItemIds.forEach {
             insertCheckoutAudit(command.cashierUserId, "sales", "transaction_items", it)
         }
-        paymentId?.let { insertCheckoutAudit(command.cashierUserId, "sales", "payments", it) }
+        paymentIds.forEach { insertCheckoutAudit(command.cashierUserId, "sales", "payments", it) }
         receivableId?.let { insertCheckoutAudit(command.cashierUserId, "receivable", "receivables", it) }
         lockedStockIds.values.forEach {
             insertCheckoutAudit(command.cashierUserId, "inventory", "stock", it, AuditAction.UPDATE)
         }
-        if (command.paymentMethod == PaymentMethod.TUNAI && payment.paidAmount > BigDecimal.ZERO) {
+        if (payment.cashAppliedTotal > BigDecimal.ZERO) {
             insertCheckoutAudit(
                 command.cashierUserId, "sales", "cash_sessions", command.cashSessionId, AuditAction.UPDATE
             )
@@ -1073,7 +1182,7 @@ class SalesRepositoryImpl(
             serverTransactionId = trxId.toString(),
             receiptId = TransactionsTable.select { TransactionsTable.id eq trxId }
                 .single()[TransactionsTable.receiptNumber],
-            serverPaymentIds = paymentId?.let { listOf(it.toString()) }.orEmpty(),
+            serverPaymentIds = paymentIds.map { it.toString() },
             serverReceivableId = receivableId?.toString(),
             syncedAt = syncedAt.toString()
         )
@@ -1134,13 +1243,15 @@ class SalesRepositoryImpl(
             discountType = item.discountType,
             discountValue = item.discountValue.normalizeMoney(),
             discount = item.discount.normalizeMoney(),
-            subtotal = requestedSubtotal
+            subtotal = requestedSubtotal,
+            note = item.note
         )
     }
 
     private fun resolveItemsForCheckout(
         items: List<CheckoutItemRequest>,
-        transactionDiscount: DiscountRequest?
+        transactionDiscount: DiscountRequest?,
+        customerId: UUID?
     ): Pair<List<ResolvedItem>, DiscountCalculation> {
         val productIds = items.map { item ->
             runCatching { UUID.fromString(item.productId) }.getOrElse {
@@ -1153,6 +1264,8 @@ class SalesRepositoryImpl(
             .associateBy { it[ProductsTable.id] }
         if (products.size != productIds.size) throw NotFoundException("Satu atau lebih produk tidak ditemukan")
 
+        val pricingContext = loadSalesTierPricingContext(customerId, productIds)
+
         val calculation = DiscountCalculator.calculate(
             items.mapIndexed { index, item ->
                 val productId = productIds[index]
@@ -1163,7 +1276,7 @@ class SalesRepositoryImpl(
                 DiscountItemInput(
                     reference = productId.toString(),
                     quantity = item.qty,
-                    unitPrice = product[ProductsTable.priceRetail],
+                    unitPrice = pricingContext.resolveUnitPrice(product, item.qty),
                     discount = item.discountRequest,
                     legacyPerUnitDiscount = item.discount
                 )
@@ -1171,7 +1284,7 @@ class SalesRepositoryImpl(
             transactionDiscount
         )
         val calculations = calculation.items.associateBy { UUID.fromString(it.reference) }
-        val resolved = items.mapIndexed { index, _ ->
+        val resolved = items.mapIndexed { index, requestItem ->
             val productId = productIds[index]
             val product = requireNotNull(products[productId])
             val line = requireNotNull(calculations[productId])
@@ -1186,7 +1299,8 @@ class SalesRepositoryImpl(
                 discountType = line.discountType,
                 discountValue = line.discountValue,
                 discount = line.discountAmount,
-                subtotal = line.netLineTotal
+                subtotal = line.netLineTotal,
+                note = requestItem.note?.trim()?.takeIf(String::isNotEmpty)
             )
         }
         return resolved to calculation
@@ -1343,7 +1457,8 @@ class SalesRepositoryImpl(
                     discountType = row[TransactionItemsTable.discountType]?.name,
                     discountValue = row[TransactionItemsTable.discountValue],
                     discount = row[TransactionItemsTable.discount],
-                    subtotal = row[TransactionItemsTable.subtotal]
+                    subtotal = row[TransactionItemsTable.subtotal],
+                    note = row[TransactionItemsTable.note]
                 )
             }
 
@@ -1383,8 +1498,23 @@ class SalesRepositoryImpl(
             }
         }
 
-        val directPayments = PaymentsTable.select { PaymentsTable.transactionId eq id }
+        val paymentRows = PaymentsTable.select { PaymentsTable.transactionId eq id }
+            .orderBy(PaymentsTable.paidAt to SortOrder.ASC)
+            .toList()
+        val directPayments = paymentRows
             .map { it[PaymentsTable.method].dbValue to it[PaymentsTable.amount] }
+        val paymentResponses = paymentRows
+            .filter { it[PaymentsTable.amount] > BigDecimal.ZERO }
+            .map { row ->
+                TransactionPaymentResponse(
+                    id = row[PaymentsTable.id].toString(),
+                    method = row[PaymentsTable.method].dbValue,
+                    amount = row[PaymentsTable.amount],
+                    reference = row[PaymentsTable.reference],
+                    paymentSource = row[PaymentsTable.paymentSource].name,
+                    paidAt = row[PaymentsTable.paidAt].toString()
+                )
+            }
 
         val recPaymentMethods = receivableRow?.let { rec ->
             val reversedIds = ReceivablePaymentsTable.select {
@@ -1418,6 +1548,7 @@ class SalesRepositoryImpl(
             userId = userId.toString(),
             cashierName = cashierName,
             paymentMethods = paymentMethods,
+            payments = paymentResponses,
             type = trxRow[TransactionsTable.type].dbValue,
             status = effectiveStatus.dbValue,
             grossSubtotal = trxRow[TransactionsTable.grossSubtotal],
@@ -1429,6 +1560,13 @@ class SalesRepositoryImpl(
             effectiveDiscountPercent = DiscountCalculator.effectivePercent(
                 trxRow[TransactionsTable.grossSubtotal], trxRow[TransactionsTable.totalDiscountAmount]
             ),
+            taxEnabled = trxRow[TransactionsTable.taxEnabled],
+            taxMode = trxRow[TransactionsTable.taxMode]?.name,
+            taxRate = trxRow[TransactionsTable.taxRate],
+            taxLabel = trxRow[TransactionsTable.taxLabel],
+            taxableBase = trxRow[TransactionsTable.taxableBase],
+            taxAmount = trxRow[TransactionsTable.taxAmount],
+            roundingAmount = trxRow[TransactionsTable.roundingAmount],
             discountManagerApprovalId = trxRow[TransactionsTable.discountManagerApprovalId]?.toString(),
             total = trxRow[TransactionsTable.total],
             dpAmount = trxRow[TransactionsTable.dpAmount],
@@ -1583,6 +1721,7 @@ class SalesRepositoryImpl(
                     }
                     it[amount] = payment[ReceivablePaymentsTable.amount].negate()
                     it[reference] = "VOID:$voidId"
+                    it[paymentSource] = PaymentSource.VOID_REVERSAL
                     it[transactionVoidId] = voidId
                 }
                 if (payment[ReceivablePaymentsTable.method] == RecPaymentMethod.TUNAI) {
@@ -1604,23 +1743,32 @@ class SalesRepositoryImpl(
             transactionRow[TransactionsTable.total].subtract(receivableRow[ReceivablesTable.amount]).max(BigDecimal.ZERO)
         } else transactionRow[TransactionsTable.paidAmount]
         if (initialPaid > BigDecimal.ZERO) {
-            val initialPayment = PaymentsTable.select {
-                (PaymentsTable.transactionId eq transactionId) and (PaymentsTable.amount greater BigDecimal.ZERO)
-            }.orderBy(PaymentsTable.paidAt to SortOrder.ASC).limit(1).singleOrNull()
-            if (initialPayment != null) {
+            val initialPayments = PaymentsTable.select {
+                (PaymentsTable.transactionId eq transactionId) and
+                    (PaymentsTable.amount greater BigDecimal.ZERO) and
+                    (PaymentsTable.paymentSource eq PaymentSource.CHECKOUT)
+            }.orderBy(PaymentsTable.paidAt to SortOrder.ASC).toList()
+
+            var remainingToReverse = initialPaid
+            initialPayments.forEach { initialPayment ->
+                if (remainingToReverse <= BigDecimal.ZERO) return@forEach
+                val lineAmount = initialPayment[PaymentsTable.amount].min(remainingToReverse)
+                if (lineAmount <= BigDecimal.ZERO) return@forEach
                 val compensationId = UUID.randomUUID()
                 PaymentsTable.insert {
                     it[id] = compensationId
                     it[this.transactionId] = transactionId
                     it[method] = initialPayment[PaymentsTable.method]
-                    it[amount] = initialPaid.negate()
+                    it[amount] = lineAmount.negate()
                     it[reference] = "VOID:$voidId"
+                    it[paymentSource] = PaymentSource.VOID_REVERSAL
                     it[transactionVoidId] = voidId
                 }
                 if (initialPayment[PaymentsTable.method] == PaymentMethod.TUNAI) {
-                    reverseCashSession(transactionRow[TransactionsTable.sessionId], initialPaid, actorUserId)
+                    reverseCashSession(transactionRow[TransactionsTable.sessionId], lineAmount, actorUserId)
                 }
                 insertCheckoutAudit(actorUserId, "sales", "payments", compensationId)
+                remainingToReverse = remainingToReverse.subtract(lineAmount)
             }
         }
 
@@ -2007,6 +2155,7 @@ class SalesRepositoryImpl(
             it[this.transactionId] = transactionId
             it[this.method] = methodEnum
             it[this.amount] = request.amount
+            it[this.paymentSource] = PaymentSource.RECEIVABLE
         }
         val receivablePaymentId = UUID.randomUUID()
         ReceivablePaymentsTable.insert {
