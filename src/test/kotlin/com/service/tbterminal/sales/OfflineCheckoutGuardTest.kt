@@ -1,6 +1,7 @@
 package com.service.tbterminal.sales
 
 import java.math.BigDecimal
+import java.time.Duration
 import java.time.OffsetDateTime
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -125,31 +126,67 @@ class OfflineCheckoutGuardTest {
     fun `waktu transaksi wajib di dalam rentang sesi`() {
         val opened = OffsetDateTime.parse("2026-11-24T08:00:00+07:00")
         val now = OffsetDateTime.parse("2026-11-24T12:00:00+07:00")
-        assertNull(OfflineCheckoutGuard.validateOccurredAt(opened.plusHours(1), opened, now))
-        assertNotNull(OfflineCheckoutGuard.validateOccurredAt(opened.minusDays(3), opened, now))
-        assertNotNull(OfflineCheckoutGuard.validateOccurredAt(now.plusDays(1), opened, now))
+        OfflineSessionEvent.entries.forEach { event ->
+            fun validate(time: OffsetDateTime) = OfflineCheckoutGuard.validateSessionTime(event, time, opened, now)
+            assertNull(validate(opened.plusHours(1)))
+            assertNull(validate(opened.minusMinutes(5)))
+            assertNotNull(validate(opened.minusMinutes(5).minusSeconds(1)))
+            assertNull(validate(now.plusMinutes(5)))
+            assertNotNull(validate(now.plusMinutes(5).plusSeconds(1)))
+        }
+    }
+
+    @Test
+    fun `pesan waktu sesi menyebut jenis kejadian`() {
+        val opened = OffsetDateTime.parse("2026-11-24T08:00:00+07:00")
+        val now = OffsetDateTime.parse("2026-11-24T12:00:00+07:00")
+        fun early(event: OfflineSessionEvent) =
+            OfflineCheckoutGuard.validateSessionTime(event, opened.minusDays(1), opened, now)
+        assertEquals(
+            "Waktu transaksi offline lebih awal dari pembukaan sesi kas (session invalid)",
+            early(OfflineSessionEvent.TRANSACTION)
+        )
+        assertEquals(
+            "Waktu pengeluaran kas offline lebih awal dari pembukaan sesi kas (session invalid)",
+            early(OfflineSessionEvent.CASH_EXPENSE)
+        )
+        assertEquals(
+            "Waktu tutup sesi kas offline lebih awal dari pembukaan sesi kas (session invalid)",
+            early(OfflineSessionEvent.SESSION_CLOSE)
+        )
+        assertEquals(
+            "Waktu transaksi offline berada di masa depan",
+            OfflineCheckoutGuard.validateSessionTime(OfflineSessionEvent.TRANSACTION, now.plusDays(1), opened, now)
+        )
     }
 
     @Test
     fun `waktu buka sesi wajib dekat dengan waktu server`() {
         val now = OffsetDateTime.parse("2026-11-24T12:00:00+07:00")
-        assertNull(OfflineCheckoutGuard.validateOpenedAt(now, now))
-        assertNull(OfflineCheckoutGuard.validateOpenedAt(now.plusMinutes(5), now))
-        assertNotNull(OfflineCheckoutGuard.validateOpenedAt(now.plusMinutes(5).plusSeconds(1), now))
-        assertNull(OfflineCheckoutGuard.validateOpenedAt(now.minusHours(24), now))
-        assertNotNull(OfflineCheckoutGuard.validateOpenedAt(now.minusHours(24).minusSeconds(1), now))
+        listOf(1L, 24L, 72L, 168L).forEach { hours ->
+            fun validate(openedAt: OffsetDateTime) =
+                OfflineCheckoutGuard.validateOpenedAt(openedAt, now, Duration.ofHours(hours))
+            assertNull(validate(now))
+            assertNull(validate(now.plusMinutes(5)))
+            assertNotNull(validate(now.plusMinutes(5).plusSeconds(1)))
+            assertNull(validate(now.minusHours(hours)))
+            assertEquals(
+                "Waktu buka sesi kas offline lebih dari $hours jam yang lalu",
+                validate(now.minusHours(hours).minusSeconds(1))
+            )
+        }
     }
 
     @Test
-    fun `awal jendela tepercaya tidak lebih tua dari 24 jam sebelum sesi tercatat di server`() {
+    fun `awal jendela tepercaya tidak lebih tua dari batas umur sebelum sesi tercatat di server`() {
         val recordedAt = OffsetDateTime.parse("2026-11-24T12:00:00+07:00")
         assertEquals(
             recordedAt.minusHours(3),
-            OfflineCheckoutGuard.trustedWindowStart(recordedAt.minusHours(3), recordedAt)
+            OfflineCheckoutGuard.trustedWindowStart(recordedAt.minusHours(3), recordedAt, Duration.ofHours(72))
         )
         assertEquals(
-            recordedAt.minusHours(24),
-            OfflineCheckoutGuard.trustedWindowStart(recordedAt.minusDays(30), recordedAt)
+            recordedAt.minusHours(72),
+            OfflineCheckoutGuard.trustedWindowStart(recordedAt.minusDays(30), recordedAt, Duration.ofHours(72))
         )
     }
 

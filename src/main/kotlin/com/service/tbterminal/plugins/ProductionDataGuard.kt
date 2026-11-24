@@ -40,9 +40,8 @@ object ProductionDataGuard {
     private fun applyStoreBootstrap(connection: java.sql.Connection) {
         val name = EnvironmentConfig.productionStoreName ?: return
         require(name.length in 2..150 && !name.contains("placeholder", true)) { "STORE_NAME production tidak valid" }
-        // Hanya update bila nilainya benar-benar berubah. updated_at dipakai validasi
-        // sync offline untuk mendeteksi perubahan pengaturan selama sesi kas berjalan,
-        // jadi restart server tidak boleh "menyentuh" baris ini tanpa alasan.
+        // Hanya update bila nilainya benar-benar berubah, supaya updated_at tidak bergeser
+        // setiap kali server di-restart.
         connection.prepareStatement(
             """
             UPDATE system.store_settings SET store_name=?, address=?, phone=?, updated_at=NOW()

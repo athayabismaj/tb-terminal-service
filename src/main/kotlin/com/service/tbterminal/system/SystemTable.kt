@@ -114,6 +114,10 @@ object StoreSettingsTable : Table("system.store_settings") {
     val updatedBy = uuid("updated_by").references(UsersTable.id).nullable()
     val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
 
+    /** Dua kolom berikut hanya diubah trigger database saat field pajak/pembulatan benar-benar berubah. */
+    val taxSettingsUpdatedAt = timestampWithTimeZone("tax_settings_updated_at").databaseGenerated()
+    val roundingSettingsUpdatedAt = timestampWithTimeZone("rounding_settings_updated_at").databaseGenerated()
+
     override val primaryKey = PrimaryKey(id)
 }
 

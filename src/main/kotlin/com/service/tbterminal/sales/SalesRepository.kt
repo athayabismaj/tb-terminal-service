@@ -15,6 +15,7 @@ import com.service.tbterminal.receivable.ReceivablesTable
 import com.service.tbterminal.receivable.ensureReceivableCreditLimit
 import com.service.tbterminal.receivable.receivableToday
 import com.service.tbterminal.receivable.validatePaymentIdempotencyKey
+import com.service.tbterminal.shared.EnvironmentConfig
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.SessionNotFoundException
 import com.service.tbterminal.shared.StockInsufficientException
@@ -40,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Duration
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.util.UUID
@@ -261,7 +263,8 @@ data class TransactionSummary(
 
 class SalesRepositoryImpl(
     private val managerApprovalService: ManagerApprovalService,
-    private val discountRepository: DiscountRepository
+    private val discountRepository: DiscountRepository,
+    private val maxOfflineSessionAge: Duration = Duration.ofHours(EnvironmentConfig.offlineMaxSessionAgeHours)
 ) : SalesRepository {
 
     override suspend fun getActiveSession(userId: UUID): CashSessionResponse? = newSuspendedTransaction(Dispatchers.IO) {
@@ -453,6 +456,12 @@ class SalesRepositoryImpl(
                 syncedAt = (session[CashSessionsTable.closeOfflineSyncedAt] ?: existingClosedAt).toString()
             )
         }
+
+        requireValidSessionTime(
+            OfflineSessionEvent.SESSION_CLOSE,
+            command.closedAt,
+            session[CashSessionsTable.openedAt]
+        )
 
         val syncedAt = OffsetDateTime.now()
         val systemCash = session[CashSessionsTable.systemCash]
@@ -649,6 +658,11 @@ class SalesRepositoryImpl(
         if (session[CashSessionsTable.closedAt] != null) {
             throw ValidationException("Sesi kas server sudah ditutup. Sync pengeluaran offline tidak dapat diproses.")
         }
+        requireValidSessionTime(
+            OfflineSessionEvent.CASH_EXPENSE,
+            command.occurredAt,
+            session[CashSessionsTable.openedAt]
+        )
 
         val expenseId = UUID.randomUUID()
         val syncedAt = OffsetDateTime.now()
@@ -1038,21 +1052,21 @@ class SalesRepositoryImpl(
         }
 
         val sessionOpenedAt = session[CashSessionsTable.openedAt]
-        OfflineCheckoutGuard.validateOccurredAt(command.occurredAt, sessionOpenedAt, OffsetDateTime.now())
-            ?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_OCCURRED_AT_INVALID, it) }
+        requireValidSessionTime(OfflineSessionEvent.TRANSACTION, command.occurredAt, sessionOpenedAt)
 
         val windowStart = OfflineCheckoutGuard.trustedWindowStart(
             openedAt = sessionOpenedAt,
-            serverRecordedAt = session[CashSessionsTable.offlineSyncedAt] ?: session[CashSessionsTable.createdAt]
+            serverRecordedAt = session[CashSessionsTable.offlineSyncedAt] ?: session[CashSessionsTable.createdAt],
+            maxSessionAge = maxOfflineSessionAge
         )
         val storeSettings = StoreSettingsTable.selectAll().limit(1).singleOrNull()
             ?: throw ValidationException("Pengaturan toko belum tersedia")
-        val settingsChangedDuringSession = storeSettings[StoreSettingsTable.updatedAt].isAfter(windowStart)
         OfflineCheckoutGuard.validateRounding(
             roundingAmount = command.roundingAmount,
             totalAfterRounding = command.total,
             currentRoundingUnit = storeSettings[StoreSettingsTable.cashRoundingUnit],
-            settingsChangedDuringSession = settingsChangedDuringSession
+            settingsChangedDuringSession =
+                storeSettings[StoreSettingsTable.roundingSettingsUpdatedAt].isAfter(windowStart)
         )?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_ROUNDING_CONFLICT, it) }
         OfflineCheckoutGuard.validateTaxSnapshot(
             requestTaxEnabled = command.taxEnabled,
@@ -1061,7 +1075,8 @@ class SalesRepositoryImpl(
             storeTaxEnabled = storeSettings[StoreSettingsTable.taxEnabled],
             storeTaxMode = storeSettings[StoreSettingsTable.taxMode].name,
             storeTaxRate = storeSettings[StoreSettingsTable.taxRate],
-            settingsChangedDuringSession = settingsChangedDuringSession
+            settingsChangedDuringSession =
+                storeSettings[StoreSettingsTable.taxSettingsUpdatedAt].isAfter(windowStart)
         )?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_TAX_CONFLICT, it) }
 
         val lockedStockIds = lockAndValidateOfflineStocks(command.items)
@@ -2201,7 +2216,8 @@ class SalesRepositoryImpl(
                 .select { ReceivablePaymentsTable.idempotencyKey eq idempotencyKey }
                 .singleOrNull()
             if (existing != null) {
-                val samePayment = existing[ReceivablePaymentsTable.receivableId] == receivableRow[ReceivablesTable.id] &&
+                val samePayment = existing[ReceivablePaymentsTable.entryType] == ReceivablePaymentEntryType.PAYMENT &&
+                    existing[ReceivablePaymentsTable.receivableId] == receivableRow[ReceivablesTable.id] &&
                     existing[ReceivablePaymentsTable.amount].compareTo(request.amount) == 0 &&
                     existing[ReceivablePaymentsTable.method] == receivableMethod
                 if (!samePayment) {

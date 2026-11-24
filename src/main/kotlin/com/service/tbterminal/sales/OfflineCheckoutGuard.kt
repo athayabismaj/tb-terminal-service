@@ -23,9 +23,6 @@ internal object OfflineCheckoutGuard {
     /** Toleransi selisih jam perangkat terhadap server. */
     val CLOCK_SKEW: Duration = Duration.ofMinutes(5)
 
-    /** Umur maksimum sesi kas offline saat pertama kali tercatat di server. */
-    val MAX_OFFLINE_SESSION_AGE: Duration = Duration.ofHours(24)
-
     /**
      * Mencari faktor satuan yang menjelaskan harga offline.
      *
@@ -62,7 +59,7 @@ internal object OfflineCheckoutGuard {
     }
 
     /**
-     * @param settingsChangedDuringSession true bila pengaturan toko diubah setelah sesi kas dibuka,
+     * @param settingsChangedDuringSession true bila pengaturan pembulatan diubah setelah sesi kas dibuka,
      *   sehingga perangkat offline mungkin masih memakai aturan lama.
      * @return pesan error atau `null` bila valid.
      */
@@ -124,12 +121,12 @@ internal object OfflineCheckoutGuard {
     }
 
     /** Waktu buka sesi berasal dari jam perangkat, jadi wajib dekat dengan waktu server. */
-    fun validateOpenedAt(openedAt: OffsetDateTime, now: OffsetDateTime): String? {
+    fun validateOpenedAt(openedAt: OffsetDateTime, now: OffsetDateTime, maxSessionAge: Duration): String? {
         if (openedAt.isAfter(now.plus(CLOCK_SKEW))) {
             return "Waktu buka sesi kas offline berada di masa depan"
         }
-        if (openedAt.isBefore(now.minus(MAX_OFFLINE_SESSION_AGE))) {
-            return "Waktu buka sesi kas offline lebih dari ${MAX_OFFLINE_SESSION_AGE.toHours()} jam yang lalu"
+        if (openedAt.isBefore(now.minus(maxSessionAge))) {
+            return "Waktu buka sesi kas offline lebih dari ${maxSessionAge.toHours()} jam yang lalu"
         }
         return null
     }
@@ -140,22 +137,27 @@ internal object OfflineCheckoutGuard {
      * [serverRecordedAt] (jam server) membatasi jendela ini sehingga `openedAt` yang dimundurkan
      * tidak bisa menghidupkan harga lama atau melonggarkan validasi pajak dan pembulatan.
      */
-    fun trustedWindowStart(openedAt: OffsetDateTime, serverRecordedAt: OffsetDateTime): OffsetDateTime {
-        val earliestTrusted = serverRecordedAt.minus(MAX_OFFLINE_SESSION_AGE)
+    fun trustedWindowStart(
+        openedAt: OffsetDateTime,
+        serverRecordedAt: OffsetDateTime,
+        maxSessionAge: Duration
+    ): OffsetDateTime {
+        val earliestTrusted = serverRecordedAt.minus(maxSessionAge)
         return if (openedAt.isAfter(earliestTrusted)) openedAt else earliestTrusted
     }
 
-    /** Waktu transaksi offline wajib berada di dalam rentang sesi kas. */
-    fun validateOccurredAt(
+    /** Waktu kejadian offline wajib berada di antara pembukaan sesi kas dan waktu server. */
+    fun validateSessionTime(
+        event: OfflineSessionEvent,
         occurredAt: OffsetDateTime,
         sessionOpenedAt: OffsetDateTime,
         now: OffsetDateTime
     ): String? {
         if (occurredAt.isBefore(sessionOpenedAt.minus(CLOCK_SKEW))) {
-            return "Waktu transaksi offline lebih awal dari pembukaan sesi kas (session invalid)"
+            return "Waktu ${event.label} offline lebih awal dari pembukaan sesi kas (session invalid)"
         }
         if (occurredAt.isAfter(now.plus(CLOCK_SKEW))) {
-            return "Waktu transaksi offline berada di masa depan"
+            return "Waktu ${event.label} offline berada di masa depan"
         }
         return null
     }
