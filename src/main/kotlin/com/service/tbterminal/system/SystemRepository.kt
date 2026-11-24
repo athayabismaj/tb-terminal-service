@@ -11,7 +11,7 @@ import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransacti
 import java.time.OffsetDateTime
 import java.util.UUID
 
-class SystemRepository {
+class SystemRepository : PinVerificationGateway {
 
     suspend fun getRoles(): List<RoleResponse> = newSuspendedTransaction(Dispatchers.IO) {
         RolesTable.selectAll().orderBy(RolesTable.name, SortOrder.ASC).map {
@@ -224,6 +224,90 @@ class SystemRepository {
         } > 0
     }
 
+    override suspend fun getPinAttemptState(userId: UUID, deviceId: String): PinAttemptState? =
+        newSuspendedTransaction(Dispatchers.IO) {
+            PinVerificationAttemptsTable
+                .select {
+                    (PinVerificationAttemptsTable.userId eq userId) and
+                        (PinVerificationAttemptsTable.deviceId eq deviceId)
+                }
+                .firstOrNull()
+                ?.let { row ->
+                    PinAttemptState(
+                        failedAttempts = row[PinVerificationAttemptsTable.failedAttempts],
+                        lockedUntil = row[PinVerificationAttemptsTable.lockedUntil]
+                    )
+                }
+        }
+
+    override suspend fun savePinAttemptState(
+        userId: UUID,
+        deviceId: String,
+        failedAttempts: Int,
+        lockedUntil: OffsetDateTime?
+    ) {
+        newSuspendedTransaction(Dispatchers.IO) {
+            val now = OffsetDateTime.now()
+            val updated = PinVerificationAttemptsTable.update({
+                (PinVerificationAttemptsTable.userId eq userId) and
+                    (PinVerificationAttemptsTable.deviceId eq deviceId)
+            }) {
+                it[this.failedAttempts] = failedAttempts
+                it[this.lockedUntil] = lockedUntil
+                it[this.updatedAt] = now
+            }
+            if (updated == 0) {
+                PinVerificationAttemptsTable.insert {
+                    it[this.userId] = userId
+                    it[this.deviceId] = deviceId
+                    it[this.failedAttempts] = failedAttempts
+                    it[this.lockedUntil] = lockedUntil
+                    it[this.updatedAt] = now
+                }
+            }
+        }
+    }
+
+    override suspend fun resetPinAttemptState(userId: UUID, deviceId: String) {
+        newSuspendedTransaction(Dispatchers.IO) {
+            PinVerificationAttemptsTable.deleteWhere {
+                (PinVerificationAttemptsTable.userId eq userId) and
+                    (PinVerificationAttemptsTable.deviceId eq deviceId)
+            }
+        }
+    }
+
+    override suspend fun findPinUserById(userId: UUID): UserRow? = findUserById(userId)
+
+    override suspend fun revokeSessionsForUser(userId: UUID): Boolean = incrementTokenVersion(userId)
+
+    override suspend fun recordPinAuditLog(
+        actorUserId: UUID,
+        action: AuditAction,
+        tableName: String,
+        recordId: UUID,
+        ipAddress: String?,
+        metadataJson: String
+    ) {
+        insertAuditLog(
+            actorUserId = actorUserId,
+            action = action,
+            schemaName = "system",
+            tableName = tableName,
+            recordId = recordId,
+            ipAddress = ipAddress,
+            newData = metadataJson
+        )
+    }
+
+    override suspend fun resetAllPinAttemptStatesForUser(userId: UUID) {
+        newSuspendedTransaction(Dispatchers.IO) {
+            PinVerificationAttemptsTable.deleteWhere {
+                PinVerificationAttemptsTable.userId eq userId
+            }
+        }
+    }
+
     suspend fun getPaginatedAuditLogs(
         page: Int,
         limit: Int,
@@ -310,7 +394,8 @@ class SystemRepository {
         schemaName: String,
         tableName: String,
         recordId: UUID?,
-        ipAddress: String?
+        ipAddress: String?,
+        newData: String? = null
     ) {
         newSuspendedTransaction(Dispatchers.IO) {
             AuditLogsTable.insert {
@@ -320,6 +405,7 @@ class SystemRepository {
                 it[targetTableName] = tableName
                 it[this.recordId] = recordId
                 it[this.ipAddress] = ipAddress?.take(45)
+                it[this.newData] = newData
             }
         }
     }
@@ -433,6 +519,10 @@ private fun AuditAction.toActivityLabel(tableName: String): String {
     when (tableName.lowercase()) {
         "auth_login" -> return "Login"
         "auth_logout" -> return "Logout"
+        "pin_unlock_failed" -> return "Gagal Verifikasi PIN"
+        "pin_unlock_locked" -> return "Lockout Verifikasi PIN"
+        "pin_unlock_revoked" -> return "Sesi Dicabut (Batas PIN)"
+        "pin_reset" -> return "Reset PIN"
         "user_pin" -> return "Ubah PIN"
         "user_password" -> return "Ubah Password"
         "user_credentials" -> return "Ubah Kredensial"

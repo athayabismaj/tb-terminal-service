@@ -1,5 +1,6 @@
 package com.service.tbterminal.system
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -12,7 +13,23 @@ data class LoginRequest(
 
 @Serializable
 data class UnlockRequest(
-    val pin: String
+    val pin: String,
+    val deviceId: String? = null
+)
+
+@Serializable
+data class PinUnlockResponse(
+    val valid: Boolean,
+    @SerialName("attempts_left") val attemptsLeft: Int,
+    @SerialName("locked_until") val lockedUntil: String? = null,
+    @SerialName("force_logout") val forceLogout: Boolean = false
+)
+
+@Serializable
+data class ResetPinRequest(
+    val currentPassword: String,
+    val newPin: String,
+    val deviceId: String? = null
 )
 
 @Serializable

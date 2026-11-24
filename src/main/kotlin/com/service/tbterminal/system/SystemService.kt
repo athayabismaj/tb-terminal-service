@@ -17,7 +17,11 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.util.UUID
 
-class SystemService(private val repo: SystemRepository) {
+class SystemService(
+    private val repo: SystemRepository,
+    clock: java.time.Clock = java.time.Clock.systemUTC()
+) {
+    private val pinVerificationService = PinVerificationService(repo, clock)
 
     suspend fun login(req: LoginRequest): ApiResponse<LoginResponse> {
         val username = req.username.trim()
@@ -90,27 +94,62 @@ class SystemService(private val repo: SystemRepository) {
         }
     }
 
-    suspend fun unlock(userId: UUID, request: UnlockRequest): ApiResponse<Unit> {
-        if (request.pin.isBlank()) throw ValidationException("PIN wajib diisi")
-        if (EnvironmentConfig.isProduction && request.pin in DEFAULT_PINS) {
-            return ApiResponse.error("PIN default tidak diizinkan pada production", "DEFAULT_CREDENTIAL_FORBIDDEN")
-        }
-        val userResponse = repo.getUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
-        val userRow = repo.findUserByUsername(userResponse.username) ?: throw NotFoundException("User tidak ditemukan")
+    suspend fun unlock(
+        userId: UUID,
+        request: UnlockRequest,
+        headerDeviceId: String? = null,
+        ipAddress: String? = null
+    ): ApiResponse<PinUnlockResponse> {
+        return pinVerificationService.verifyUnlock(
+            userId = userId,
+            request = request,
+            headerDeviceId = headerDeviceId,
+            ipAddress = ipAddress
+        )
+    }
 
+    suspend fun resetPinWithPassword(
+        userId: UUID,
+        request: ResetPinRequest,
+        headerDeviceId: String? = null,
+        ipAddress: String? = null
+    ) {
+        if (request.currentPassword.isBlank()) {
+            throw ValidationException("Password wajib diisi")
+        }
+        if (!request.newPin.matches(Regex("^\\d{4,6}$"))) {
+            throw ValidationException("PIN baru harus terdiri dari 4 sampai 6 digit")
+        }
+        validateProductionCredentials(null, request.newPin)
+
+        val userRow = repo.findUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
         if (!userRow.isActive) {
-            return ApiResponse.error("Akun tidak aktif", "UNAUTHORIZED")
+            throw ValidationException("Akun tidak aktif")
         }
 
-        val isValid = withContext(Dispatchers.IO) {
-            BCrypt.checkpw(request.pin, userRow.pinHash)
+        val isPasswordValid = withContext(Dispatchers.IO) {
+            BCrypt.checkpw(request.currentPassword, userRow.passwordHash)
+        }
+        if (!isPasswordValid) {
+            throw ValidationException("Password tidak valid")
         }
 
-        if (!isValid) {
-            return ApiResponse.error("PIN salah", "UNAUTHORIZED")
+        val newHashedPin = withContext(Dispatchers.IO) {
+            BCrypt.hashpw(request.newPin, BCrypt.gensalt())
         }
-
-        return ApiResponse.success(Unit, "Unlock berhasil")
+        repo.updatePin(userId, newHashedPin)
+        val deviceId = PinVerificationPolicy.normalizeDeviceId(request.deviceId ?: headerDeviceId)
+        repo.resetPinAttemptState(userId, deviceId)
+        repo.resetAllPinAttemptStatesForUser(userId)
+        repo.insertAuditLog(
+            actorUserId = userId,
+            action = AuditAction.UPDATE,
+            schemaName = "system",
+            tableName = "pin_reset",
+            recordId = userId,
+            ipAddress = ipAddress,
+            newData = """{"deviceId":"${deviceId.replace("\"", "\\\"")}"}"""
+        )
     }
 
     suspend fun getRoles(actorRole: String): List<RoleResponse> {
@@ -300,6 +339,7 @@ class SystemService(private val repo: SystemRepository) {
         }
 
         repo.updatePin(userId, newHashedPin)
+        repo.resetAllPinAttemptStatesForUser(userId)
     }
 
     private fun parseUUID(id: String): UUID {

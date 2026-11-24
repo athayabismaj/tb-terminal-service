@@ -67,18 +67,34 @@ fun Application.systemRoutes() {
             authenticate("jwt-auth") {
                 post("/unlock") {
                     val userId = call.getUserId()
-                    val response = service.unlock(userId, call.receive<UnlockRequest>())
-                    if (response.success) {
-                        call.respond(HttpStatusCode.OK, response)
-                    } else {
-                        call.respond(
-                            HttpStatusCode.Unauthorized,
-                            ErrorResponse(
-                                code = response.code ?: "UNAUTHORIZED",
-                                message = response.error ?: "Unlock gagal"
-                            )
-                        )
+                    val request = call.receive<UnlockRequest>()
+                    val response = service.unlock(
+                        userId = userId,
+                        request = request,
+                        headerDeviceId = call.request.headers["X-Device-Id"],
+                        ipAddress = call.clientIpAddress()
+                    )
+                    val status = when {
+                        response.success -> HttpStatusCode.OK
+                        response.code == "PIN_LOCKED" -> HttpStatusCode.Locked
+                        response.code == "PIN_MAX_ATTEMPTS_EXCEEDED" ||
+                            response.code == "DEFAULT_CREDENTIAL_FORBIDDEN" -> HttpStatusCode.Forbidden
+                        response.code == "UNAUTHORIZED" -> HttpStatusCode.Unauthorized
+                        else -> HttpStatusCode.UnprocessableEntity
                     }
+                    call.respond(status, response)
+                }
+
+                post("/reset-pin") {
+                    val userId = call.getUserId()
+                    val request = call.receive<ResetPinRequest>()
+                    service.resetPinWithPassword(
+                        userId = userId,
+                        request = request,
+                        headerDeviceId = call.request.headers["X-Device-Id"],
+                        ipAddress = call.clientIpAddress()
+                    )
+                    call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "PIN berhasil diatur ulang"))
                 }
 
                 post("/logout") {

@@ -28,6 +28,16 @@ object UsersTable : Table("system.users") {
     override val primaryKey = PrimaryKey(id)
 }
 
+object PinVerificationAttemptsTable : Table("system.pin_verification_attempts") {
+    val userId = uuid("user_id").references(UsersTable.id)
+    val deviceId = varchar("device_id", 128)
+    val failedAttempts = integer("failed_attempts").default(0)
+    val lockedUntil = timestampWithTimeZone("locked_until").nullable()
+    val updatedAt = timestampWithTimeZone("updated_at").databaseGenerated()
+
+    override val primaryKey = PrimaryKey(userId, deviceId)
+}
+
 enum class AuditAction {
     INSERT,
     UPDATE,
