@@ -7,6 +7,11 @@ import com.service.tbterminal.plugins.configureSecurity
 import com.service.tbterminal.plugins.configureSerialization
 import com.service.tbterminal.plugins.configureStatusPages
 import com.service.tbterminal.plugins.DatabaseHealth
+import com.service.tbterminal.system.AttemptOutcome
+import com.service.tbterminal.system.CredentialAttemptGuard
+import com.service.tbterminal.system.CredentialScope
+import com.service.tbterminal.system.PinRolePolicy
+import com.service.tbterminal.system.PinVerificationPolicy
 import com.service.tbterminal.system.SystemRepository
 import com.service.tbterminal.system.UserSessionService
 import com.service.tbterminal.system.ManagerApprovalAction
@@ -36,7 +41,9 @@ import io.ktor.server.application.Application
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
@@ -56,6 +63,12 @@ import org.testcontainers.DockerClientFactory
 import java.math.BigDecimal
 import java.sql.Connection
 import java.sql.SQLException
+import java.sql.Types
+import java.time.Clock
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -78,8 +91,12 @@ class IntegrationTest {
     fun startPostgres() {
         val externalUrl = System.getenv("TEST_DB_URL")?.takeIf(String::isNotBlank)
         if (externalUrl == null) {
-            org.junit.jupiter.api.Assumptions.assumeTrue(
-                DockerClientFactory.instance().isDockerAvailable,
+            val dockerAvailable = DockerClientFactory.instance().isDockerAvailable
+            check(dockerAvailable || !System.getProperty("requireIntegrationTests").toBoolean()) {
+                "requireIntegrationTests aktif, tetapi Docker/Testcontainers maupun TEST_DB_URL tidak tersedia"
+            }
+            assumeTrue(
+                dockerAvailable,
                 "Integration test membutuhkan Docker/Testcontainers atau TEST_DB_URL khusus test"
             )
             postgres.start()
@@ -1480,7 +1497,6 @@ class IntegrationTest {
         }
         val loginData = Json.parseToJsonElement(loginResponse.bodyAsText())
             .jsonObject.getValue("data").jsonObject
-        val accessToken = loginData.getValue("token").jsonPrimitive.content
         val refreshToken = loginData.getValue("refreshToken").jsonPrimitive.content
 
         val refreshed = client.post("/api/auth/refresh") {
@@ -1488,15 +1504,23 @@ class IntegrationTest {
             setBody("""{"refreshToken":"$refreshToken"}""")
         }
         assertEquals(HttpStatusCode.OK, refreshed.status, refreshed.bodyAsText())
+        val refreshedData = Json.parseToJsonElement(refreshed.bodyAsText())
+            .jsonObject.getValue("data").jsonObject
+        val latestAccessToken = refreshedData.getValue("token").jsonPrimitive.content
+        val latestRefreshToken = refreshedData.getValue("refreshToken").jsonPrimitive.content
 
-        val logout = client.post("/api/auth/logout") { bearer(accessToken) }
+        val logout = client.post("/api/auth/logout") { bearer(latestAccessToken) }
         assertEquals(HttpStatusCode.OK, logout.status, logout.bodyAsText())
 
+        // Token terbaru belum pernah dipakai, jadi penolakan ini hanya bisa berasal dari logout.
         val revokedRefresh = client.post("/api/auth/refresh") {
             contentType(ContentType.Application.Json)
-            setBody("""{"refreshToken":"$refreshToken"}""")
+            setBody("""{"refreshToken":"$latestRefreshToken"}""")
         }
         assertEquals(HttpStatusCode.Unauthorized, revokedRefresh.status, revokedRefresh.bodyAsText())
+
+        val revokedAccess = client.get("/api/auth/me") { bearer(latestAccessToken) }
+        assertEquals(HttpStatusCode.Unauthorized, revokedAccess.status, revokedAccess.bodyAsText())
     }
 
     @Test
@@ -1529,6 +1553,108 @@ class IntegrationTest {
             setBody("""{"refreshToken":"$secondRefresh"}""")
         }
         assertEquals(HttpStatusCode.Unauthorized, afterReuse.status, afterReuse.bodyAsText())
+    }
+
+    @Test
+    fun test_refresh_token_reuse_ends_every_session_of_the_user_once() = testApplication {
+        application { configureIntegrationApplication() }
+        val stolenSession = loginTokens("owner", "owner123")
+        val otherDevice = loginTokens("owner", "owner123")
+        val versionBefore = tokenVersion(ownerId())
+        val auditsBefore = auditActionCount("system", "refresh_token_reuse", ownerId(), "UPDATE")
+
+        val rotated = refreshTokens(stolenSession.refresh)
+        assertEquals(HttpStatusCode.OK, rotated.status, rotated.bodyAsText())
+        val rotatedAccess = Json.parseToJsonElement(rotated.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue("token").jsonPrimitive.content
+        assertEquals(HttpStatusCode.OK, client.get("/api/auth/me") { bearer(rotatedAccess) }.status)
+        assertEquals(versionBefore, tokenVersion(ownerId()))
+
+        assertEquals(HttpStatusCode.Unauthorized, refreshTokens(stolenSession.refresh).status)
+        assertEquals(versionBefore + 1, tokenVersion(ownerId()))
+        assertEquals(auditsBefore + 1, auditActionCount("system", "refresh_token_reuse", ownerId(), "UPDATE"))
+
+        listOf(stolenSession.access, rotatedAccess, otherDevice.access).forEach { accessToken ->
+            val rejected = client.get("/api/auth/me") { bearer(accessToken) }
+            assertEquals(HttpStatusCode.Unauthorized, rejected.status, rejected.bodyAsText())
+        }
+        assertEquals(HttpStatusCode.Unauthorized, refreshTokens(otherDevice.refresh).status)
+
+        // Token lama yang diputar ulang tidak boleh bisa terus-menerus mengeluarkan user.
+        assertEquals(HttpStatusCode.Unauthorized, refreshTokens(stolenSession.refresh).status)
+        assertEquals(versionBefore + 1, tokenVersion(ownerId()))
+
+        val newLogin = loginTokens("owner", "owner123")
+        assertEquals(HttpStatusCode.OK, client.get("/api/auth/me") { bearer(newLogin.access) }.status)
+        assertEquals(HttpStatusCode.OK, refreshTokens(newLogin.refresh).status)
+    }
+
+    @Test
+    fun test_parallel_credential_failures_are_all_counted_and_lock_never_moves_back() = testApplication {
+        application { configureIntegrationApplication() }
+        val userId = loginAsCashier(loginAsOwner()).userId
+        val policy = PinRolePolicy(
+            consecutiveThreshold = 3,
+            maxTotalFailures = 1000,
+            backoffSeconds = listOf(60L, 300L, 900L, 1800L)
+        )
+        val base = Instant.now().truncatedTo(ChronoUnit.SECONDS)
+        val repository = SystemRepository()
+
+        // Jam tiap request dibuat berbeda untuk meniru request paralel yang selesai tidak berurutan.
+        val outcomes = coroutineScope {
+            (1..20).map { index ->
+                async(Dispatchers.IO) {
+                    val clock = Clock.fixed(base.minusSeconds((index * 37L) % 600), ZoneOffset.UTC)
+                    CredentialAttemptGuard(repository, clock).registerFailure(userId, CredentialScope.PIN, policy)
+                }
+            }.awaitAll()
+        }
+
+        val counts = outcomes.map { outcome ->
+            when (outcome) {
+                is AttemptOutcome.Invalid -> outcome.failedAttempts
+                is AttemptOutcome.LockedNow -> outcome.failedAttempts
+                is AttemptOutcome.MaxExceeded -> outcome.failedAttempts
+            }
+        }
+        assertEquals((1..20).toList(), counts.sorted())
+        val locks = outcomes.filterIsInstance<AttemptOutcome.LockedNow>()
+        assertEquals(18, locks.size)
+        val locksInOrder = locks.sortedBy { it.failedAttempts }.map { it.lockedUntil }
+        assertEquals(locksInOrder.sorted(), locksInOrder, "lockedUntil tidak boleh mundur")
+
+        val stored = requireNotNull(repository.getPinAttemptState(userId, CredentialScope.PIN.key))
+        assertEquals(20, stored.failedAttempts)
+        assertEquals(locksInOrder.last().toInstant(), stored.lockedUntil?.toInstant())
+    }
+
+    @Test
+    fun test_credential_lock_follows_backoff_and_keeps_the_longest_lock() = testApplication {
+        application { configureIntegrationApplication() }
+        val userId = loginAsCashier(loginAsOwner()).userId
+        val repository = SystemRepository()
+        val scope = CredentialScope.PIN.key
+        val policy = PinVerificationPolicy.forRole(Role.KASIR)
+        val base = OffsetDateTime.ofInstant(Instant.now().truncatedTo(ChronoUnit.SECONDS), ZoneOffset.UTC)
+
+        (1..9).forEach { failure ->
+            val now = base.plusHours(failure.toLong())
+            val state = repository.registerPinFailure(userId, scope, policy, now)
+            assertEquals(failure, state.failedAttempts)
+            assertEquals(CredentialAttemptGuard.lockFor(policy, failure, now), state.lockedUntil)
+        }
+
+        // Jam request mundur 30 menit: kunci lama yang lebih panjang tetap berlaku.
+        val longest = requireNotNull(repository.getPinAttemptState(userId, scope)?.lockedUntil)
+        val late = repository.registerPinFailure(userId, scope, policy, base.plusHours(9).minusMinutes(30))
+        assertEquals(10, late.failedAttempts)
+        assertEquals(longest.toInstant(), late.lockedUntil?.toInstant())
+
+        // Ambang 1: kunci sudah harus ada pada kegagalan pertama (jalur INSERT).
+        val strict = policy.copy(consecutiveThreshold = 1)
+        val first = repository.registerPinFailure(userId, CredentialScope.PASSWORD.key, strict, base)
+        assertEquals(base.plusSeconds(strict.backoffSeconds.first()), first.lockedUntil)
     }
 
     @Test
@@ -1688,11 +1814,12 @@ class IntegrationTest {
         val userId = cashier.userId
         val product = createProductFixture()
         val deviceId = "integration-device-${UUID.randomUUID()}"
+        val openedAt = OffsetDateTime.now(ZoneOffset.UTC).minusHours(10)
         val opened = client.post("/api/sales/sessions/sync/open") {
             contentType(ContentType.Application.Json)
             bearer(token)
             setBody(
-                """{"clientGeneratedId":"offline-open-${UUID.randomUUID()}","deviceId":"$deviceId","cashierUserId":"$userId","openedAt":"2026-07-01T08:00:00+07:00","startingCash":"100.00","openingNote":"Offline price guard"}"""
+                """{"clientGeneratedId":"offline-open-${UUID.randomUUID()}","deviceId":"$deviceId","cashierUserId":"$userId","openedAt":"$openedAt","startingCash":"100.00","openingNote":"Offline price guard"}"""
             )
         }
         assertEquals(HttpStatusCode.Created, opened.status, opened.bodyAsText())
@@ -1704,7 +1831,7 @@ class IntegrationTest {
             contentType(ContentType.Application.Json)
             bearer(token)
             setBody(
-                """{"clientGeneratedId":"offline-checkout-${UUID.randomUUID()}","deviceId":"$deviceId","localTransactionCode":"LOCAL-TAMPER","cashierUserId":"$userId","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"5.00","discount":"0.00","total":"5.00","paidAmount":"5.00","remainingAmount":"0.00","occurredAt":"2026-07-01T09:00:00+07:00","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"5.00","priceAtTransaction":"1.00","cogsAtTransaction":"0.00","discount":"0.00","subtotal":"5.00"}]}"""
+                """{"clientGeneratedId":"offline-checkout-${UUID.randomUUID()}","deviceId":"$deviceId","localTransactionCode":"LOCAL-TAMPER","cashierUserId":"$userId","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"5.00","discount":"0.00","total":"5.00","paidAmount":"5.00","remainingAmount":"0.00","occurredAt":"${openedAt.plusHours(1)}","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"5.00","priceAtTransaction":"1.00","cogsAtTransaction":"0.00","discount":"0.00","subtotal":"5.00"}]}"""
             )
         }
         assertEquals(HttpStatusCode.Conflict, tampered.status, tampered.bodyAsText())
@@ -1717,7 +1844,7 @@ class IntegrationTest {
             contentType(ContentType.Application.Json)
             bearer(token)
             setBody(
-                """{"clientGeneratedId":"offline-checkout-${UUID.randomUUID()}","deviceId":"$deviceId","localTransactionCode":"LOCAL-ROUND","cashierUserId":"$userId","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"500.00","discount":"0.00","total":"1.00","paidAmount":"1.00","remainingAmount":"0.00","occurredAt":"2026-07-01T09:00:00+07:00","roundingAmount":"-499.00","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"5.00","priceAtTransaction":"100.00","cogsAtTransaction":"50.00","discount":"0.00","subtotal":"500.00"}]}"""
+                """{"clientGeneratedId":"offline-checkout-${UUID.randomUUID()}","deviceId":"$deviceId","localTransactionCode":"LOCAL-ROUND","cashierUserId":"$userId","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"500.00","discount":"0.00","total":"1.00","paidAmount":"1.00","remainingAmount":"0.00","occurredAt":"${openedAt.plusHours(1)}","roundingAmount":"-499.00","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"5.00","priceAtTransaction":"100.00","cogsAtTransaction":"50.00","discount":"0.00","subtotal":"500.00"}]}"""
             )
         }
         assertEquals(HttpStatusCode.Conflict, zeroTotal.status, zeroTotal.bodyAsText())
@@ -1732,9 +1859,10 @@ class IntegrationTest {
         val userId = cashier.userId
         val product = createProductFixture()
         val deviceId = "integration-device-${UUID.randomUUID()}"
+        val openedAt = OffsetDateTime.now(ZoneOffset.UTC).minusHours(10)
         val openKey = "offline-open-${UUID.randomUUID()}"
         val openBody =
-            """{"clientGeneratedId":"$openKey","deviceId":"$deviceId","cashierUserId":"$userId","openedAt":"2026-07-01T08:00:00+07:00","startingCash":"100.00","openingNote":"Offline integration"}"""
+            """{"clientGeneratedId":"$openKey","deviceId":"$deviceId","cashierUserId":"$userId","openedAt":"$openedAt","startingCash":"100.00","openingNote":"Offline integration"}"""
 
         val opened = client.post("/api/sales/sessions/sync/open") {
             contentType(ContentType.Application.Json)
@@ -1756,7 +1884,7 @@ class IntegrationTest {
 
         val checkoutKey = "offline-checkout-${UUID.randomUUID()}"
         val checkoutBody =
-            """{"clientGeneratedId":"$checkoutKey","deviceId":"$deviceId","localTransactionCode":"LOCAL-001","cashierUserId":"$userId","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"100.00","discount":"0.00","total":"100.00","paidAmount":"100.00","remainingAmount":"0.00","occurredAt":"2026-07-01T09:00:00+07:00","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"1.00","priceAtTransaction":"100.00","cogsAtTransaction":"50.00","discount":"0.00","subtotal":"100.00"}]}"""
+            """{"clientGeneratedId":"$checkoutKey","deviceId":"$deviceId","localTransactionCode":"LOCAL-001","cashierUserId":"$userId","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"100.00","discount":"0.00","total":"100.00","paidAmount":"100.00","remainingAmount":"0.00","occurredAt":"${openedAt.plusHours(1)}","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"1.00","priceAtTransaction":"100.00","cogsAtTransaction":"50.00","discount":"0.00","subtotal":"100.00"}]}"""
         val syncedCheckout = client.post("/api/sales/checkout/sync") {
             contentType(ContentType.Application.Json)
             bearer(token)
@@ -1775,7 +1903,7 @@ class IntegrationTest {
 
         val expenseKey = "offline-expense-${UUID.randomUUID()}"
         val expenseBody =
-            """{"clientGeneratedId":"$expenseKey","deviceId":"$deviceId","cashierUserId":"$userId","serverCashSessionId":"$sessionId","amount":"10.00","category":"Operasional","note":"Biaya offline integration","occurredAt":"2026-07-01T10:00:00+07:00"}"""
+            """{"clientGeneratedId":"$expenseKey","deviceId":"$deviceId","cashierUserId":"$userId","serverCashSessionId":"$sessionId","amount":"10.00","category":"Operasional","note":"Biaya offline integration","occurredAt":"${openedAt.plusHours(2)}"}"""
         val expense = client.post("/api/sales/cash-expenses/sync") {
             contentType(ContentType.Application.Json)
             bearer(token)
@@ -1792,7 +1920,7 @@ class IntegrationTest {
 
         val closeKey = "offline-close-${UUID.randomUUID()}"
         val closeBody =
-            """{"deviceId":"$deviceId","clientGeneratedId":"$closeKey","serverCashSessionId":"$sessionId","cashierUserId":"$userId","closedAt":"2026-07-01T17:00:00+07:00","actualCash":"190.00","expectedCash":"190.00","difference":"0.00","closingNote":"Offline close integration"}"""
+            """{"deviceId":"$deviceId","clientGeneratedId":"$closeKey","serverCashSessionId":"$sessionId","cashierUserId":"$userId","closedAt":"${openedAt.plusHours(9)}","actualCash":"190.00","expectedCash":"190.00","difference":"0.00","closingNote":"Offline close integration"}"""
         val closed = client.post("/api/sales/sessions/sync/close") {
             contentType(ContentType.Application.Json)
             bearer(token)
@@ -2221,6 +2349,412 @@ class IntegrationTest {
         assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
         val transactionId = UUID.fromString(checkoutTransactionId(response))
         assertEquals(BigDecimal("60.00"), transactionReceivableRemaining(transactionId))
+    }
+
+    @Test
+    fun test_offline_open_rejects_opened_at_outside_server_window() = testApplication {
+        application { configureIntegrationApplication() }
+        val cashier = loginAsCashier(loginAsOwner())
+        val now = OffsetDateTime.now(ZoneOffset.UTC)
+
+        listOf(now.minusHours(25), now.minusDays(30), now.plusMinutes(10)).forEach { openedAt ->
+            val rejected = syncOpenSession(cashier, openedAt)
+            assertEquals(HttpStatusCode.Conflict, rejected.status, rejected.bodyAsText())
+            assertTrue(rejected.bodyAsText().contains("OFFLINE_OPENED_AT_INVALID"), rejected.bodyAsText())
+            assertTrue(rejected.bodyAsText().contains("business rule"), rejected.bodyAsText())
+        }
+        assertEquals(0, openSessionCount(cashier.userId))
+
+        val key = "offline-open-${UUID.randomUUID()}"
+        val accepted = syncOpenSession(cashier, now.minusHours(23), key)
+        assertEquals(HttpStatusCode.Created, accepted.status, accepted.bodyAsText())
+
+        // Retry sesi yang sudah tersimpan tetap idempoten walau umurnya sudah lewat batas.
+        val replay = syncOpenSession(cashier, now.minusHours(30), key)
+        assertEquals(HttpStatusCode.OK, replay.status, replay.bodyAsText())
+        assertTrue(replay.bodyAsText().contains("\"syncStatus\":\"DUPLICATE\""), replay.bodyAsText())
+    }
+
+    @Test
+    fun test_offline_checkout_outside_session_time_mentions_business_rule() = testApplication {
+        application { configureIntegrationApplication() }
+        val cashier = loginAsCashier(loginAsOwner())
+        val product = createProductFixture()
+        val now = OffsetDateTime.now(ZoneOffset.UTC)
+        val sessionId = offlineSessionId(syncOpenSession(cashier, now.minusHours(2)))
+
+        val rejected = syncOfflineSale(cashier, sessionId, product, occurredAt = now.minusHours(5), price = "100.00")
+        assertEquals(HttpStatusCode.Conflict, rejected.status, rejected.bodyAsText())
+        assertTrue(rejected.bodyAsText().contains("OFFLINE_OCCURRED_AT_INVALID"), rejected.bodyAsText())
+        assertTrue(rejected.bodyAsText().contains("business rule"), rejected.bodyAsText())
+        assertEquals(0, transactionCount())
+    }
+
+    @Test
+    fun test_offline_checkout_cannot_disable_tax_when_settings_did_not_change() = testApplication {
+        application { configureIntegrationApplication() }
+        val cashier = loginAsCashier(loginAsOwner())
+        val product = createProductFixture()
+        val now = OffsetDateTime.now(ZoneOffset.UTC)
+        insertPriceHistory(product, oldRetail = "80.00", changedAt = now.minusHours(1))
+
+        withTaxedStoreSettings(updatedAt = now.minusDays(2)) {
+            val sessionId = offlineSessionId(syncOpenSession(cashier, now.minusHours(3)))
+            val occurredAt = now.minusMinutes(30)
+
+            val untaxed = syncOfflineSale(cashier, sessionId, product, occurredAt, price = "100.00")
+            assertEquals(HttpStatusCode.Conflict, untaxed.status, untaxed.bodyAsText())
+            assertTrue(untaxed.bodyAsText().contains("OFFLINE_TAX_CONFLICT"), untaxed.bodyAsText())
+            assertTrue(untaxed.bodyAsText().contains("business rule"), untaxed.bodyAsText())
+            assertEquals(0, transactionCount())
+            assertEquals(BigDecimal("10.00"), stockQuantity(product.id))
+
+            val taxed = syncOfflineSale(cashier, sessionId, product, occurredAt, price = "100.00", tax = "11.00")
+            assertEquals(HttpStatusCode.Created, taxed.status, taxed.bodyAsText())
+            // Harga lama yang berubah di tengah sesi tetap diterima.
+            val oldPrice = syncOfflineSale(cashier, sessionId, product, occurredAt, price = "80.00", tax = "8.80")
+            assertEquals(HttpStatusCode.Created, oldPrice.status, oldPrice.bodyAsText())
+            assertEquals(2, transactionCount())
+            assertEquals(BigDecimal("8.00"), stockQuantity(product.id))
+        }
+    }
+
+    @Test
+    fun test_backdated_session_stored_earlier_does_not_widen_offline_window() = testApplication {
+        application { configureIntegrationApplication() }
+        val cashier = loginAsCashier(loginAsOwner())
+        val product = createProductFixture()
+        val now = OffsetDateTime.now(ZoneOffset.UTC)
+        // Sesi yang tersimpan sebelum aturan openedAt berlaku: openedAt mundur 30 hari, sync baru saja.
+        val sessionId = insertOpenCashSession(cashier.userId, openedAt = now.minusDays(30), offlineSyncedAt = now)
+        insertPriceHistory(product, oldRetail = "80.00", changedAt = now.minusDays(10))
+
+        withTaxedStoreSettings(updatedAt = now.minusDays(10)) {
+            val occurredAt = now.minusMinutes(30)
+            val untaxed = syncOfflineSale(cashier, sessionId, product, occurredAt, price = "100.00")
+            assertEquals(HttpStatusCode.Conflict, untaxed.status, untaxed.bodyAsText())
+            assertTrue(untaxed.bodyAsText().contains("OFFLINE_TAX_CONFLICT"), untaxed.bodyAsText())
+
+            val stalePrice = syncOfflineSale(cashier, sessionId, product, occurredAt, price = "80.00", tax = "8.80")
+            assertEquals(HttpStatusCode.Conflict, stalePrice.status, stalePrice.bodyAsText())
+            assertTrue(stalePrice.bodyAsText().contains("OFFLINE_PRICE_CONFLICT"), stalePrice.bodyAsText())
+            assertEquals(0, transactionCount())
+
+            val valid = syncOfflineSale(cashier, sessionId, product, occurredAt, price = "100.00", tax = "11.00")
+            assertEquals(HttpStatusCode.Created, valid.status, valid.bodyAsText())
+        }
+    }
+
+    @Test
+    fun test_transaction_debt_payment_succeeds_and_replays_idempotently() = testApplication {
+        application { configureIntegrationApplication() }
+        val cashier = loginAsCashier(loginAsOwner())
+        val product = createProductFixture()
+        val customerId = createReceivableCustomerFixture(BigDecimal("1000.00"))
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+        val transactionId = createDebtTransaction(cashier.token, product, customerId)
+        val receivableId = transactionReceivableId(transactionId)
+        val cashBefore = activeCashSystemCash(cashier.userId)
+
+        val key = "debt-pay-${UUID.randomUUID()}"
+        val first = payDebt(cashier.token, transactionId, "80.00", "tunai", key)
+        assertEquals(HttpStatusCode.OK, first.status, first.bodyAsText())
+        assertEquals(BigDecimal("120.00"), transactionReceivableRemaining(UUID.fromString(transactionId)))
+        assertEquals("dp", transactionStatus(transactionId))
+        assertEquals("PARTIAL", receivableStatus(receivableId))
+
+        val replays = coroutineScope {
+            (1..3).map { async { payDebt(cashier.token, transactionId, "80.00", "tunai", key) } }.awaitAll()
+        }
+        replays.forEach { replay ->
+            assertEquals(HttpStatusCode.OK, replay.status, replay.bodyAsText())
+            assertEquals(checkoutDataId(first), checkoutDataId(replay))
+        }
+        assertEquals(1, receivablePaymentCount(receivableId))
+        assertEquals(1, debtPaymentCount(transactionId))
+        assertEquals(cashBefore.add(BigDecimal("80.00")), activeCashSystemCash(cashier.userId))
+
+        val settled = payDebt(cashier.token, transactionId, "120.00", "transfer", "debt-pay-${UUID.randomUUID()}")
+        assertEquals(HttpStatusCode.OK, settled.status, settled.bodyAsText())
+        assertEquals("lunas", transactionStatus(transactionId))
+        assertEquals("PAID", receivableStatus(receivableId))
+        // Transfer tidak masuk laci kas.
+        assertEquals(cashBefore.add(BigDecimal("80.00")), activeCashSystemCash(cashier.userId))
+
+        // Retry yang terlambat tetap menerima hasil sukses walau transaksi sudah lunas.
+        val lateReplay = payDebt(cashier.token, transactionId, "80.00", "tunai", key)
+        assertEquals(HttpStatusCode.OK, lateReplay.status, lateReplay.bodyAsText())
+        assertEquals(2, receivablePaymentCount(receivableId))
+    }
+
+    @Test
+    fun test_transaction_debt_payment_rejects_reused_key_for_different_payment() = testApplication {
+        application { configureIntegrationApplication() }
+        val cashier = loginAsCashier(loginAsOwner())
+        val product = createProductFixture()
+        val customerId = createReceivableCustomerFixture(BigDecimal("1000.00"))
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+        val transactionId = createDebtTransaction(cashier.token, product, customerId)
+        val otherTransactionId = createDebtTransaction(cashier.token, product, customerId)
+        val key = "debt-pay-${UUID.randomUUID()}"
+        val paid = payDebt(cashier.token, transactionId, "80.00", "tunai", key)
+        assertEquals(HttpStatusCode.OK, paid.status, paid.bodyAsText())
+        val cashAfterPayment = activeCashSystemCash(cashier.userId)
+
+        val conflicts = listOf(
+            payDebt(cashier.token, transactionId, "70.00", "tunai", key),
+            payDebt(cashier.token, transactionId, "80.00", "transfer", key),
+            payDebt(cashier.token, otherTransactionId, "80.00", "tunai", key)
+        )
+        conflicts.forEach { conflict ->
+            assertEquals(HttpStatusCode.BadRequest, conflict.status, conflict.bodyAsText())
+            assertTrue(conflict.bodyAsText().contains("VALIDATION_ERROR"), conflict.bodyAsText())
+            assertTrue(
+                conflict.bodyAsText().contains("Idempotency key sudah dipakai untuk pembayaran lain"),
+                conflict.bodyAsText()
+            )
+        }
+        assertEquals(1, receivablePaymentCount(transactionReceivableId(transactionId)))
+        assertEquals(0, receivablePaymentCount(transactionReceivableId(otherTransactionId)))
+        assertEquals(1, debtPaymentCount(transactionId))
+        assertEquals(0, debtPaymentCount(otherTransactionId))
+        assertEquals(cashAfterPayment, activeCashSystemCash(cashier.userId))
+        assertEquals(BigDecimal("120.00"), transactionReceivableRemaining(UUID.fromString(transactionId)))
+    }
+
+    @Test
+    fun test_owner_discount_above_cashier_limit_needs_no_approval() = testApplication {
+        application { configureIntegrationApplication() }
+        val ownerToken = loginAsOwner()
+        val cashier = loginAsCashier(ownerToken)
+        val product = createProductFixture()
+        // API hanya mengizinkan KASIR membuka sesi, jadi sesi OWNER dibuat langsung di database.
+        insertOpenCashSession(ownerId(), openedAt = OffsetDateTime.now(ZoneOffset.UTC))
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+
+        val byCashier = discountCheckout(
+            cashier.token, product, "PERCENTAGE", "50.00", amountPaid = "50.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}"
+        )
+        assertEquals(HttpStatusCode.Forbidden, byCashier.status, byCashier.bodyAsText())
+        assertTrue(byCashier.bodyAsText().contains("MANAGER_APPROVAL_REQUIRED"), byCashier.bodyAsText())
+        assertEquals(0, transactionCount())
+
+        val preview = discountPreview(ownerToken, product, "PERCENTAGE", "50.00")
+        assertEquals(HttpStatusCode.OK, preview.status, preview.bodyAsText())
+        val previewData = Json.parseToJsonElement(preview.bodyAsText()).jsonObject.getValue("data").jsonObject
+        assertFalse(previewData.getValue("approvalRequired").jsonPrimitive.content.toBoolean())
+
+        val byOwner = discountCheckout(
+            ownerToken, product, "PERCENTAGE", "50.00", amountPaid = "50.00",
+            idempotencyKey = "discount-${UUID.randomUUID()}"
+        )
+        assertEquals(HttpStatusCode.Created, byOwner.status, byOwner.bodyAsText())
+        val transactionId = UUID.fromString(checkoutTransactionId(byOwner))
+        assertEquals(
+            Triple(BigDecimal("100.00"), BigDecimal("50.00"), BigDecimal("50.00")),
+            discountSnapshot(transactionId)
+        )
+        assertEquals(0, managerApprovalCount())
+        assertEquals(
+            "0",
+            firstString("SELECT COUNT(*) FROM sales.transactions WHERE discount_manager_approval_id IS NOT NULL")
+        )
+        assertEquals(BigDecimal("9.00"), stockQuantity(product.id))
+    }
+
+    private suspend fun ApplicationTestBuilder.syncOpenSession(
+        cashier: ApprovalUserFixture,
+        openedAt: OffsetDateTime,
+        clientGeneratedId: String = "offline-open-${UUID.randomUUID()}"
+    ): HttpResponse = client.post("/api/sales/sessions/sync/open") {
+        contentType(ContentType.Application.Json)
+        bearer(cashier.token)
+        setBody(
+            """{"clientGeneratedId":"$clientGeneratedId","deviceId":"$OFFLINE_DEVICE_ID","cashierUserId":"${cashier.userId}","openedAt":"$openedAt","startingCash":"100.00"}"""
+        )
+    }
+
+    private suspend fun offlineSessionId(opened: HttpResponse): String {
+        assertEquals(HttpStatusCode.Created, opened.status, opened.bodyAsText())
+        return Json.parseToJsonElement(opened.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue("serverCashSessionId").jsonPrimitive.content
+    }
+
+    /** Satu item qty 1 dibayar tunai; [tax] diisi = snapshot pajak EXCLUDE 11%. */
+    private suspend fun ApplicationTestBuilder.syncOfflineSale(
+        cashier: ApprovalUserFixture,
+        sessionId: String,
+        product: ProductFixture,
+        occurredAt: OffsetDateTime,
+        price: String,
+        tax: String? = null
+    ): HttpResponse = client.post("/api/sales/checkout/sync") {
+        contentType(ContentType.Application.Json)
+        bearer(cashier.token)
+        val total = BigDecimal(price).add(BigDecimal(tax ?: "0.00"))
+        val taxFields = if (tax == null) "" else
+            ""","taxEnabled":true,"taxMode":"EXCLUDE","taxRate":"11.00","taxableBase":"$price","taxAmount":"$tax""""
+        setBody(
+            """{"clientGeneratedId":"offline-checkout-${UUID.randomUUID()}","deviceId":"$OFFLINE_DEVICE_ID","localTransactionCode":"LOCAL-GUARD","cashierUserId":"${cashier.userId}","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"$price","discount":"0.00","total":"$total","paidAmount":"$total","remainingAmount":"0.00","occurredAt":"$occurredAt","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"1.00","priceAtTransaction":"$price","cogsAtTransaction":"50.00","discount":"0.00","subtotal":"$price"}]$taxFields}"""
+        )
+    }
+
+    private fun insertOpenCashSession(
+        userId: UUID,
+        openedAt: OffsetDateTime,
+        offlineSyncedAt: OffsetDateTime? = null
+    ): String = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            INSERT INTO sales.cash_sessions (user_id, opened_at, opening_cash, system_cash, offline_synced_at)
+            VALUES (?, ?, 0, 0, ?) RETURNING id
+            """.trimIndent()
+        ).use { statement ->
+            statement.setObject(1, userId)
+            statement.setObject(2, openedAt)
+            statement.setObject(3, offlineSyncedAt, Types.TIMESTAMP_WITH_TIMEZONE)
+            statement.executeQuery().use { rows -> rows.next(); rows.getString(1) }
+        }
+    }
+
+    private fun insertPriceHistory(product: ProductFixture, oldRetail: String, changedAt: OffsetDateTime) {
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                """
+                INSERT INTO inventory.price_history (
+                    product_id, changed_by, old_price_buy, new_price_buy, old_price_retail, new_price_retail,
+                    old_price_contractor, new_price_contractor, changed_at
+                ) VALUES (?, ?, 50, 50, ?, 100, 90, 90, ?)
+                """.trimIndent()
+            ).use { statement ->
+                statement.setObject(1, product.id)
+                statement.setObject(2, ownerId())
+                statement.setBigDecimal(3, BigDecimal(oldRetail))
+                statement.setObject(4, changedAt)
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    /** Pajak EXCLUDE 11% aktif sejak [updatedAt]; pengaturan semula selalu dipulihkan. */
+    private suspend fun withTaxedStoreSettings(updatedAt: OffsetDateTime, block: suspend () -> Unit) {
+        val original = dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "SELECT tax_enabled, tax_mode, tax_rate, updated_at FROM system.store_settings"
+            ).use { statement ->
+                statement.executeQuery().use { rows ->
+                    assertTrue(rows.next())
+                    StoreTaxFixture(
+                        rows.getBoolean(1), rows.getString(2), rows.getBigDecimal(3),
+                        rows.getObject(4, OffsetDateTime::class.java)
+                    )
+                }
+            }
+        }
+        try {
+            writeStoreTax(StoreTaxFixture(true, "EXCLUDE", BigDecimal("11.00"), updatedAt))
+            block()
+        } finally {
+            writeStoreTax(original)
+        }
+    }
+
+    /** Trigger timestamp dimatikan sebentar (dalam transaksi) karena ia selalu menimpa updated_at. */
+    private fun writeStoreTax(value: StoreTaxFixture) {
+        dataSource.connection.use { connection ->
+            connection.autoCommit = false
+            try {
+                connection.createStatement().use {
+                    it.execute("ALTER TABLE system.store_settings DISABLE TRIGGER trg_store_settings_timestamp")
+                }
+                connection.prepareStatement(
+                    "UPDATE system.store_settings SET tax_enabled = ?, tax_mode = ?, tax_rate = ?, updated_at = ?"
+                ).use { statement ->
+                    statement.setBoolean(1, value.enabled)
+                    statement.setString(2, value.mode)
+                    statement.setBigDecimal(3, value.rate)
+                    statement.setObject(4, value.updatedAt)
+                    assertEquals(1, statement.executeUpdate())
+                }
+                connection.createStatement().use {
+                    it.execute("ALTER TABLE system.store_settings ENABLE TRIGGER trg_store_settings_timestamp")
+                }
+                connection.commit()
+            } catch (cause: Exception) {
+                connection.rollback()
+                throw cause
+            } finally {
+                connection.autoCommit = true
+            }
+        }
+    }
+
+    /** Penjualan 2 x 100.00 yang seluruhnya hutang. */
+    private suspend fun ApplicationTestBuilder.createDebtTransaction(
+        token: String,
+        product: ProductFixture,
+        customerId: UUID
+    ): String {
+        val sale = checkoutWithCustomer(
+            token, product, "2.00", "0.00", "debt-sale-${UUID.randomUUID()}", "hutang", customerId
+        )
+        assertEquals(HttpStatusCode.Created, sale.status, sale.bodyAsText())
+        return checkoutTransactionId(sale)
+    }
+
+    private suspend fun ApplicationTestBuilder.payDebt(
+        token: String,
+        transactionId: String,
+        amount: String,
+        method: String,
+        idempotencyKey: String
+    ): HttpResponse = client.post("/api/sales/transactions/$transactionId/pay") {
+        contentType(ContentType.Application.Json)
+        bearer(token)
+        setBody("""{"amount":"$amount","method":"$method","idempotencyKey":"$idempotencyKey"}""")
+    }
+
+    private fun transactionReceivableId(transactionId: String): String = dataSource.connection.use { connection ->
+        connection.prepareStatement("SELECT id FROM receivable.receivables WHERE transaction_id = ?").use { statement ->
+            statement.setObject(1, UUID.fromString(transactionId))
+            statement.executeQuery().use { rows -> assertTrue(rows.next()); rows.getString(1) }
+        }
+    }
+
+    private fun debtPaymentCount(transactionId: String): Int = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            "SELECT COUNT(*) FROM sales.payments WHERE transaction_id = ? AND payment_source::text = 'RECEIVABLE'"
+        ).use { statement ->
+            statement.setObject(1, UUID.fromString(transactionId))
+            statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+        }
+    }
+
+    private suspend fun ApplicationTestBuilder.loginTokens(username: String, password: String): TokenPair {
+        val response = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"username":"$username","password":"$password"}""")
+        }
+        assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+        val data = Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("data").jsonObject
+        return TokenPair(
+            access = data.getValue("token").jsonPrimitive.content,
+            refresh = data.getValue("refreshToken").jsonPrimitive.content
+        )
+    }
+
+    private suspend fun ApplicationTestBuilder.refreshTokens(refreshToken: String): HttpResponse =
+        client.post("/api/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"refreshToken":"$refreshToken"}""")
+        }
+
+    private fun tokenVersion(userId: UUID): Int = dataSource.connection.use { connection ->
+        connection.prepareStatement("SELECT token_version FROM system.users WHERE id = ?").use { statement ->
+            statement.setObject(1, userId)
+            statement.executeQuery().use { rows -> assertTrue(rows.next()); rows.getInt(1) }
+        }
     }
 
     private suspend fun ApplicationTestBuilder.discountPreview(
@@ -3178,7 +3712,17 @@ class IntegrationTest {
         val unitId: UUID
     )
 
+    private data class TokenPair(val access: String, val refresh: String)
+
+    private data class StoreTaxFixture(
+        val enabled: Boolean,
+        val mode: String,
+        val rate: BigDecimal,
+        val updatedAt: OffsetDateTime
+    )
+
     private companion object {
+        const val OFFLINE_DEVICE_ID = "integration-offline-device"
         const val APPROVAL_TEST_PASSWORD = "Integration-Approval-789!"
         const val APPROVAL_TEST_PIN = "846291"
     }
