@@ -151,7 +151,8 @@ class IntegrationTest {
     @Test
     fun test_concurrent_open_session_should_fail() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
+        val cashier = loginAsCashier(loginAsOwner())
+        val token = cashier.token
         val releaseBothRequests = CompletableDeferred<Unit>()
 
         val responses = coroutineScope {
@@ -170,24 +171,25 @@ class IntegrationTest {
 
         assertEquals(1, responses.count { it.status.value in 200..299 })
         assertEquals(1, responses.count { it.status.value >= 400 })
-        assertEquals(1, openSessionCountForOwner())
+        assertEquals(1, openSessionCount(cashier.userId))
     }
 
     @Test
     fun test_cash_session_close_validates_and_preserves_audit() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
+        val cashier = loginAsCashier(loginAsOwner())
+        val token = cashier.token
         val opened = openSession(token)
         assertEquals(HttpStatusCode.Created, opened.status, opened.bodyAsText())
         val sessionId = UUID.fromString(checkoutDataId(opened))
 
         val invalid = closeSession(token, "-1.00")
         assertEquals(HttpStatusCode.BadRequest, invalid.status, invalid.bodyAsText())
-        assertEquals(1, openSessionCountForOwner())
+        assertEquals(1, openSessionCount(cashier.userId))
 
         val closed = closeSession(token, "100000.00")
         assertEquals(HttpStatusCode.OK, closed.status, closed.bodyAsText())
-        assertEquals(0, openSessionCountForOwner())
+        assertEquals(0, openSessionCount(cashier.userId))
         assertEquals(1, auditActionCount("sales", "cash_sessions", sessionId, "INSERT"))
         assertEquals(1, auditActionCount("sales", "cash_sessions", sessionId, "UPDATE"))
 
@@ -274,7 +276,8 @@ class IntegrationTest {
     @Test
     fun test_financial_constraint_violation_should_rollback() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
+        val cashier = loginAsCashier(loginAsOwner())
+        val token = cashier.token
         val product = createProductFixture()
 
         assertTrue(openSession(token).status.value in 200..299)
@@ -305,7 +308,7 @@ class IntegrationTest {
 
         // Endpoint validation returns before SQL; this write proves PostgreSQL is still the final barrier.
         val checkViolation = assertFailsWith<SQLException> {
-            insertTransactionWithInvalidDiscount(product)
+            insertTransactionWithInvalidDiscount(product, cashier.userId)
         }
         assertEquals("23514", checkViolation.sqlState)
         assertEquals(0, transactionCount())
@@ -314,7 +317,7 @@ class IntegrationTest {
     @Test
     fun test_duplicate_checkout_should_return_same_transaction_and_reduce_stock_once() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
+        val token = loginAsCashier(loginAsOwner()).token
         val product = createProductFixture()
         val key = "checkout-${UUID.randomUUID()}"
         assertTrue(openSession(token).status.value in 200..299)
@@ -334,20 +337,21 @@ class IntegrationTest {
     fun test_concurrent_checkout_should_not_oversell_stock() = testApplication {
         application { configureIntegrationApplication() }
         val ownerToken = loginAsOwner()
-        val cashierToken = createAndLoginCashier(ownerToken)
+        val firstCashierToken = loginAsCashier(ownerToken).token
+        val secondCashierToken = createAndLoginCashier(ownerToken)
         val product = createProductFixture()
-        assertTrue(openSession(ownerToken).status.value in 200..299)
-        assertTrue(openSession(cashierToken).status.value in 200..299)
+        assertTrue(openSession(firstCashierToken).status.value in 200..299)
+        assertTrue(openSession(secondCashierToken).status.value in 200..299)
         val releaseBothRequests = CompletableDeferred<Unit>()
 
         val responses = coroutineScope {
             val first = async {
                 releaseBothRequests.await()
-                checkout(ownerToken, product, "7.00", "700.00", "checkout-${UUID.randomUUID()}")
+                checkout(firstCashierToken, product, "7.00", "700.00", "checkout-${UUID.randomUUID()}")
             }
             val second = async {
                 releaseBothRequests.await()
-                checkout(cashierToken, product, "7.00", "700.00", "checkout-${UUID.randomUUID()}")
+                checkout(secondCashierToken, product, "7.00", "700.00", "checkout-${UUID.randomUUID()}")
             }
             releaseBothRequests.complete(Unit)
             listOf(first.await(), second.await())
@@ -362,7 +366,7 @@ class IntegrationTest {
     @Test
     fun test_insufficient_stock_should_rollback_checkout() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
+        val token = loginAsCashier(loginAsOwner()).token
         val product = createProductFixture()
         assertTrue(openSession(token).status.value in 200..299)
 
@@ -382,7 +386,7 @@ class IntegrationTest {
     @Test
     fun test_invalid_payment_should_not_create_transaction() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
+        val token = loginAsCashier(loginAsOwner()).token
         val product = createProductFixture()
         assertTrue(openSession(token).status.value in 200..299)
 
@@ -404,9 +408,10 @@ class IntegrationTest {
     fun test_void_should_restore_stock_be_idempotent_and_reconcile_stock_card() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertTrue(openSession(token).status.value in 200..299)
-        val checkout = checkout(token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+        val checkout = checkout(cashier.token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
         val transactionId = checkoutTransactionId(checkout)
         val key = "void-${UUID.randomUUID()}"
 
@@ -427,10 +432,11 @@ class IntegrationTest {
     fun test_full_refund_should_compensate_cash_restore_stock_and_be_idempotent() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertTrue(openSession(token).status.value in 200..299)
+        assertTrue(openSession(cashier.token).status.value in 200..299)
         val transactionId = checkoutTransactionId(
-            checkout(token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
+            checkout(cashier.token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
         )
         val key = "refund-${UUID.randomUUID()}"
 
@@ -447,7 +453,7 @@ class IntegrationTest {
         assertEquals(BigDecimal("10.00"), stockQuantity(product.id))
         assertEquals(stockQuantity(product.id), latestLedgerBalance(product.id))
         assertEquals(1, stockMovementCount(product.id, "REFUND"))
-        assertEquals(BigDecimal("100000.00"), activeCashSystemCash(ownerId()))
+        assertEquals(BigDecimal("100000.00"), activeCashSystemCash(cashier.userId))
 
         val voidAfterRefund = voidTransaction(
             token, transactionId, "void-${UUID.randomUUID()}", "Void tidak boleh sesudah refund"
@@ -468,10 +474,11 @@ class IntegrationTest {
     fun test_refund_without_physical_return_should_not_restore_stock() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertTrue(openSession(token).status.value in 200..299)
+        assertTrue(openSession(cashier.token).status.value in 200..299)
         val transactionId = checkoutTransactionId(
-            checkout(token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+            checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
         )
 
         val response = refundTransaction(
@@ -491,13 +498,14 @@ class IntegrationTest {
     fun test_refund_hutang_and_dp_use_actual_received_amount_and_cancel_receivable() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
         val customerId = createReceivableCustomerFixture(BigDecimal("1000.00"))
-        assertTrue(openSession(token).status.value in 200..299)
+        assertTrue(openSession(cashier.token).status.value in 200..299)
 
         val debtId = checkoutTransactionId(
             checkoutWithCustomer(
-                token, product, "1.00", "0.00", "checkout-${UUID.randomUUID()}", "hutang", customerId
+                cashier.token, product, "1.00", "0.00", "checkout-${UUID.randomUUID()}", "hutang", customerId
             )
         )
         val debtRefund = refundTransaction(
@@ -509,7 +517,7 @@ class IntegrationTest {
 
         val dpId = checkoutTransactionId(
             checkoutWithCustomer(
-                token, product, "1.00", "30.00", "checkout-${UUID.randomUUID()}", "dp", customerId
+                cashier.token, product, "1.00", "30.00", "checkout-${UUID.randomUUID()}", "dp", customerId
             )
         )
         val dpRefund = refundTransaction(
@@ -524,10 +532,11 @@ class IntegrationTest {
     fun test_concurrent_refund_should_create_one_compensation_and_one_stock_return() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertTrue(openSession(token).status.value in 200..299)
+        assertTrue(openSession(cashier.token).status.value in 200..299)
         val transactionId = checkoutTransactionId(
-            checkout(token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
+            checkout(cashier.token, product, "2.00", "200.00", "checkout-${UUID.randomUUID()}")
         )
         val release = CompletableDeferred<Unit>()
         val responses = coroutineScope {
@@ -629,12 +638,13 @@ class IntegrationTest {
     fun test_report_separates_voided_totals_and_csv_neutralizes_formula() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertTrue(openSession(token).status.value in 200..299)
+        assertTrue(openSession(cashier.token).status.value in 200..299)
 
-        val active = checkout(token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        val active = checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
         assertTrue(active.status.value in 200..299, active.bodyAsText())
-        val voided = checkout(token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        val voided = checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
         val voidId = checkoutTransactionId(voided)
         assertEquals(HttpStatusCode.OK, voidTransaction(token, voidId, "void-${UUID.randomUUID()}", "Uji pemisahan laporan").status)
 
@@ -661,10 +671,11 @@ class IntegrationTest {
     fun test_concurrent_void_should_create_one_compensation_only() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertTrue(openSession(token).status.value in 200..299)
+        assertTrue(openSession(cashier.token).status.value in 200..299)
         val transactionId = checkoutTransactionId(
-            checkout(token, product, "3.00", "300.00", "checkout-${UUID.randomUUID()}")
+            checkout(cashier.token, product, "3.00", "300.00", "checkout-${UUID.randomUUID()}")
         )
         val release = CompletableDeferred<Unit>()
         val responses = coroutineScope {
@@ -685,10 +696,11 @@ class IntegrationTest {
     fun test_void_failure_should_rollback_status_event_and_compensations() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertTrue(openSession(token).status.value in 200..299)
+        assertTrue(openSession(cashier.token).status.value in 200..299)
         val transactionId = checkoutTransactionId(
-            checkout(token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+            checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
         )
         deleteStockFixture(product.id)
 
@@ -708,9 +720,9 @@ class IntegrationTest {
         val cashier = createAndLoginApprovalUser(ownerToken, Role.KASIR, "void_cashier")
         val product = createProductFixture()
 
-        assertTrue(openSession(admin.token).status.value in 200..299)
+        assertTrue(openSession(cashier.token).status.value in 200..299)
         val adminTransactionId = checkoutTransactionId(
-            checkout(admin.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+            checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
         )
         val adminVoid = voidTransaction(
             admin.token,
@@ -721,7 +733,6 @@ class IntegrationTest {
         assertEquals(HttpStatusCode.OK, adminVoid.status, adminVoid.bodyAsText())
         assertFalse(adminVoid.bodyAsText().contains("managerApprovalId\":\""), adminVoid.bodyAsText())
 
-        assertTrue(openSession(cashier.token).status.value in 200..299)
         val cashierTransactionId = checkoutTransactionId(
             checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
         )
@@ -955,9 +966,10 @@ class IntegrationTest {
     fun test_transaction_history_filters_should_match_receipt_method_status_and_cashier() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertTrue(openSession(token).status.value in 200..299)
-        val checkout = checkout(token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
+        assertTrue(openSession(cashier.token).status.value in 200..299)
+        val checkout = checkout(cashier.token, product, "1.00", "100.00", "checkout-${UUID.randomUUID()}")
         val data = Json.parseToJsonElement(checkout.bodyAsText()).jsonObject.getValue("data").jsonObject
         val receipt = data.getValue("receiptId").jsonPrimitive.content
 
@@ -966,7 +978,7 @@ class IntegrationTest {
             url.parameters.append("receiptNumber", receipt)
             url.parameters.append("paymentMethod", "tunai")
             url.parameters.append("status", "lunas")
-            url.parameters.append("cashierId", ownerId().toString())
+            url.parameters.append("cashierId", cashier.userId.toString())
         }
         assertEquals(HttpStatusCode.OK, history.status, history.bodyAsText())
         assertTrue(history.bodyAsText().contains(receipt), history.bodyAsText())
@@ -1298,10 +1310,18 @@ class IntegrationTest {
             requestManagerApproval(requester.token, UUID.randomUUID(), approver.username, "000999")
         }
 
-        responses.take(5).forEach { response ->
+        // Dua PIN salah pertama ditolak biasa; yang ketiga mengunci approver (lockout per approver).
+        responses.take(2).forEach { response ->
             assertEquals(HttpStatusCode.Forbidden, response.status, response.bodyAsText())
+            assertTrue(response.bodyAsText().contains("MANAGER_APPROVAL_INVALID"), response.bodyAsText())
         }
+        responses.subList(2, 5).forEach { response ->
+            assertEquals(HttpStatusCode.TooManyRequests, response.status, response.bodyAsText())
+            assertTrue(response.bodyAsText().contains("MANAGER_APPROVER_LOCKED"), response.bodyAsText())
+        }
+        // Permintaan keenam dihentikan rate limit per IP, bukan oleh lockout approver.
         assertEquals(HttpStatusCode.TooManyRequests, responses.last().status, responses.last().bodyAsText())
+        assertTrue(responses.last().bodyAsText().contains("RATE_LIMITED"), responses.last().bodyAsText())
         assertEquals(0, managerApprovalCount())
     }
 
@@ -1663,8 +1683,9 @@ class IntegrationTest {
     @Test
     fun test_offline_sync_rejects_price_not_in_server_price_list() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
-        val userId = ownerId()
+        val cashier = loginAsCashier(loginAsOwner())
+        val token = cashier.token
+        val userId = cashier.userId
         val product = createProductFixture()
         val deviceId = "integration-device-${UUID.randomUUID()}"
         val opened = client.post("/api/sales/sessions/sync/open") {
@@ -1706,8 +1727,9 @@ class IntegrationTest {
     @Test
     fun test_e2e_supported_offline_sync_is_idempotent_and_audited() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
-        val userId = ownerId()
+        val cashier = loginAsCashier(loginAsOwner())
+        val token = cashier.token
+        val userId = cashier.userId
         val product = createProductFixture()
         val deviceId = "integration-device-${UUID.randomUUID()}"
         val openKey = "offline-open-${UUID.randomUUID()}"
@@ -1795,11 +1817,12 @@ class IntegrationTest {
     fun test_e2e_pos_stock_receivable_payment_void_and_report() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
         val customerId = createReceivableCustomerFixture(BigDecimal("1000.00"))
-        assertEquals(HttpStatusCode.Created, openSession(token).status)
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
 
-        val sale = checkout(token, product, "2.00", "200.00", "e2e-checkout-${UUID.randomUUID()}")
+        val sale = checkout(cashier.token, product, "2.00", "200.00", "e2e-checkout-${UUID.randomUUID()}")
         assertEquals(HttpStatusCode.Created, sale.status, sale.bodyAsText())
         assertEquals(BigDecimal("8.00"), stockQuantity(product.id))
 
@@ -1888,18 +1911,38 @@ class IntegrationTest {
     fun test_discount_snapshots_refund_and_analytics_use_net_amount() = testApplication {
         application { configureIntegrationApplication() }
         val token = loginAsOwner()
+        val admin = createAndLoginApprovalUser(token, Role.ADMIN, "discount_snapshot_admin")
+        val cashier = loginAsCashier(token)
         val product = createProductFixture()
-        assertEquals(HttpStatusCode.Created, openSession(token).status)
+        assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+
+        val preview = discountPreview(
+            cashier.token, product, "PERCENTAGE", "10.00",
+            transactionDiscountType = "FIXED_AMOUNT", transactionDiscountValue = "10.00"
+        )
+        assertEquals(HttpStatusCode.OK, preview.status, preview.bodyAsText())
+        val attemptId = UUID.fromString(
+            Json.parseToJsonElement(preview.bodyAsText()).jsonObject.getValue("data").jsonObject
+                .getValue("checkoutAttemptId").jsonPrimitive.content
+        )
+        val approvalId = managerApprovalId(
+            requestManagerApproval(
+                cashier.token, attemptId, admin.username, admin.pin,
+                action = "DISCOUNT_OVERRIDE", resourceType = "TRANSACTION"
+            )
+        )
 
         val response = discountCheckout(
-            token = token,
+            token = cashier.token,
             product = product,
             itemDiscountType = "PERCENTAGE",
             itemDiscountValue = "10.00",
             transactionDiscountType = "FIXED_AMOUNT",
             transactionDiscountValue = "10.00",
             amountPaid = "80.00",
-            idempotencyKey = "discount-${UUID.randomUUID()}"
+            idempotencyKey = "discount-${UUID.randomUUID()}",
+            checkoutAttemptId = attemptId,
+            managerApprovalId = approvalId
         )
         assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
         val transactionId = checkoutTransactionId(response)
@@ -2163,7 +2206,7 @@ class IntegrationTest {
     @Test
     fun test_discounted_dp_creates_receivable_from_net_total() = testApplication {
         application { configureIntegrationApplication() }
-        val token = loginAsOwner()
+        val token = loginAsCashier(loginAsOwner()).token
         val product = createProductFixture()
         val customerId = createReceivableCustomerFixture(BigDecimal("1000.00"))
         assertEquals(HttpStatusCode.Created, openSession(token).status)
@@ -2184,13 +2227,19 @@ class IntegrationTest {
         token: String,
         product: ProductFixture,
         type: String,
-        value: String
-    ): HttpResponse = client.post("/api/sales/checkout/preview") {
-        contentType(ContentType.Application.Json)
-        bearer(token)
-        setBody(
-            """{"items":[{"productId":"${product.id}","qty":"1.00","discountRequest":{"type":"$type","value":"$value"}}]}"""
-        )
+        value: String,
+        transactionDiscountType: String? = null,
+        transactionDiscountValue: String? = null
+    ): HttpResponse {
+        val transactionDiscount = if (transactionDiscountType == null) "" else
+            ",\"transactionDiscount\":{\"type\":\"$transactionDiscountType\",\"value\":\"$transactionDiscountValue\"}"
+        return client.post("/api/sales/checkout/preview") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody(
+                """{"items":[{"productId":"${product.id}","qty":"1.00","discountRequest":{"type":"$type","value":"$value"}}]$transactionDiscount}"""
+            )
+        }
     }
 
     private suspend fun ApplicationTestBuilder.discountCheckout(
@@ -2332,6 +2381,10 @@ class IntegrationTest {
             .jsonPrimitive
             .content
     }
+
+    /** Sesi kas hanya boleh dibuka role KASIR, jadi alur POS di test memakai kasir khusus ini. */
+    private suspend fun ApplicationTestBuilder.loginAsCashier(ownerToken: String): ApprovalUserFixture =
+        createAndLoginApprovalUser(ownerToken, Role.KASIR, "pos_cashier")
 
     private suspend fun ApplicationTestBuilder.openSession(token: String): HttpResponse {
         return client.post("/api/sales/sessions/open") {
@@ -2641,7 +2694,7 @@ class IntegrationTest {
         }
     }
 
-    private fun openSessionCountForOwner(): Int {
+    private fun openSessionCount(userId: UUID): Int {
         return dataSource.connection.use { connection ->
             connection.prepareStatement(
                 """
@@ -2650,7 +2703,7 @@ class IntegrationTest {
                 WHERE user_id = ? AND closed_at IS NULL
                 """.trimIndent()
             ).use { statement ->
-                statement.setObject(1, ownerId())
+                statement.setObject(1, userId)
                 statement.executeQuery().use { result ->
                     result.next()
                     result.getInt(1)
@@ -3030,7 +3083,7 @@ class IntegrationTest {
         }
     }
 
-    private fun insertTransactionWithInvalidDiscount(product: ProductFixture) {
+    private fun insertTransactionWithInvalidDiscount(product: ProductFixture, userId: UUID) {
         dataSource.connection.use { connection ->
             connection.autoCommit = false
             try {
@@ -3041,8 +3094,8 @@ class IntegrationTest {
                     RETURNING id
                     """.trimIndent()
                 ).use { statement ->
-                    statement.setObject(1, activeSessionIdForOwner())
-                    statement.setObject(2, ownerId())
+                    statement.setObject(1, activeSessionId(userId))
+                    statement.setObject(2, userId)
                     statement.setBigDecimal(3, BigDecimal("100.00"))
                     statement.setBigDecimal(4, BigDecimal("100.00"))
                     statement.executeQuery().use { result ->
@@ -3086,7 +3139,7 @@ class IntegrationTest {
         }
     }
 
-    private fun activeSessionIdForOwner(): UUID {
+    private fun activeSessionId(userId: UUID): UUID {
         return dataSource.connection.use { connection ->
             connection.prepareStatement(
                 """
@@ -3095,7 +3148,7 @@ class IntegrationTest {
                 WHERE user_id = ? AND closed_at IS NULL
                 """.trimIndent()
             ).use { statement ->
-                statement.setObject(1, ownerId())
+                statement.setObject(1, userId)
                 statement.executeQuery().use { result ->
                     assertTrue(result.next(), "Open session fixture must exist")
                     result.getObject("id", UUID::class.java)

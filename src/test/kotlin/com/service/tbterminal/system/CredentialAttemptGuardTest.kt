@@ -31,7 +31,7 @@ class CredentialAttemptGuardTest {
     }
 
     @Test
-    fun `reaching threshold locks with backoff`() = runBlocking {
+    fun `reaching threshold locks with backoff`() = runBlocking<Unit> {
         val guard = CredentialAttemptGuard(InMemoryAttemptStore(), clock)
         repeat(2) { guard.registerFailure(userId, CredentialScope.PIN, policy) }
         val third = guard.registerFailure(userId, CredentialScope.PIN, policy)
