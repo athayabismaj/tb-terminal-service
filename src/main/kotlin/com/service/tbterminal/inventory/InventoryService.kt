@@ -1,9 +1,18 @@
 package com.service.tbterminal.inventory
 
+import com.service.tbterminal.shared.EnvironmentConfig
 import com.service.tbterminal.shared.NotFoundException
+import com.service.tbterminal.shared.PayloadTooLargeException
 import com.service.tbterminal.shared.ValidationException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
-class InventoryService(private val repository: InventoryRepository) {
+class InventoryService(
+    private val repository: InventoryRepository,
+    private val mediaStorage: ProductMediaStorage = DisabledProductMediaStorage(),
+    private val maxImageBytesProvider: () -> Long = { EnvironmentConfig.cloudinaryMaxImageBytes }
+) {
 
     // ==========================================
     // CATEGORIES
@@ -211,7 +220,6 @@ class InventoryService(private val repository: InventoryRepository) {
             priceContractor = request.priceContractor,
             discount = request.discount,
             minStock = request.minStock,
-            photoFilename = request.photoFilename,
             secondaryUnitId = secondaryUnitId,
             secondaryUnitFactor = secondaryUnitFactor
         )
@@ -219,6 +227,55 @@ class InventoryService(private val repository: InventoryRepository) {
         request.priceTiers?.let { repository.replaceProductPriceTiers(uuid, it) }
 
         return repository.getProductById(uuid)!!
+    }
+
+    suspend fun prepareProductPhotoUpload(id: String): Long {
+        mediaStorage.ensureEnabled()
+        val uuid = parseInventoryUUID(id)
+        repository.getProductById(uuid) ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
+        return maxImageBytesProvider()
+    }
+
+    suspend fun uploadProductPhoto(id: String, bytes: ByteArray): ProductPhotoResponse {
+        mediaStorage.ensureEnabled()
+        val uuid = parseInventoryUUID(id)
+        if (bytes.isEmpty()) {
+            throw ValidationException("File foto tidak boleh kosong")
+        }
+        if (bytes.size.toLong() > maxImageBytesProvider()) {
+            throw PayloadTooLargeException("Ukuran foto melebihi batas maksimal")
+        }
+        val mediaType = detectImageMediaType(bytes)
+            ?: throw ValidationException("Format foto harus berupa JPEG, PNG, atau WebP")
+
+        // Upload ke Cloudinary di luar transaksi DB agar koneksi DB tidak tertahan I/O eksternal.
+        val uploaded = mediaStorage.uploadProductPhoto(bytes, mediaType)
+
+        val oldPublicId = try {
+            repository.setProductPhoto(uuid, uploaded.secureUrl, uploaded.publicId)
+        } catch (cause: CancellationException) {
+            withContext(NonCancellable) {
+                mediaStorage.destroyProductPhoto(uploaded.publicId)
+            }
+            throw cause
+        } catch (cause: Throwable) {
+            mediaStorage.destroyProductPhoto(uploaded.publicId)
+            throw cause
+        }
+
+        if (!oldPublicId.isNullOrBlank() && oldPublicId != uploaded.publicId) {
+            mediaStorage.destroyProductPhoto(oldPublicId)
+        }
+        return ProductPhotoResponse(productId = uuid.toString(), photoUrl = uploaded.secureUrl)
+    }
+
+    suspend fun deleteProductPhoto(id: String) {
+        mediaStorage.ensureEnabled()
+        val uuid = parseInventoryUUID(id)
+        val oldPublicId = repository.clearProductPhoto(uuid)
+        if (!oldPublicId.isNullOrBlank()) {
+            mediaStorage.destroyProductPhoto(oldPublicId)
+        }
     }
 
     suspend fun getProductPriceTiers(productId: String): List<ProductPriceTierDto> {

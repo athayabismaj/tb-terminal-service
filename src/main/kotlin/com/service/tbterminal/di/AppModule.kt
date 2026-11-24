@@ -1,8 +1,10 @@
 package com.service.tbterminal.di
 
+import com.service.tbterminal.inventory.CloudinaryMediaStorage
 import com.service.tbterminal.inventory.InventoryRepository
 import com.service.tbterminal.inventory.InventoryRepositoryImpl
 import com.service.tbterminal.inventory.InventoryService
+import com.service.tbterminal.inventory.ProductMediaStorage
 import com.service.tbterminal.purchasing.PurchasingRepository
 import com.service.tbterminal.purchasing.PurchasingRepositoryImpl
 import com.service.tbterminal.purchasing.PurchasingService
@@ -40,8 +42,9 @@ val appModule = module {
     single { ManagerApprovalService(get()) }
 
     // Inventory Module
+    single<ProductMediaStorage> { CloudinaryMediaStorage.fromEnvironment() }
     single<InventoryRepository> { InventoryRepositoryImpl() }
-    single { InventoryService(get()) }
+    single { InventoryService(get(), get()) }
 
     // Sales Module
     single<DiscountRepository> { DiscountRepositoryImpl() }

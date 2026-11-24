@@ -1,6 +1,8 @@
 package com.service.tbterminal.inventory
 
 import com.service.tbterminal.shared.ApiResponse
+import com.service.tbterminal.shared.PayloadTooLargeException
+import com.service.tbterminal.shared.ValidationException
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.requirePermission
@@ -8,7 +10,10 @@ import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
 import com.service.tbterminal.system.recordOperationalAudit
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.PartData
+import io.ktor.http.content.forEachPart
 import io.ktor.server.request.receive
+import io.ktor.server.request.receiveMultipart
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.delete
@@ -17,6 +22,10 @@ import io.ktor.server.routing.patch
 import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.route
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.readAvailable
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 
 internal fun Route.productRoutes(service: InventoryService, systemService: SystemService) {
     route("/products") {
@@ -128,7 +137,75 @@ internal fun Route.productRoutes(service: InventoryService, systemService: Syste
             )
             call.respond(HttpStatusCode.OK, ApiResponse.success(updated, "Harga grosir bertingkat berhasil disimpan"))
         }
+
+        post("/{id}/photo") {
+            call.requirePermission(Permission.MANAGE_INVENTORY)
+            val id = call.parameters["id"] ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val actorUserId = call.getUserId()
+            val maxBytes = service.prepareProductPhotoUpload(id)
+            var uploadedBytes: ByteArray? = null
+            try {
+                call.receiveMultipart(formFieldLimit = maxBytes).forEachPart { part ->
+                    try {
+                        if (part is PartData.FileItem && uploadedBytes == null) {
+                            uploadedBytes = readLimitedBytes(part.provider(), maxBytes)
+                        }
+                    } finally {
+                        part.dispose()
+                    }
+                }
+            } catch (cause: IOException) {
+                if (cause.message?.contains("exceeds limit", ignoreCase = true) == true) {
+                    throw PayloadTooLargeException("Ukuran foto melebihi batas maksimal")
+                }
+                throw cause
+            }
+            val bytes = uploadedBytes ?: throw ValidationException("File foto wajib diunggah")
+            val photo = service.uploadProductPhoto(id, bytes)
+            systemService.recordOperationalAudit(
+                call = call,
+                actorUserId = actorUserId,
+                action = AuditAction.UPDATE,
+                schemaName = "inventory",
+                tableName = "products_photo",
+                recordId = photo.productId
+            )
+            call.respond(HttpStatusCode.OK, ApiResponse.success(photo, "Foto produk berhasil diunggah"))
+        }
+
+        delete("/{id}/photo") {
+            call.requirePermission(Permission.MANAGE_INVENTORY)
+            val id = call.parameters["id"] ?: return@delete call.respond(HttpStatusCode.BadRequest)
+            val actorUserId = call.getUserId()
+            service.deleteProductPhoto(id)
+            systemService.recordOperationalAudit(
+                call = call,
+                actorUserId = actorUserId,
+                action = AuditAction.DELETE,
+                schemaName = "inventory",
+                tableName = "products_photo",
+                recordId = id
+            )
+            call.respond(HttpStatusCode.NoContent)
+        }
     }
+}
+
+private suspend fun readLimitedBytes(channel: ByteReadChannel, maxBytes: Long): ByteArray {
+    val out = ByteArrayOutputStream()
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var total = 0L
+    while (true) {
+        val read = channel.readAvailable(buffer)
+        if (read < 0) break
+        if (read == 0) continue
+        total += read
+        if (total > maxBytes) {
+            throw PayloadTooLargeException("Ukuran foto melebihi batas maksimal")
+        }
+        out.write(buffer, 0, read)
+    }
+    return out.toByteArray()
 }
 
 private fun ProductResponse.hasDifferentPriceThan(other: ProductResponse): Boolean {

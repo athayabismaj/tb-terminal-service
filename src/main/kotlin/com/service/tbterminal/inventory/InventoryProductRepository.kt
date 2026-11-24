@@ -1,5 +1,6 @@
 package com.service.tbterminal.inventory
 
+import com.service.tbterminal.shared.NotFoundException
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
@@ -81,11 +82,10 @@ internal class InventoryProductRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?,
         secondaryUnitId: UUID?,
         secondaryUnitFactor: BigDecimal?
     ): UUID = newSuspendedTransaction(Dispatchers.IO) {
-        val productId = insertProduct(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename)
+        val productId = insertProduct(categoryId, baseUnitId, sku, name, priceBuy, priceRetail, priceContractor, discount, minStock)
         StockTable.insert {
             it[this.productId] = productId
             it[unitId] = baseUnitId
@@ -105,11 +105,10 @@ internal class InventoryProductRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?,
         secondaryUnitId: UUID?,
         secondaryUnitFactor: BigDecimal?
     ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
-        val updated = updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
+        val updated = updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock) > 0
         if (updated) replaceUnitConversion(id, baseUnitId, secondaryUnitId, secondaryUnitFactor)
         updated
     }
@@ -124,12 +123,11 @@ internal class InventoryProductRepository {
         priceContractor: BigDecimal,
         discount: BigDecimal,
         minStock: BigDecimal,
-        photoFilename: String?,
         secondaryUnitId: UUID?,
         secondaryUnitFactor: BigDecimal?
     ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = true }
-        val updated = updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock, photoFilename) > 0
+        val updated = updateProductFields(id, categoryId, baseUnitId, name, priceBuy, priceRetail, priceContractor, discount, minStock) > 0
         if (updated) replaceUnitConversion(id, baseUnitId, secondaryUnitId, secondaryUnitFactor)
         updated
     }
@@ -142,6 +140,34 @@ internal class InventoryProductRepository {
         ProductsTable.update({ ProductsTable.id eq id }) { it[isActive] = true } > 0
     }
 
+    suspend fun setProductPhoto(id: UUID, photoUrl: String, publicId: String): String? = newSuspendedTransaction(Dispatchers.IO) {
+        val row = ProductsTable
+            .select { (ProductsTable.id eq id) and (ProductsTable.isActive eq true) }
+            .forUpdate()
+            .singleOrNull()
+            ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
+        val oldPublicId = row[ProductsTable.photoPublicId]
+        ProductsTable.update({ ProductsTable.id eq id }) {
+            it[photoFilename] = photoUrl
+            it[photoPublicId] = publicId
+        }
+        oldPublicId
+    }
+
+    suspend fun clearProductPhoto(id: UUID): String? = newSuspendedTransaction(Dispatchers.IO) {
+        val row = ProductsTable
+            .select { (ProductsTable.id eq id) and (ProductsTable.isActive eq true) }
+            .forUpdate()
+            .singleOrNull()
+            ?: throw NotFoundException("Produk tidak ditemukan atau tidak aktif")
+        val oldPublicId = row[ProductsTable.photoPublicId]
+        ProductsTable.update({ ProductsTable.id eq id }) {
+            it[photoFilename] = null
+            it[photoPublicId] = null
+        }
+        oldPublicId
+    }
+
     private fun insertProduct(
         categoryId: UUID,
         baseUnitId: UUID,
@@ -151,8 +177,7 @@ internal class InventoryProductRepository {
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
         discount: BigDecimal,
-        minStock: BigDecimal,
-        photoFilename: String?
+        minStock: BigDecimal
     ): UUID {
         val productId = UUID.randomUUID()
         ProductsTable.insert {
@@ -166,7 +191,6 @@ internal class InventoryProductRepository {
             it[this.priceContractor] = priceContractor
             it[this.discount] = discount
             it[this.minStock] = minStock
-            it[this.photoFilename] = photoFilename
             it[isActive] = true
         }
         return productId
@@ -181,8 +205,7 @@ internal class InventoryProductRepository {
         priceRetail: BigDecimal,
         priceContractor: BigDecimal,
         discount: BigDecimal,
-        minStock: BigDecimal,
-        photoFilename: String?
+        minStock: BigDecimal
     ): Int {
         return ProductsTable.update({ ProductsTable.id eq id }) {
             it[this.categoryId] = categoryId
@@ -193,7 +216,6 @@ internal class InventoryProductRepository {
             it[this.priceContractor] = priceContractor
             it[this.discount] = discount
             it[this.minStock] = minStock
-            if (photoFilename != null) it[this.photoFilename] = photoFilename
         }
     }
 
@@ -258,7 +280,7 @@ internal class InventoryProductRepository {
             priceContractor = row[ProductsTable.priceContractor],
             discount = row[ProductsTable.discount],
             minStock = row[ProductsTable.minStock],
-            photoFilename = row[ProductsTable.photoFilename],
+            photoUrl = row[ProductsTable.photoFilename],
             isActive = row[ProductsTable.isActive],
             secondaryUnitId = conversion?.get(UnitConversionsTable.fromUnitId)?.toString(),
             secondaryUnitFactor = conversion?.get(UnitConversionsTable.factor)?.stripTrailingZeros()?.toPlainString(),

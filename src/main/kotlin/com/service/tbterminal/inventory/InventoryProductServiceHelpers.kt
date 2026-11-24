@@ -67,7 +67,6 @@ internal suspend fun restoreInactiveProduct(
         priceContractor = request.priceContractor,
         discount = request.discount,
         minStock = request.minStock,
-        photoFilename = request.photoFilename,
         secondaryUnitId = draft.secondaryUnitId,
         secondaryUnitFactor = draft.secondaryUnitFactor
     )
@@ -90,7 +89,6 @@ internal suspend fun createNewProduct(
         priceContractor = request.priceContractor,
         discount = request.discount,
         minStock = request.minStock,
-        photoFilename = request.photoFilename,
         secondaryUnitId = draft.secondaryUnitId,
         secondaryUnitFactor = draft.secondaryUnitFactor
     )

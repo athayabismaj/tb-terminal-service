@@ -236,6 +236,7 @@ internal class InventoryStockRepository {
             priceRetail = row[VStockDetailView.priceRetail],
             priceContractor = row[VStockDetailView.priceContractor],
             isActive = row[VStockDetailView.isActive],
+            photoUrl = row[VStockDetailView.photoFilename],
             priceTiers = priceTiers,
         )
     }
