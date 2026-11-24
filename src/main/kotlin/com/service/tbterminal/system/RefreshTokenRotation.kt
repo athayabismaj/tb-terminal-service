@@ -18,7 +18,7 @@ sealed interface RefreshDecision {
     /** Token sah dan belum pernah dipakai: tandai terpakai lalu terbitkan token baru di keluarga yang sama. */
     data object Rotate : RefreshDecision
 
-    /** Token yang sudah pernah dirotasi dipakai lagi: indikasi pencurian, cabut seluruh keluarga. */
+    /** Token yang sudah pernah dirotasi dipakai lagi: indikasi pencurian, cabut seluruh keluarga dan semua sesi user. */
     data object ReuseDetected : RefreshDecision
 
     data class Reject(val reason: String) : RefreshDecision

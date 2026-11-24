@@ -426,15 +426,6 @@ private class FakePinVerificationGateway : PinVerificationGateway {
         return attempts[userId to deviceId]
     }
 
-    override suspend fun savePinAttemptState(
-        userId: UUID,
-        deviceId: String,
-        failedAttempts: Int,
-        lockedUntil: OffsetDateTime?
-    ) {
-        attempts[userId to deviceId] = PinAttemptState(failedAttempts, lockedUntil)
-    }
-
     override suspend fun resetPinAttemptState(userId: UUID, deviceId: String) {
         attempts.remove(userId to deviceId)
     }
@@ -443,10 +434,11 @@ private class FakePinVerificationGateway : PinVerificationGateway {
         attempts.keys.filter { it.first == userId }.forEach { attempts.remove(it) }
     }
 
-    override suspend fun incrementPinFailure(userId: UUID, scopeKey: String): Int {
-        val current = attempts[userId to scopeKey] ?: PinAttemptState()
-        val next = current.copy(failedAttempts = current.failedAttempts + 1)
-        attempts[userId to scopeKey] = next
-        return next.failedAttempts
-    }
+    override suspend fun registerPinFailure(
+        userId: UUID,
+        scopeKey: String,
+        policy: PinRolePolicy,
+        now: OffsetDateTime
+    ): PinAttemptState = nextFailureState(attempts[userId to scopeKey], policy, now)
+        .also { attempts[userId to scopeKey] = it }
 }

@@ -75,14 +75,17 @@ class CredentialAttemptGuardTest {
     }
 }
 
+/** Aturan yang sama dengan SQL di SystemRepository.registerPinFailure, untuk store palsu di test. */
+internal fun nextFailureState(current: PinAttemptState?, policy: PinRolePolicy, now: OffsetDateTime): PinAttemptState {
+    val failures = (current?.failedAttempts ?: 0) + 1
+    val lock = listOfNotNull(current?.lockedUntil, CredentialAttemptGuard.lockFor(policy, failures, now)).maxOrNull()
+    return PinAttemptState(failures, lock)
+}
+
 private class InMemoryAttemptStore : PinAttemptStore {
     private val states = ConcurrentHashMap<Pair<UUID, String>, PinAttemptState>()
 
     override suspend fun getPinAttemptState(userId: UUID, scopeKey: String) = states[userId to scopeKey]
-
-    override suspend fun savePinAttemptState(userId: UUID, scopeKey: String, failedAttempts: Int, lockedUntil: OffsetDateTime?) {
-        states[userId to scopeKey] = PinAttemptState(failedAttempts, lockedUntil)
-    }
 
     override suspend fun resetPinAttemptState(userId: UUID, scopeKey: String) {
         states.remove(userId to scopeKey)
@@ -92,8 +95,10 @@ private class InMemoryAttemptStore : PinAttemptStore {
         states.keys.removeIf { it.first == userId }
     }
 
-    override suspend fun incrementPinFailure(userId: UUID, scopeKey: String): Int =
-        states.compute(userId to scopeKey) { _, current ->
-            (current ?: PinAttemptState()).let { it.copy(failedAttempts = it.failedAttempts + 1) }
-        }!!.failedAttempts
+    override suspend fun registerPinFailure(
+        userId: UUID,
+        scopeKey: String,
+        policy: PinRolePolicy,
+        now: OffsetDateTime
+    ): PinAttemptState = states.compute(userId to scopeKey) { _, current -> nextFailureState(current, policy, now) }!!
 }

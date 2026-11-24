@@ -36,15 +36,20 @@ enum class CredentialScope(val key: String) {
 
 interface PinAttemptStore {
     suspend fun getPinAttemptState(userId: UUID, scopeKey: String): PinAttemptState?
-    suspend fun savePinAttemptState(userId: UUID, scopeKey: String, failedAttempts: Int, lockedUntil: OffsetDateTime?)
     suspend fun resetPinAttemptState(userId: UUID, scopeKey: String)
     suspend fun resetAllPinAttemptStatesForUser(userId: UUID)
 
     /**
-     * Menambah satu kegagalan secara atomik (aman untuk request paralel) dan
-     * mengembalikan jumlah kegagalan terbaru.
+     * Menambah satu kegagalan dan menetapkan kunci sesuai [policy] dalam satu operasi
+     * atomik, lalu mengembalikan state yang tersimpan. `lockedUntil` tidak pernah mundur,
+     * sehingga request paralel tidak bisa memperpendek kunci yang lebih lama.
      */
-    suspend fun incrementPinFailure(userId: UUID, scopeKey: String): Int
+    suspend fun registerPinFailure(
+        userId: UUID,
+        scopeKey: String,
+        policy: PinRolePolicy,
+        now: OffsetDateTime
+    ): PinAttemptState
 }
 
 sealed interface AttemptOutcome {
@@ -74,14 +79,14 @@ class CredentialAttemptGuard(
         store.getPinAttemptState(userId, scope.key) ?: PinAttemptState()
 
     suspend fun registerFailure(userId: UUID, scope: CredentialScope, policy: PinRolePolicy): AttemptOutcome {
-        val failures = store.incrementPinFailure(userId, scope.key)
+        val state = store.registerPinFailure(userId, scope.key, policy, now())
+        val failures = state.failedAttempts
         if (failures >= policy.maxTotalFailures) {
             store.resetPinAttemptState(userId, scope.key)
             return AttemptOutcome.MaxExceeded(failures)
         }
         if (failures >= policy.consecutiveThreshold) {
-            val lockedUntil = now().plusSeconds(lockoutDurationSeconds(policy, failures))
-            store.savePinAttemptState(userId, scope.key, failures, lockedUntil)
+            val lockedUntil = requireNotNull(state.lockedUntil) { "lockedUntil wajib ada setelah ambang terlampaui" }
             return AttemptOutcome.LockedNow(failures, lockedUntil)
         }
         return AttemptOutcome.Invalid(failures, (policy.consecutiveThreshold - failures).coerceAtLeast(0))
@@ -97,5 +102,10 @@ class CredentialAttemptGuard(
                 .coerceIn(0, policy.backoffSeconds.lastIndex)
             return policy.backoffSeconds[index]
         }
+
+        /** Kunci untuk kegagalan ke-[failedAttempts], atau `null` bila ambang belum tercapai. */
+        fun lockFor(policy: PinRolePolicy, failedAttempts: Int, now: OffsetDateTime): OffsetDateTime? =
+            if (failedAttempts < policy.consecutiveThreshold) null
+            else now.plusSeconds(lockoutDurationSeconds(policy, failedAttempts))
     }
 }

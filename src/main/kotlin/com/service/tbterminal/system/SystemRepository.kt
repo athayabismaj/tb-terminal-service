@@ -8,9 +8,11 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
+import org.jetbrains.exposed.sql.javatime.JavaOffsetDateTimeColumnType
 import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import java.time.OffsetDateTime
+import java.time.ZoneOffset
 import java.util.UUID
 
 class SystemRepository : PinVerificationGateway {
@@ -251,6 +253,7 @@ class SystemRepository : PinVerificationGateway {
     /**
      * Mengonsumsi refresh token secara atomik (row lock). Bila sah, token lama
      * ditandai terpakai dan token pengganti dicatat pada keluarga yang sama.
+     * Pemakaian ulang mencabut keluarga itu dan semua sesi user lewat `token_version`.
      */
     suspend fun consumeRefreshToken(
         tokenId: UUID,
@@ -295,6 +298,11 @@ class SystemRepository : PinVerificationGateway {
                 }) {
                     it[revokedAt] = now
                 }
+                // Access token dari keluarga yang dicuri belum kedaluwarsa; naikkan versi agar ikut mati.
+                UsersTable.update({ UsersTable.id eq record.userId }) {
+                    it[UsersTable.tokenVersion] = UsersTable.tokenVersion + 1
+                    it[updatedAt] = now
+                }
                 RefreshConsumeResult.ReuseDetected(record.familyId)
             }
 
@@ -318,55 +326,51 @@ class SystemRepository : PinVerificationGateway {
                 }
         }
 
-    override suspend fun incrementPinFailure(userId: UUID, scopeKey: String): Int =
-        newSuspendedTransaction(Dispatchers.IO) {
-            // Upsert atomik: request paralel tidak bisa "melewati" penghitung.
-            exec(
-                """
-                INSERT INTO system.pin_verification_attempts (user_id, device_id, failed_attempts, locked_until, updated_at)
-                VALUES (?, ?, 1, NULL, NOW())
-                ON CONFLICT (user_id, device_id) DO UPDATE
-                    SET failed_attempts = system.pin_verification_attempts.failed_attempts + 1,
-                        updated_at = NOW()
-                RETURNING failed_attempts
-                """.trimIndent(),
-                args = listOf(
-                    UUIDColumnType() to userId,
-                    VarCharColumnType(128) to scopeKey
-                ),
-                explicitStatementType = StatementType.SELECT
-            ) { rs ->
-                check(rs.next()) { "Gagal mencatat percobaan kredensial" }
-                rs.getInt("failed_attempts")
-            } ?: error("Gagal mencatat percobaan kredensial")
-        }
-
-    override suspend fun savePinAttemptState(
+    override suspend fun registerPinFailure(
         userId: UUID,
         scopeKey: String,
-        failedAttempts: Int,
-        lockedUntil: OffsetDateTime?
-    ) {
-        newSuspendedTransaction(Dispatchers.IO) {
-            val now = OffsetDateTime.now()
-            val updated = PinVerificationAttemptsTable.update({
-                (PinVerificationAttemptsTable.userId eq userId) and
-                    (PinVerificationAttemptsTable.deviceId eq scopeKey)
-            }) {
-                it[this.failedAttempts] = failedAttempts
-                it[this.lockedUntil] = lockedUntil
-                it[this.updatedAt] = now
-            }
-            if (updated == 0) {
-                PinVerificationAttemptsTable.insertIgnore {
-                    it[this.userId] = userId
-                    it[this.deviceId] = scopeKey
-                    it[this.failedAttempts] = failedAttempts
-                    it[this.lockedUntil] = lockedUntil
-                    it[this.updatedAt] = now
-                }
-            }
-        }
+        policy: PinRolePolicy,
+        now: OffsetDateTime
+    ): PinAttemptState = newSuspendedTransaction(Dispatchers.IO) {
+        // Satu pernyataan: penambahan hitungan dan penetapan kunci tidak bisa disela request lain.
+        // GREATEST mengabaikan NULL, jadi kunci lama yang lebih panjang selalu menang.
+        exec(
+            """
+            INSERT INTO system.pin_verification_attempts AS attempt
+                (user_id, device_id, failed_attempts, locked_until, updated_at)
+            VALUES (?, ?, 1, ?, NOW())
+            ON CONFLICT (user_id, device_id) DO UPDATE
+                SET failed_attempts = attempt.failed_attempts + 1,
+                    locked_until = GREATEST(
+                        attempt.locked_until,
+                        CASE WHEN attempt.failed_attempts + 1 >= ? THEN
+                            ?::timestamptz + make_interval(secs => (string_to_array(?, ',')::double precision[])[
+                                LEAST(attempt.failed_attempts + 1 - ? + 1, ?)
+                            ])
+                        END
+                    ),
+                    updated_at = NOW()
+            RETURNING failed_attempts, locked_until
+            """.trimIndent(),
+            args = listOf(
+                UUIDColumnType() to userId,
+                VarCharColumnType(128) to scopeKey,
+                JavaOffsetDateTimeColumnType() to CredentialAttemptGuard.lockFor(policy, failedAttempts = 1, now = now),
+                IntegerColumnType() to policy.consecutiveThreshold,
+                JavaOffsetDateTimeColumnType() to now,
+                TextColumnType() to policy.backoffSeconds.joinToString(","),
+                IntegerColumnType() to policy.consecutiveThreshold,
+                IntegerColumnType() to policy.backoffSeconds.size
+            ),
+            explicitStatementType = StatementType.SELECT
+        ) { rs ->
+            check(rs.next()) { "Gagal mencatat percobaan kredensial" }
+            PinAttemptState(
+                failedAttempts = rs.getInt("failed_attempts"),
+                lockedUntil = rs.getObject("locked_until", OffsetDateTime::class.java)
+                    ?.withOffsetSameInstant(ZoneOffset.UTC)
+            )
+        } ?: error("Gagal mencatat percobaan kredensial")
     }
 
     override suspend fun resetPinAttemptState(userId: UUID, scopeKey: String) {
