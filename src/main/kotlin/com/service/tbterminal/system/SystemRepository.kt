@@ -335,8 +335,10 @@ class SystemRepository : PinVerificationGateway {
                     VarCharColumnType(128) to scopeKey
                 ),
                 explicitStatementType = StatementType.SELECT
-            ) { rs -> if (rs.next()) rs.getInt("failed_attempts") else null }
-                ?: error("Gagal mencatat percobaan kredensial")
+            ) { rs ->
+                check(rs.next()) { "Gagal mencatat percobaan kredensial" }
+                rs.getInt("failed_attempts")
+            } ?: error("Gagal mencatat percobaan kredensial")
         }
 
     override suspend fun savePinAttemptState(
