@@ -1,5 +1,6 @@
 package com.service.tbterminal.system
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
@@ -11,7 +12,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -22,83 +22,133 @@ class CredentialAttemptGuardTest {
 
     @Test
     fun `failures below threshold report attempts left`() = runBlocking {
-        val guard = CredentialAttemptGuard(InMemoryAttemptStore(), clock)
-        val first = guard.registerFailure(userId, CredentialScope.PIN, policy)
-        val second = guard.registerFailure(userId, CredentialScope.PIN, policy)
-        assertEquals(AttemptOutcome.Invalid(1, 2), first)
-        assertEquals(AttemptOutcome.Invalid(2, 1), second)
-        assertNull(guard.activeLock(userId, CredentialScope.PIN))
+        val store = InMemoryAttemptStore()
+        val guard = CredentialAttemptGuard(store, clock)
+        assertEquals(AttemptOutcome.Invalid(1, 2), guard.fail(CredentialScope.PIN))
+        assertEquals(AttemptOutcome.Invalid(2, 1), guard.fail(CredentialScope.PIN))
+        assertNull(store.getPinAttemptState(userId, CredentialScope.PIN.key)?.lockedUntil)
     }
 
     @Test
-    fun `reaching threshold locks with backoff`() = runBlocking<Unit> {
+    fun `reaching threshold locks with backoff and denies the next reservation`() = runBlocking {
         val guard = CredentialAttemptGuard(InMemoryAttemptStore(), clock)
-        repeat(2) { guard.registerFailure(userId, CredentialScope.PIN, policy) }
-        val third = guard.registerFailure(userId, CredentialScope.PIN, policy)
-        assertTrue(third is AttemptOutcome.LockedNow)
+        repeat(2) { guard.fail(CredentialScope.PIN) }
+        val lockedUntil = OffsetDateTime.ofInstant(clock.instant().plusSeconds(60), ZoneOffset.UTC)
+        assertEquals(AttemptOutcome.LockedNow(3, lockedUntil), guard.fail(CredentialScope.PIN))
         assertEquals(
-            OffsetDateTime.ofInstant(clock.instant().plusSeconds(60), ZoneOffset.UTC),
-            (third as AttemptOutcome.LockedNow).lockedUntil
+            AttemptReservation.Locked(3, lockedUntil),
+            guard.reserve(userId, CredentialScope.PIN, policy)
         )
-        assertNotNull(guard.activeLock(userId, CredentialScope.PIN))
     }
 
     @Test
     fun `scopes are counted independently`() = runBlocking {
         val guard = CredentialAttemptGuard(InMemoryAttemptStore(), clock)
-        repeat(3) { guard.registerFailure(userId, CredentialScope.PASSWORD, policy) }
-        assertNotNull(guard.activeLock(userId, CredentialScope.PASSWORD))
-        assertNull(guard.activeLock(userId, CredentialScope.PIN))
+        repeat(3) { guard.fail(CredentialScope.PASSWORD) }
+        assertTrue(guard.reserve(userId, CredentialScope.PASSWORD, policy) is AttemptReservation.Locked)
+        assertTrue(guard.reserve(userId, CredentialScope.PIN, policy) is AttemptReservation.Granted)
     }
 
     @Test
-    fun `parallel failures are all counted`() = runBlocking {
+    fun `parallel reservations never exceed the threshold`() = runBlocking {
         val store = InMemoryAttemptStore()
         val guard = CredentialAttemptGuard(store, clock)
-        val bigPolicy = policy.copy(consecutiveThreshold = 1000, maxTotalFailures = 1000)
-        (1..50).map { async { guard.registerFailure(userId, CredentialScope.PIN, bigPolicy) } }.awaitAll()
-        assertEquals(50, store.getPinAttemptState(userId, CredentialScope.PIN.key)?.failedAttempts)
+        val results = (1..50).map {
+            async(Dispatchers.IO) { guard.reserve(userId, CredentialScope.PIN, policy) }
+        }.awaitAll()
+        assertEquals(3, results.count { it is AttemptReservation.Granted })
+        assertEquals(47, results.count { it is AttemptReservation.Locked })
+        assertEquals(3, store.getPinAttemptState(userId, CredentialScope.PIN.key)?.failedAttempts)
     }
 
     @Test
-    fun `max failures resets counter and success clears state`() = runBlocking {
+    fun `release keeps a lock set by another attempt but clears its own`() = runBlocking {
+        val store = InMemoryAttemptStore()
+        val guard = CredentialAttemptGuard(store, clock)
+        val reservations = (1..3).map { guard.granted(CredentialScope.PIN) }
+
+        guard.release(userId, CredentialScope.PIN, reservations.first())
+        assertTrue(guard.reserve(userId, CredentialScope.PIN, policy) is AttemptReservation.Locked)
+
+        guard.release(userId, CredentialScope.PIN, reservations.last())
+        assertNull(store.getPinAttemptState(userId, CredentialScope.PIN.key))
+    }
+
+    @Test
+    fun `release without active lock clears the counter`() = runBlocking {
+        val store = InMemoryAttemptStore()
+        val guard = CredentialAttemptGuard(store, clock)
+        val first = guard.granted(CredentialScope.PIN)
+        guard.granted(CredentialScope.PIN)
+        guard.release(userId, CredentialScope.PIN, first)
+        assertNull(store.getPinAttemptState(userId, CredentialScope.PIN.key))
+    }
+
+    @Test
+    fun `max failures is reported without clearing the counter`() = runBlocking {
         val store = InMemoryAttemptStore()
         val guard = CredentialAttemptGuard(store, clock)
         val strict = policy.copy(maxTotalFailures = 2)
-        guard.registerFailure(userId, CredentialScope.PIN, strict)
-        assertEquals(AttemptOutcome.MaxExceeded(2), guard.registerFailure(userId, CredentialScope.PIN, strict))
-        assertNull(store.getPinAttemptState(userId, CredentialScope.PIN.key))
-
-        guard.registerFailure(userId, CredentialScope.PIN, strict)
-        guard.registerSuccess(userId, CredentialScope.PIN)
-        assertNull(store.getPinAttemptState(userId, CredentialScope.PIN.key))
+        guard.fail(CredentialScope.PIN, strict)
+        assertEquals(AttemptOutcome.MaxExceeded(2), guard.fail(CredentialScope.PIN, strict))
+        assertEquals(2, store.getPinAttemptState(userId, CredentialScope.PIN.key)?.failedAttempts)
     }
+
+    private suspend fun CredentialAttemptGuard.granted(
+        scope: CredentialScope,
+        rolePolicy: PinRolePolicy = policy
+    ): AttemptReservation.Granted = reserve(userId, scope, rolePolicy) as AttemptReservation.Granted
+
+    private suspend fun CredentialAttemptGuard.fail(
+        scope: CredentialScope,
+        rolePolicy: PinRolePolicy = policy
+    ): AttemptOutcome = failureOutcome(granted(scope, rolePolicy), rolePolicy)
 }
 
-/** Aturan yang sama dengan SQL di SystemRepository.registerPinFailure, untuk store palsu di test. */
-internal fun nextFailureState(current: PinAttemptState?, policy: PinRolePolicy, now: OffsetDateTime): PinAttemptState {
-    val failures = (current?.failedAttempts ?: 0) + 1
-    val lock = listOfNotNull(current?.lockedUntil, CredentialAttemptGuard.lockFor(policy, failures, now)).maxOrNull()
-    return PinAttemptState(failures, lock)
-}
-
-private class InMemoryAttemptStore : PinAttemptStore {
-    private val states = ConcurrentHashMap<Pair<UUID, String>, PinAttemptState>()
+/** Store palsu dengan aturan yang sama dengan SQL di SystemRepository (reserve/release). */
+internal class InMemoryAttemptStore : PinAttemptStore {
+    val states = ConcurrentHashMap<Pair<UUID, String>, PinAttemptState>()
 
     override suspend fun getPinAttemptState(userId: UUID, scopeKey: String) = states[userId to scopeKey]
-
-    override suspend fun resetPinAttemptState(userId: UUID, scopeKey: String) {
-        states.remove(userId to scopeKey)
-    }
 
     override suspend fun resetAllPinAttemptStatesForUser(userId: UUID) {
         states.keys.removeIf { it.first == userId }
     }
 
-    override suspend fun registerPinFailure(
+    override suspend fun resetPinAttemptStates(userId: UUID, scopeKeys: Collection<String>) {
+        states.keys.removeIf { it.first == userId && it.second in scopeKeys }
+    }
+
+    override suspend fun reservePinAttempt(
         userId: UUID,
         scopeKey: String,
         policy: PinRolePolicy,
         now: OffsetDateTime
-    ): PinAttemptState = states.compute(userId to scopeKey) { _, current -> nextFailureState(current, policy, now) }!!
+    ): AttemptReservation {
+        var result: AttemptReservation? = null
+        states.compute(userId to scopeKey) { _, current ->
+            val activeLock = current?.lockedUntil?.takeIf { it.isAfter(now) }
+            if (activeLock != null) {
+                result = AttemptReservation.Locked(current.failedAttempts, activeLock)
+                current
+            } else {
+                val failures = (current?.failedAttempts ?: 0) + 1
+                PinAttemptState(failures, CredentialAttemptGuard.lockFor(policy, failures, now) ?: current?.lockedUntil)
+                    .also { result = AttemptReservation.Granted(it) }
+            }
+        }
+        return requireNotNull(result)
+    }
+
+    override suspend fun releasePinAttempt(
+        userId: UUID,
+        scopeKey: String,
+        reserved: PinAttemptState,
+        now: OffsetDateTime
+    ) {
+        states.computeIfPresent(userId to scopeKey) { _, current ->
+            val lockedByOther = current.lockedUntil?.isAfter(now) == true && current != reserved
+            if (lockedByOther) current else null
+        }
+    }
 }

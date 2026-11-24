@@ -36,20 +36,41 @@ enum class CredentialScope(val key: String) {
 
 interface PinAttemptStore {
     suspend fun getPinAttemptState(userId: UUID, scopeKey: String): PinAttemptState?
-    suspend fun resetPinAttemptState(userId: UUID, scopeKey: String)
     suspend fun resetAllPinAttemptStatesForUser(userId: UUID)
 
+    /** Menghapus penghitung pada [scopeKeys] saja, mis. lingkup yang kredensialnya baru diganti. */
+    suspend fun resetPinAttemptStates(userId: UUID, scopeKeys: Collection<String>)
+
     /**
-     * Menambah satu kegagalan dan menetapkan kunci sesuai [policy] dalam satu operasi
-     * atomik, lalu mengembalikan state yang tersimpan. `lockedUntil` tidak pernah mundur,
-     * sehingga request paralel tidak bisa memperpendek kunci yang lebih lama.
+     * Mencatat satu percobaan sebagai gagal SEBELUM kredensial diperiksa, dalam satu operasi
+     * atomik: bila lingkup sedang terkunci hasilnya [AttemptReservation.Locked] dan hitungan
+     * tidak berubah; bila tidak, hitungan naik dan kunci dipasang begitu ambang [policy] tercapai.
      */
-    suspend fun registerPinFailure(
+    suspend fun reservePinAttempt(
         userId: UUID,
         scopeKey: String,
         policy: PinRolePolicy,
         now: OffsetDateTime
-    ): PinAttemptState
+    ): AttemptReservation
+
+    /**
+     * Mereset hitungan setelah percobaan [reserved] terbukti sah. Kunci aktif yang dipasang
+     * percobaan lain tidak dihapus; kunci yang dipasang [reserved] sendiri boleh.
+     */
+    suspend fun releasePinAttempt(
+        userId: UUID,
+        scopeKey: String,
+        reserved: PinAttemptState,
+        now: OffsetDateTime
+    )
+}
+
+sealed interface AttemptReservation {
+    /** Percobaan boleh memeriksa kredensial. [state] sudah memuat percobaan ini sebagai kegagalan. */
+    data class Granted(val state: PinAttemptState) : AttemptReservation
+
+    /** Lingkup sedang terkunci; kredensial tidak boleh diperiksa. */
+    data class Locked(val failedAttempts: Int, val lockedUntil: OffsetDateTime) : AttemptReservation
 }
 
 sealed interface AttemptOutcome {
@@ -61,6 +82,10 @@ sealed interface AttemptOutcome {
 /**
  * Mesin status lockout bersama untuk semua verifikasi kredensial (PIN, password,
  * PIN approver). Tidak bergantung pada database maupun Ktor sehingga mudah diuji.
+ *
+ * Urutan wajib: [reserve] → periksa kredensial → [release] bila benar, atau
+ * [failureOutcome] bila salah. Reservasi yang tidak diselesaikan (bcrypt gagal, request
+ * dibatalkan) tetap terhitung sebagai kegagalan.
  */
 class CredentialAttemptGuard(
     private val store: PinAttemptStore,
@@ -68,23 +93,14 @@ class CredentialAttemptGuard(
 ) {
     fun now(): OffsetDateTime = OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)
 
-    /** State saat ini bila lingkup tersebut sedang terkunci, selain itu `null`. */
-    suspend fun activeLock(userId: UUID, scope: CredentialScope): PinAttemptState? {
-        val state = store.getPinAttemptState(userId, scope.key) ?: return null
-        val lockedUntil = state.lockedUntil ?: return null
-        return if (lockedUntil.isAfter(now())) state else null
-    }
+    suspend fun reserve(userId: UUID, scope: CredentialScope, policy: PinRolePolicy): AttemptReservation =
+        store.reservePinAttempt(userId, scope.key, policy, now())
 
-    suspend fun currentState(userId: UUID, scope: CredentialScope): PinAttemptState =
-        store.getPinAttemptState(userId, scope.key) ?: PinAttemptState()
-
-    suspend fun registerFailure(userId: UUID, scope: CredentialScope, policy: PinRolePolicy): AttemptOutcome {
-        val state = store.registerPinFailure(userId, scope.key, policy, now())
+    /** Hasil percobaan salah menurut reservasinya; tidak mengubah state (sudah dicatat [reserve]). */
+    fun failureOutcome(reservation: AttemptReservation.Granted, policy: PinRolePolicy): AttemptOutcome {
+        val state = reservation.state
         val failures = state.failedAttempts
-        if (failures >= policy.maxTotalFailures) {
-            store.resetPinAttemptState(userId, scope.key)
-            return AttemptOutcome.MaxExceeded(failures)
-        }
+        if (failures >= policy.maxTotalFailures) return AttemptOutcome.MaxExceeded(failures)
         if (failures >= policy.consecutiveThreshold) {
             val lockedUntil = requireNotNull(state.lockedUntil) { "lockedUntil wajib ada setelah ambang terlampaui" }
             return AttemptOutcome.LockedNow(failures, lockedUntil)
@@ -92,8 +108,13 @@ class CredentialAttemptGuard(
         return AttemptOutcome.Invalid(failures, (policy.consecutiveThreshold - failures).coerceAtLeast(0))
     }
 
-    suspend fun registerSuccess(userId: UUID, scope: CredentialScope) {
-        store.resetPinAttemptState(userId, scope.key)
+    /**
+     * Memulai hitungan baru: kredensial benar, atau [AttemptOutcome.MaxExceeded] dan semua sesi
+     * sudah dicabut. Untuk kasus kedua, panggil SETELAH pencabutan supaya kunci reservasi
+     * terakhir menahan request paralel selama pencabutan.
+     */
+    suspend fun release(userId: UUID, scope: CredentialScope, reservation: AttemptReservation.Granted) {
+        store.releasePinAttempt(userId, scope.key, reservation.state, now())
     }
 
     companion object {

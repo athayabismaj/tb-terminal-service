@@ -24,6 +24,9 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.post as routePost
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
@@ -36,6 +39,7 @@ import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
+import java.util.Collections
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -153,6 +157,10 @@ class PinVerificationServiceTest {
         assertEquals(0, forceLogout.data?.attemptsLeft)
         assertEquals(listOf(cashierId), gateway.revokedUsers)
         assertTrue(gateway.audits.any { it.tableName == "pin_unlock_revoked" })
+        // Kunci masih terpasang saat sesi dicabut; hitungan baru dimulai sesudahnya.
+        assertEquals(10, gateway.attemptsAtRevocation?.failedAttempts)
+        assertTrue(assertNotNull(gateway.attemptsAtRevocation?.lockedUntil).toInstant().isAfter(clock.instant()))
+        assertNull(gateway.attempts[cashierId to PIN_SCOPE])
     }
 
     @Test
@@ -219,6 +227,56 @@ class PinVerificationServiceTest {
     }
 
     @Test
+    fun `correct PIN on the attempt that reaches the threshold unlocks and clears the counter`() = runBlocking {
+        val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
+        val gateway = FakePinVerificationGateway().apply {
+            users[cashierId] = testUser(cashierId, "kasir1", Role.KASIR, VALID_PIN)
+        }
+        val service = PinVerificationService(gateway, clock)
+
+        repeat(4) { service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "pos-1")) }
+        assertTrue(service.verifyUnlock(cashierId, UnlockRequest(VALID_PIN, "pos-1")).success)
+        assertNull(gateway.attempts[cashierId to PIN_SCOPE])
+    }
+
+    @Test
+    fun `parallel wrong PINs never evaluate more guesses than the threshold`() = runBlocking {
+        val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
+        val gateway = FakePinVerificationGateway().apply {
+            users[cashierId] = testUser(cashierId, "kasir1", Role.KASIR, VALID_PIN)
+        }
+        val service = PinVerificationService(gateway, clock)
+
+        val responses = (1..30).map {
+            async(Dispatchers.IO) { service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "pos-$it")) }
+        }.awaitAll()
+
+        // "PIN salah" hanya dikirim bila PIN benar-benar diperiksa.
+        assertEquals(5, responses.count { it.error == "PIN salah" })
+        assertEquals(26, responses.count { it.code == "PIN_LOCKED" })
+        assertEquals(5, gateway.attempts[cashierId to PIN_SCOPE]?.failedAttempts)
+    }
+
+    @Test
+    fun `guesses still in flight block even the correct PIN`() = runBlocking {
+        val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
+        val user = testUser(cashierId, "kasir1", Role.KASIR, VALID_PIN)
+        val gateway = FakePinVerificationGateway().apply { users[cashierId] = user }
+        val service = PinVerificationService(gateway, clock)
+        val guard = CredentialAttemptGuard(gateway, clock)
+        val policy = PinVerificationPolicy.forRole(Role.KASIR)
+        CredentialScope.entries.forEach { scope -> repeat(5) { guard.reserve(cashierId, scope, policy) } }
+
+        assertEquals("PIN_LOCKED", service.verifyUnlock(cashierId, UnlockRequest(VALID_PIN, "pos-1")).code)
+        assertFailsWith<TooManyAttemptsException> {
+            service.verifyCredentialForSensitiveChange(
+                user, CredentialScope.PASSWORD, "secret123", null, null, "Password tidak valid"
+            )
+        }
+        assertEquals(5, gateway.attempts[cashierId to PIN_SCOPE]?.failedAttempts)
+    }
+
+    @Test
     fun `changing deviceId does not reset the lockout counter`() = runBlocking {
         val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
         val gateway = FakePinVerificationGateway().apply {
@@ -278,6 +336,26 @@ class PinVerificationServiceTest {
     }
 
     @Test
+    fun `correct credential on a sensitive change clears only its own counter`() = runBlocking {
+        val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
+        val user = testUser(cashierId, "kasir1", Role.KASIR, VALID_PIN)
+        val gateway = FakePinVerificationGateway().apply { users[cashierId] = user }
+        val service = PinVerificationService(gateway, clock)
+        suspend fun check(scope: CredentialScope, candidate: String) =
+            service.verifyCredentialForSensitiveChange(user, scope, candidate, null, null, "tidak valid")
+
+        for (scope in listOf(CredentialScope.PIN, CredentialScope.PASSWORD)) {
+            repeat(4) { assertFailsWith<ValidationException> { check(scope, "000999") } }
+        }
+        // Percobaan ke-5 benar: reservasinya sendiri yang memasang kunci, jadi ikut dilepas.
+        check(CredentialScope.PASSWORD, "secret123")
+        assertNull(gateway.attempts[cashierId to CredentialScope.PASSWORD.key])
+        assertEquals(4, gateway.attempts[cashierId to PIN_SCOPE]?.failedAttempts)
+        check(CredentialScope.PIN, VALID_PIN)
+        assertNull(gateway.attempts[cashierId to PIN_SCOPE])
+    }
+
+    @Test
     fun `password check revokes sessions after max failures`() = runBlocking {
         val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
         val user = testUser(adminId, "admin1", Role.ADMIN, VALID_PIN)
@@ -299,6 +377,7 @@ class PinVerificationServiceTest {
         }
         assertNotNull(revokedError)
         assertEquals(listOf(adminId), gateway.revokedUsers)
+        assertEquals(10, gateway.attemptsAtRevocation?.failedAttempts)
 
         // Password benar setelah reset counter diterima tanpa exception.
         service.verifyCredentialForSensitiveChange(
@@ -396,15 +475,19 @@ private data class RecordedAudit(
     val metadataJson: String
 )
 
-private class FakePinVerificationGateway : PinVerificationGateway {
+private class FakePinVerificationGateway(
+    private val store: InMemoryAttemptStore = InMemoryAttemptStore()
+) : PinVerificationGateway, PinAttemptStore by store {
     val users = mutableMapOf<UUID, UserRow>()
-    val attempts = mutableMapOf<Pair<UUID, String>, PinAttemptState>()
+    val attempts get() = store.states
     val revokedUsers = mutableListOf<UUID>()
-    val audits = mutableListOf<RecordedAudit>()
+    val audits: MutableList<RecordedAudit> = Collections.synchronizedList(mutableListOf())
+    var attemptsAtRevocation: PinAttemptState? = null
 
     override suspend fun findPinUserById(userId: UUID): UserRow? = users[userId]
 
     override suspend fun revokeSessionsForUser(userId: UUID): Boolean {
+        attemptsAtRevocation = attempts.values.singleOrNull()
         revokedUsers += userId
         val user = users[userId] ?: return false
         users[userId] = user.copy(tokenVersion = user.tokenVersion + 1)
@@ -421,24 +504,4 @@ private class FakePinVerificationGateway : PinVerificationGateway {
     ) {
         audits += RecordedAudit(actorUserId, action, tableName, metadataJson)
     }
-
-    override suspend fun getPinAttemptState(userId: UUID, deviceId: String): PinAttemptState? {
-        return attempts[userId to deviceId]
-    }
-
-    override suspend fun resetPinAttemptState(userId: UUID, deviceId: String) {
-        attempts.remove(userId to deviceId)
-    }
-
-    override suspend fun resetAllPinAttemptStatesForUser(userId: UUID) {
-        attempts.keys.filter { it.first == userId }.forEach { attempts.remove(it) }
-    }
-
-    override suspend fun registerPinFailure(
-        userId: UUID,
-        scopeKey: String,
-        policy: PinRolePolicy,
-        now: OffsetDateTime
-    ): PinAttemptState = nextFailureState(attempts[userId to scopeKey], policy, now)
-        .also { attempts[userId to scopeKey] = it }
 }

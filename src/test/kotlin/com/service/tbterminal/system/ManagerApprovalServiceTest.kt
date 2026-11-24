@@ -3,6 +3,9 @@ package com.service.tbterminal.system
 import com.service.tbterminal.shared.ManagerApprovalError
 import com.service.tbterminal.shared.ManagerApprovalException
 import com.service.tbterminal.shared.Role
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
@@ -111,7 +114,7 @@ class ManagerApprovalServiceTest {
             repository = repository,
             clock = Clock.fixed(fixedInstant, ZoneOffset.UTC),
             ttl = Duration.ofMinutes(5),
-            attemptStore = ApprovalAttemptStore()
+            attemptStore = InMemoryAttemptStore()
         )
         val wrong = request("admin").copy(approverPin = "654321")
 
@@ -131,6 +134,33 @@ class ManagerApprovalServiceTest {
         }
         assertEquals(ManagerApprovalError.APPROVER_LOCKED, stillLocked.reason)
         assertTrue(repository.records.isEmpty())
+    }
+
+    @Test
+    fun `parallel wrong approver PINs never evaluate more guesses than the threshold`() = runBlocking {
+        val repository = FakeManagerApprovalRepository().apply {
+            approvers["admin"] = approver(adminId, Role.ADMIN)
+        }
+        val store = InMemoryAttemptStore()
+        val service = ManagerApprovalService(
+            repository = repository,
+            clock = Clock.fixed(fixedInstant, ZoneOffset.UTC),
+            ttl = Duration.ofMinutes(5),
+            attemptStore = store
+        )
+        val wrong = request("admin").copy(approverPin = "654321")
+
+        val errors = (1..30).map {
+            async(Dispatchers.IO) {
+                assertFailsWith<ManagerApprovalException> {
+                    service.createApproval(requesterId, Role.KASIR, wrong, null)
+                }.reason
+            }
+        }.awaitAll()
+
+        assertEquals(2, errors.count { it == ManagerApprovalError.INVALID })
+        assertEquals(28, errors.count { it == ManagerApprovalError.APPROVER_LOCKED })
+        assertEquals(3, store.states.values.single().failedAttempts)
     }
 
     @Test
@@ -368,22 +398,4 @@ private class FakeManagerApprovalRepository : ManagerApprovalRepository {
         now: OffsetDateTime,
         ipAddress: String?
     ): ManagerApprovalConsumeResult = consumeApproval(scope, now, ipAddress)
-}
-
-private class ApprovalAttemptStore : PinAttemptStore {
-    private val states = mutableMapOf<Pair<UUID, String>, PinAttemptState>()
-    override suspend fun getPinAttemptState(userId: UUID, scopeKey: String) = states[userId to scopeKey]
-    override suspend fun resetPinAttemptState(userId: UUID, scopeKey: String) {
-        states.remove(userId to scopeKey)
-    }
-    override suspend fun resetAllPinAttemptStatesForUser(userId: UUID) {
-        states.keys.filter { it.first == userId }.forEach { states.remove(it) }
-    }
-    override suspend fun registerPinFailure(
-        userId: UUID,
-        scopeKey: String,
-        policy: PinRolePolicy,
-        now: OffsetDateTime
-    ): PinAttemptState = nextFailureState(states[userId to scopeKey], policy, now)
-        .also { states[userId to scopeKey] = it }
 }

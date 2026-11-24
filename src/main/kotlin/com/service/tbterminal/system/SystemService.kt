@@ -190,7 +190,7 @@ class SystemService(
             BCrypt.hashpw(request.newPin, BCrypt.gensalt())
         }
         repo.updatePin(userId, newHashedPin)
-        repo.resetAllPinAttemptStatesForUser(userId)
+        resetAttemptsForNewPin(userId)
         repo.insertAuditLog(
             actorUserId = userId,
             action = AuditAction.UPDATE,
@@ -405,7 +405,18 @@ class SystemService(
         }
 
         repo.updatePin(userId, newHashedPin)
-        repo.resetAllPinAttemptStatesForUser(userId)
+        resetAttemptsForNewPin(userId)
+    }
+
+    /**
+     * PIN baru memulai hitungan baru untuk lingkup yang memakai PIN. Kunci password tidak
+     * disentuh: kalau ikut terhapus, orang yang tahu PIN bisa menebak password tanpa batas.
+     */
+    private suspend fun resetAttemptsForNewPin(userId: UUID) {
+        repo.resetPinAttemptStates(
+            userId,
+            listOf(CredentialScope.PIN.key, CredentialScope.MANAGER_APPROVAL.key)
+        )
     }
 
     private fun parseUUID(id: String): UUID {

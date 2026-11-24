@@ -6,7 +6,9 @@ import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.isNull
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.lessEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.javatime.JavaOffsetDateTimeColumnType
 import org.jetbrains.exposed.sql.statements.StatementType
@@ -311,30 +313,31 @@ class SystemRepository : PinVerificationGateway {
     }
 
     override suspend fun getPinAttemptState(userId: UUID, scopeKey: String): PinAttemptState? =
-        newSuspendedTransaction(Dispatchers.IO) {
-            PinVerificationAttemptsTable
-                .select {
-                    (PinVerificationAttemptsTable.userId eq userId) and
-                        (PinVerificationAttemptsTable.deviceId eq scopeKey)
-                }
-                .firstOrNull()
-                ?.let { row ->
-                    PinAttemptState(
-                        failedAttempts = row[PinVerificationAttemptsTable.failedAttempts],
-                        lockedUntil = row[PinVerificationAttemptsTable.lockedUntil]
-                    )
-                }
-        }
+        newSuspendedTransaction(Dispatchers.IO) { findAttemptState(userId, scopeKey) }
 
-    override suspend fun registerPinFailure(
+    private fun findAttemptState(userId: UUID, scopeKey: String): PinAttemptState? =
+        PinVerificationAttemptsTable
+            .select {
+                (PinVerificationAttemptsTable.userId eq userId) and
+                    (PinVerificationAttemptsTable.deviceId eq scopeKey)
+            }
+            .firstOrNull()
+            ?.let { row ->
+                PinAttemptState(
+                    failedAttempts = row[PinVerificationAttemptsTable.failedAttempts],
+                    lockedUntil = row[PinVerificationAttemptsTable.lockedUntil]
+                )
+            }
+
+    override suspend fun reservePinAttempt(
         userId: UUID,
         scopeKey: String,
         policy: PinRolePolicy,
         now: OffsetDateTime
-    ): PinAttemptState = newSuspendedTransaction(Dispatchers.IO) {
-        // Satu pernyataan: penambahan hitungan dan penetapan kunci tidak bisa disela request lain.
-        // GREATEST mengabaikan NULL, jadi kunci lama yang lebih panjang selalu menang.
-        exec(
+    ): AttemptReservation = newSuspendedTransaction(Dispatchers.IO) {
+        // Satu pernyataan: cek kunci, penambahan hitungan, dan penetapan kunci tidak bisa disela
+        // request lain. GREATEST mengabaikan NULL, jadi kunci lama yang lebih panjang selalu menang.
+        val granted = exec(
             """
             INSERT INTO system.pin_verification_attempts AS attempt
                 (user_id, device_id, failed_attempts, locked_until, updated_at)
@@ -350,6 +353,7 @@ class SystemRepository : PinVerificationGateway {
                         END
                     ),
                     updated_at = NOW()
+                WHERE attempt.locked_until IS NULL OR attempt.locked_until <= ?::timestamptz
             RETURNING failed_attempts, locked_until
             """.trimIndent(),
             args = listOf(
@@ -360,24 +364,49 @@ class SystemRepository : PinVerificationGateway {
                 JavaOffsetDateTimeColumnType() to now,
                 TextColumnType() to policy.backoffSeconds.joinToString(","),
                 IntegerColumnType() to policy.consecutiveThreshold,
-                IntegerColumnType() to policy.backoffSeconds.size
+                IntegerColumnType() to policy.backoffSeconds.size,
+                JavaOffsetDateTimeColumnType() to now
             ),
             explicitStatementType = StatementType.SELECT
         ) { rs ->
-            check(rs.next()) { "Gagal mencatat percobaan kredensial" }
-            PinAttemptState(
-                failedAttempts = rs.getInt("failed_attempts"),
-                lockedUntil = rs.getObject("locked_until", OffsetDateTime::class.java)
-                    ?.withOffsetSameInstant(ZoneOffset.UTC)
-            )
-        } ?: error("Gagal mencatat percobaan kredensial")
+            buildList {
+                if (rs.next()) add(
+                    PinAttemptState(
+                        failedAttempts = rs.getInt("failed_attempts"),
+                        lockedUntil = rs.getObject("locked_until", OffsetDateTime::class.java)
+                            ?.withOffsetSameInstant(ZoneOffset.UTC)
+                    )
+                )
+            }
+        }.orEmpty().singleOrNull()
+        if (granted != null) return@newSuspendedTransaction AttemptReservation.Granted(granted)
+
+        // ON CONFLICT mengunci baris ini walau WHERE-nya salah, jadi isinya tidak bisa berubah di sini.
+        val locked = checkNotNull(findAttemptState(userId, scopeKey)) { "Gagal mencatat percobaan kredensial" }
+        AttemptReservation.Locked(locked.failedAttempts, checkNotNull(locked.lockedUntil))
     }
 
-    override suspend fun resetPinAttemptState(userId: UUID, scopeKey: String) {
+    override suspend fun releasePinAttempt(
+        userId: UUID,
+        scopeKey: String,
+        reserved: PinAttemptState,
+        now: OffsetDateTime
+    ) {
         newSuspendedTransaction(Dispatchers.IO) {
             PinVerificationAttemptsTable.deleteWhere {
+                val noActiveLock = lockedUntil.isNull() or (lockedUntil lessEq now)
+                val ownLock = (failedAttempts eq reserved.failedAttempts) and (lockedUntil eq reserved.lockedUntil)
                 (PinVerificationAttemptsTable.userId eq userId) and
-                    (PinVerificationAttemptsTable.deviceId eq scopeKey)
+                    (deviceId eq scopeKey) and
+                    (noActiveLock or ownLock)
+            }
+        }
+    }
+
+    override suspend fun resetPinAttemptStates(userId: UUID, scopeKeys: Collection<String>) {
+        newSuspendedTransaction(Dispatchers.IO) {
+            PinVerificationAttemptsTable.deleteWhere {
+                (PinVerificationAttemptsTable.userId eq userId) and (deviceId inList scopeKeys)
             }
         }
     }

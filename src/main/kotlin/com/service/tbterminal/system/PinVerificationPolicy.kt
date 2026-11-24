@@ -115,23 +115,25 @@ class PinVerificationService(
             )
         }
 
-        guard.activeLock(userId, CredentialScope.PIN)?.let { lockedState ->
-            val lockedUntil = requireNotNull(lockedState.lockedUntil)
-            recordSecurityAudit(
-                userId, AuditAction.UPDATE, "pin_unlock_locked", ipAddress, deviceId,
-                lockedState.failedAttempts, attemptsLeft = 0, lockedUntil = lockedUntil
-            )
-            return ApiResponse(
-                success = false,
-                data = PinUnlockResponse(
-                    valid = false,
-                    attemptsLeft = 0,
-                    lockedUntil = lockedUntil.toString(),
-                    forceLogout = false
-                ),
-                error = "Terlalu banyak percobaan gagal. Tunggu hingga masa tunggu berakhir.",
-                code = "PIN_LOCKED"
-            )
+        val reservation = when (val result = guard.reserve(userId, CredentialScope.PIN, policy)) {
+            is AttemptReservation.Granted -> result
+            is AttemptReservation.Locked -> {
+                recordSecurityAudit(
+                    userId, AuditAction.UPDATE, "pin_unlock_locked", ipAddress, deviceId,
+                    result.failedAttempts, attemptsLeft = 0, lockedUntil = result.lockedUntil
+                )
+                return ApiResponse(
+                    success = false,
+                    data = PinUnlockResponse(
+                        valid = false,
+                        attemptsLeft = 0,
+                        lockedUntil = result.lockedUntil.toString(),
+                        forceLogout = false
+                    ),
+                    error = "Terlalu banyak percobaan gagal. Tunggu hingga masa tunggu berakhir.",
+                    code = "PIN_LOCKED"
+                )
+            }
         }
 
         val isValid = withContext(Dispatchers.IO) {
@@ -139,13 +141,13 @@ class PinVerificationService(
         }
 
         if (isValid) {
+            guard.release(userId, CredentialScope.PIN, reservation)
             if (EnvironmentConfig.isProduction && request.pin in DEFAULT_PINS) {
-                val currentFailures = guard.currentState(userId, CredentialScope.PIN).failedAttempts
                 return ApiResponse(
                     success = false,
                     data = PinUnlockResponse(
                         valid = false,
-                        attemptsLeft = (policy.consecutiveThreshold - currentFailures).coerceAtLeast(0),
+                        attemptsLeft = policy.consecutiveThreshold,
                         lockedUntil = null,
                         forceLogout = false
                     ),
@@ -154,7 +156,6 @@ class PinVerificationService(
                 )
             }
 
-            guard.registerSuccess(userId, CredentialScope.PIN)
             return ApiResponse.success(
                 PinUnlockResponse(
                     valid = true,
@@ -166,9 +167,10 @@ class PinVerificationService(
             )
         }
 
-        return when (val outcome = guard.registerFailure(userId, CredentialScope.PIN, policy)) {
+        return when (val outcome = guard.failureOutcome(reservation, policy)) {
             is AttemptOutcome.MaxExceeded -> {
                 gateway.revokeSessionsForUser(userId)
+                guard.release(userId, CredentialScope.PIN, reservation)
                 recordSecurityAudit(
                     userId, AuditAction.UPDATE, "pin_unlock_revoked", ipAddress, deviceId,
                     outcome.failedAttempts, attemptsLeft = 0, lockedUntil = null
@@ -242,8 +244,10 @@ class PinVerificationService(
         val normalizedDeviceId = PinVerificationPolicy.normalizeDeviceId(deviceId)
         val auditPrefix = if (scope == CredentialScope.PIN) "pin_change" else "password_check"
 
-        guard.activeLock(userRow.id, scope)?.let { lockedState ->
-            throw lockedException(requireNotNull(lockedState.lockedUntil))
+        val policy = PinVerificationPolicy.forRole(userRow.roleName)
+        val reservation = when (val result = guard.reserve(userRow.id, scope, policy)) {
+            is AttemptReservation.Granted -> result
+            is AttemptReservation.Locked -> throw lockedException(result.lockedUntil)
         }
 
         val hash = if (scope == CredentialScope.PIN) userRow.pinHash else userRow.passwordHash
@@ -251,13 +255,14 @@ class PinVerificationService(
             runCatching { BCrypt.checkpw(candidate, hash) }.getOrDefault(false)
         }
         if (isValid) {
-            guard.registerSuccess(userRow.id, scope)
+            guard.release(userRow.id, scope, reservation)
             return
         }
 
-        when (val outcome = guard.registerFailure(userRow.id, scope, PinVerificationPolicy.forRole(userRow.roleName))) {
+        when (val outcome = guard.failureOutcome(reservation, policy)) {
             is AttemptOutcome.MaxExceeded -> {
                 gateway.revokeSessionsForUser(userRow.id)
+                guard.release(userRow.id, scope, reservation)
                 recordSecurityAudit(
                     userRow.id, AuditAction.UPDATE, "${auditPrefix}_revoked", ipAddress, normalizedDeviceId,
                     outcome.failedAttempts, attemptsLeft = 0, lockedUntil = null

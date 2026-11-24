@@ -57,23 +57,24 @@ class ManagerApprovalService(
             )
         }
 
-        attemptGuard?.activeLock(approver.userId, CredentialScope.MANAGER_APPROVAL)?.let {
-            throw approverLocked()
+        val approvalPolicy = PinVerificationPolicy.MANAGER_APPROVAL_POLICY
+        val reservation = when (
+            val result = attemptGuard?.reserve(approver.userId, CredentialScope.MANAGER_APPROVAL, approvalPolicy)
+        ) {
+            is AttemptReservation.Locked -> throw approverLocked()
+            is AttemptReservation.Granted -> result
+            null -> null
         }
 
         val pinValid = withContext(Dispatchers.IO) {
             BCrypt.checkpw(request.approverPin, approver.pinHash)
         }
         if (!pinValid) {
-            val outcome = attemptGuard?.registerFailure(
-                approver.userId,
-                CredentialScope.MANAGER_APPROVAL,
-                PinVerificationPolicy.MANAGER_APPROVAL_POLICY
-            )
+            val outcome = reservation?.let { attemptGuard?.failureOutcome(it, approvalPolicy) }
             if (outcome is AttemptOutcome.LockedNow) throw approverLocked()
             throw invalidApprover()
         }
-        attemptGuard?.registerSuccess(approver.userId, CredentialScope.MANAGER_APPROVAL)
+        reservation?.let { attemptGuard?.release(approver.userId, CredentialScope.MANAGER_APPROVAL, it) }
 
         // Role baru diperiksa setelah PIN benar, sehingga tanpa PIN yang tepat kasir
         // tidak bisa memetakan username mana yang manager dan mana yang bukan.
