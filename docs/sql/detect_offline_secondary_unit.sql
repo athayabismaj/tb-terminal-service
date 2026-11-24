@@ -17,20 +17,35 @@
 -- opname_setelahnya = true: opname sesudah sync kemungkinan sudah menyerap selisih; JANGAN dikoreksi dua kali.
 --   Bila transaksinya juga di-void/direfund SETELAH opname itu, periksa manual: angka 0 bisa keliru.
 --
--- Keterbatasan: riwayat faktor konversi dan harga grosir tidak disimpan server, jadi baris yang
--- konversi/harganya sudah berubah bisa tidak terdeteksi. Item yang disinkronkan setelah perbaikan
+-- Faktor lama ikut dipakai bila tabel inventory.unit_conversion_history (V47) ada: hanya faktor yang
+-- berubah sejak sesi kas transaksi itu dibuka, jadi masih mungkin dipakai perangkat. Skrip tetap jalan
+-- di database sebelum V47.
+--
+-- Keterbatasan: perubahan faktor sebelum V47 dan perubahan harga grosir tidak disimpan server, jadi baris
+-- yang konversi/harganya sudah berubah bisa tidak terdeteksi. Item yang disinkronkan setelah perbaikan
 -- punya audit OFFLINE_ITEM_UNIT dan otomatis dilewati.
+-- Wajib dijalankan dengan psql (memakai \gset).
 -- =====================================================================
 BEGIN TRANSACTION READ ONLY;
+
+SELECT CASE
+           WHEN to_regclass('inventory.unit_conversion_history') IS NOT NULL
+               THEN 'inventory.unit_conversion_history'
+           ELSE '(SELECT NULL::uuid AS product_id, NULL::uuid AS from_unit_id, NULL::uuid AS to_unit_id, '
+               || 'NULL::numeric AS old_factor, NULL::timestamptz AS changed_at WHERE FALSE)'
+       END AS factor_history
+\gset
 
 WITH offline_items AS (
     SELECT ti.id, ti.transaction_id, ti.product_id, ti.quantity, ti.price_at_transaction AS price,
            ti.cogs_at_transaction AS cogs, t.receipt_number, t.status::text AS status,
            COALESCE(t.occurred_at, t.created_at) AS occurred_at,
            COALESCE(t.synced_at, t.created_at) AS synced_at,
+           cs.opened_at AS session_opened_at,
            p.sku, p.name AS product_name, p.base_unit_id, p.price_buy, p.price_retail, p.price_contractor
     FROM sales.transaction_items ti
     JOIN sales.transactions t ON t.id = ti.transaction_id
+    JOIN sales.cash_sessions cs ON cs.id = t.session_id
     JOIN inventory.products p ON p.id = ti.product_id
     WHERE t.client_generated_id IS NOT NULL
       AND NOT EXISTS (
@@ -68,6 +83,11 @@ WITH offline_items AS (
         SELECT uc.factor, u.name
         FROM inventory.unit_conversions uc JOIN inventory.units u ON u.id = uc.from_unit_id
         WHERE uc.product_id = i.product_id AND uc.to_unit_id = i.base_unit_id AND uc.factor <> 1
+        UNION ALL
+        SELECT h.old_factor, u.name
+        FROM :factor_history h LEFT JOIN inventory.units u ON u.id = h.from_unit_id
+        WHERE h.product_id = i.product_id AND h.to_unit_id = i.base_unit_id AND h.old_factor <> 1
+          AND h.changed_at >= i.session_opened_at
     ) f ON TRUE
     JOIN known_prices k ON k.product_id = i.product_id AND ROUND(k.price * f.factor, 2) = i.price
     LEFT JOIN known_costs c ON c.product_id = i.product_id
@@ -83,7 +103,7 @@ WITH offline_items AS (
     GROUP BY i.id
     HAVING BOOL_OR(m.factor <> 1)
     UNION ALL
-    -- Harga dan HPP naik dengan kelipatan yang sama, tetapi konversinya sudah tidak ada.
+    -- Harga dan HPP naik dengan kelipatan yang sama, tetapi konversinya tidak dikenal.
     SELECT i.id, 'TERDUGA',
            CASE WHEN COUNT(DISTINCT i.price / k.price) = 1 THEN ROUND(MAX(i.price / k.price), 4) END, NULL
     FROM offline_items i
