@@ -60,6 +60,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.flywaydb.core.Flyway
@@ -2239,6 +2242,368 @@ class IntegrationTest {
                     "WHERE ti.transaction_id = '$transactionId' AND a.new_data IS NOT NULL"
             )
         )
+    }
+
+    @Test
+    fun test_stock_list_includes_base_and_secondary_units() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val withDus = createProductFixture()
+        val plain = createProductFixture()
+        val indirect = createProductFixture()
+        val dusId = unitOtherThan(withDus.unitId)
+        val otherId = unitOtherThan(withDus.unitId, dusId)
+        insertUnitConversion(withDus.id, dusId, withDus.unitId, "0.3333")
+        // Konversi yang tidak bermuara ke satuan dasar tidak boleh tampil, walau produknya punya yang lain.
+        insertUnitConversion(withDus.id, otherId, dusId, "6.0000")
+        insertUnitConversion(indirect.id, otherId, dusId, "6.0000")
+
+        suspend fun stockOf(product: ProductFixture): JsonObject {
+            val sku = firstString("SELECT sku FROM inventory.products WHERE id = '${product.id}'")
+            val response = client.get("/api/inventory/stock?search=$sku") { bearer(token) }
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            return Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("data").jsonObject
+                .getValue("data").jsonArray.single().jsonObject
+        }
+        fun JsonObject.text(field: String) = get(field)?.jsonPrimitive?.contentOrNull
+        val baseName = unitName(withDus.unitId)
+
+        val dusStock = stockOf(withDus)
+        assertEquals(withDus.unitId.toString(), dusStock.text("baseUnitId"))
+        assertEquals(baseName, dusStock.text("baseUnitName"))
+        assertEquals(baseName, dusStock.text("unitName"))
+        assertEquals(dusId.toString(), dusStock.text("secondaryUnitId"))
+        assertEquals(unitName(dusId), dusStock.text("secondaryUnitName"))
+        assertEquals("0.3333", dusStock.text("secondaryUnitFactor"))
+
+        listOf(plain, indirect).forEach { product ->
+            val stock = stockOf(product)
+            assertEquals(product.unitId.toString(), stock.text("baseUnitId"))
+            assertEquals(baseName, stock.text("baseUnitName"))
+            listOf("secondaryUnitId", "secondaryUnitName", "secondaryUnitFactor").forEach {
+                assertEquals(null, stock.text(it), it)
+            }
+        }
+
+        // Satu halaman berisi banyak produk: satuan tidak tertukar, faktor bulat tanpa nol di belakang.
+        execute("UPDATE inventory.unit_conversions SET factor = 120 WHERE product_id = '${withDus.id}' AND to_unit_id = '${withDus.unitId}'")
+        val page = client.get("/api/inventory/stock?search=IT-&limit=1000") { bearer(token) }
+        val rows = Json.parseToJsonElement(page.bodyAsText()).jsonObject.getValue("data").jsonObject
+            .getValue("data").jsonArray.map { it.jsonObject }.associateBy { it.text("productId") }
+        assertEquals("120", rows.getValue(withDus.id.toString()).text("secondaryUnitFactor"))
+        assertEquals(null, rows.getValue(plain.id.toString()).text("secondaryUnitId"))
+
+        val empty = client.get("/api/inventory/stock?search=tidak-ada-${UUID.randomUUID()}") { bearer(token) }
+        assertEquals(HttpStatusCode.OK, empty.status, empty.bodyAsText())
+    }
+
+    @Test
+    fun test_transaction_items_include_recorded_unit_name() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("60.00")
+        val product = fixture.product
+        val token = fixture.cashier.token
+        val recordedName = unitName(product.unitId)
+        suspend fun itemsOf(response: HttpResponse): List<JsonObject> {
+            assertTrue(response.status.value in 200..201, response.bodyAsText())
+            return Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("data").jsonObject
+                .getValue("items").jsonArray.map { it.jsonObject }
+        }
+        fun JsonObject.recordedUnit() =
+            getValue("unitId").jsonPrimitive.content to getValue("unitName").jsonPrimitive.content
+        val expected = product.unitId.toString() to recordedName
+
+        val key = "unit-name-${UUID.randomUUID()}"
+        val sale = checkout(token, product, "2.00", "200.00", key)
+        val saleItem = itemsOf(sale).single()
+        assertEquals(expected, saleItem.recordedUnit())
+        // Pemindahan mapper tidak mengubah isi item lain.
+        assertEquals(
+            firstString("SELECT name FROM inventory.products WHERE id = '${product.id}'"),
+            saleItem.getValue("productName").jsonPrimitive.content
+        )
+        val synced = syncOfflineBody(fixture, fixture.saleBody(listOf(fixture.dusLine(), fixture.pcsLine("3.00"))))
+        assertEquals(HttpStatusCode.Created, synced.status, synced.bodyAsText())
+
+        // Satuan yang tercatat di item, bukan satuan produk saat ini.
+        execute("UPDATE inventory.products SET base_unit_id = '${fixture.dusId}' WHERE id = '${product.id}'")
+        assertEquals(saleItem, itemsOf(checkout(token, product, "2.00", "200.00", key)).single())
+        listOf(checkoutTransactionId(sale) to listOf("2.00"), offlineTransactionId(synced) to listOf("24.00", "3.00"))
+            .forEach { (transactionId, quantities) ->
+                val items = itemsOf(client.get("/api/sales/transactions/$transactionId") { bearer(token) })
+                assertEquals(quantities, items.map { it.getValue("quantity").jsonPrimitive.content })
+                items.forEach { assertEquals(expected, it.recordedUnit()) }
+            }
+    }
+
+    @Test
+    fun test_offline_factor_changed_during_session_accepts_old_factor() = testApplication {
+        application { configureIntegrationApplication() }
+        val owner = loginAsOwner()
+        val fixture = offlineUnitFixture("120.00")
+        suspend fun accept(line: String, source: String, factor: String, baseQuantity: String) {
+            val before = stockQuantity(fixture.product.id)
+            val synced = syncOfflineBody(fixture, fixture.saleBody(listOf(line)))
+            assertEquals(HttpStatusCode.Created, synced.status, synced.bodyAsText())
+            assertEquals(before.subtract(BigDecimal(baseQuantity)), stockQuantity(fixture.product.id))
+            val audit = offlineItemAudit(offlineTransactionId(synced))
+            assertEquals(source, audit.getValue("source").jsonPrimitive.content)
+            assertEquals(factor, audit.getValue("unitFactor").jsonPrimitive.content)
+            assertEquals(fixture.dusId.toString(), audit.getValue("soldUnitId").jsonPrimitive.content)
+        }
+        val legacyOld = fixture.dusLine("1.00", unitId = null, baseQuantity = null)
+
+        putProductUnit(owner, fixture.product, fixture.dusId, "10")
+        assertEquals("12.0000|${fixture.dusId}|${fixture.product.unitId}", conversionHistory(fixture.product.id))
+
+        accept(fixture.dusLine("1.00", baseQuantity = "12.00"), "CLIENT_UNIT", "12", "12.00")
+        accept(legacyOld, "LEGACY_AUTO", "12", "12.00")
+        accept(fixture.dusLine("1.00", price = "1000.00", baseQuantity = "10.00"), "CLIENT_UNIT", "10", "10.00")
+        // Harga dan jumlah wajib memakai faktor yang sama.
+        assertOfflineConflict(
+            fixture, fixture.dusLine("1.00", price = "1000.00", baseQuantity = "12.00"), code = "OFFLINE_PRICE_CONFLICT"
+        )
+        val unknown = assertOfflineConflict(fixture, fixture.dusLine("1.00", baseQuantity = "11.00"))
+        assertTrue(unknown.contains("faktor satuan di server (10)"), unknown)
+
+        // Satuan sekunder dihapus: faktor terakhir dan faktor sebelumnya tetap dikenali.
+        putProductUnit(owner, fixture.product, null, null)
+        accept(fixture.dusLine("1.00", baseQuantity = "12.00"), "CLIENT_UNIT", "12", "12.00")
+        accept(fixture.dusLine("1.00", price = "1000.00", baseQuantity = "10.00"), "CLIENT_UNIT", "10", "10.00")
+        accept(legacyOld, "LEGACY_AUTO", "12", "12.00")
+        accept(fixture.dusLine("1.00", "1000.00", unitId = null, baseQuantity = null), "LEGACY_AUTO", "10", "10.00")
+
+        // Batas jendela: perubahan tepat saat sesi dibuka masih berlaku.
+        execute(
+            "UPDATE inventory.unit_conversion_history SET changed_at = " +
+                "(SELECT opened_at FROM sales.cash_sessions WHERE id = '${fixture.sessionId}') WHERE product_id = '${fixture.product.id}'"
+        )
+        accept(fixture.dusLine("1.00", baseQuantity = "12.00"), "CLIENT_UNIT", "12", "12.00")
+
+        // Di luar jendela sesi faktor lama tidak berlaku lagi.
+        moveHistoryOutsideWindow(fixture.product)
+        assertOfflineConflict(fixture, fixture.dusLine("1.00", baseQuantity = "12.00"))
+        assertOfflineConflict(fixture, legacyOld, code = "OFFLINE_PRICE_CONFLICT")
+    }
+
+    @Test
+    fun test_free_product_that_ever_had_a_secondary_unit_is_rejected_for_legacy_client() = testApplication {
+        application { configureIntegrationApplication() }
+        val owner = loginAsOwner()
+        val fixture = offlineUnitFixture("50.00")
+        val paid = fixture.copy(product = createProductFixture()).pcsLine("1.00")
+        val free = fixture.dusLine(price = "0.00", unitId = null, baseQuantity = null)
+        val freeExplicit = fixture.dusLine(price = "0.00")
+        putProductUnit(owner, fixture.product, fixture.dusId, "12", priceRetail = "0.00")
+
+        assertOfflineConflict(fixture, paid, free)
+        putProductUnit(owner, fixture.product, null, null, priceRetail = "0.00")
+        assertOfflineConflict(fixture, paid, free)
+        // Klien baru menyatakan satuannya, jadi tidak ambigu selama faktornya masih di dalam jendela.
+        val explicit = syncOfflineBody(fixture, fixture.saleBody(listOf(paid, freeExplicit)))
+        assertEquals(HttpStatusCode.Created, explicit.status, explicit.bodyAsText())
+        assertEquals(BigDecimal("26.00"), stockQuantity(fixture.product.id))
+
+        moveHistoryOutsideWindow(fixture.product)
+        assertOfflineConflict(fixture, paid, free)
+        assertOfflineConflict(fixture, paid, freeExplicit)
+        val freePcs = syncOfflineBody(fixture, fixture.saleBody(listOf(paid, fixture.pcsLine("2.00", price = "0.00"))))
+        assertEquals(HttpStatusCode.Created, freePcs.status, freePcs.bodyAsText())
+        assertEquals(BigDecimal("24.00"), stockQuantity(fixture.product.id))
+
+        // Produk gratis yang tidak pernah punya satuan sekunder: satu tafsir, tetap diterima.
+        val neverHad = fixture.copy(product = createProductFixture())
+        putProductUnit(owner, neverHad.product, null, null, priceRetail = "0.00")
+        val accepted = syncOfflineBody(
+            fixture, fixture.saleBody(listOf(paid, neverHad.dusLine(price = "0.00", unitId = null, baseQuantity = null)))
+        )
+        assertEquals(HttpStatusCode.Created, accepted.status, accepted.bodyAsText())
+        assertEquals(BigDecimal("8.00"), stockQuantity(neverHad.product.id))
+    }
+
+    @Test
+    fun test_base_price_equal_to_old_secondary_price_is_rejected_for_legacy_client() = testApplication {
+        application { configureIntegrationApplication() }
+        val owner = loginAsOwner()
+        val fixture = offlineUnitFixture("30.00")
+        val legacy = fixture.dusLine(unitId = null, baseQuantity = null)
+        // Dus (12 x 100) dihapus dan harga satuan dasar menjadi 1.200.
+        putProductUnit(owner, fixture.product, null, null, priceRetail = "1200.00")
+        assertOfflineConflict(fixture, legacy)
+        moveHistoryOutsideWindow(fixture.product)
+        assertOfflineConflict(fixture, legacy)
+
+        val explicit = syncOfflineBody(fixture, fixture.saleBody(listOf(fixture.pcsLine("2.00", price = "1200.00"))))
+        assertEquals(HttpStatusCode.Created, explicit.status, explicit.bodyAsText())
+        assertEquals(BigDecimal("28.00"), stockQuantity(fixture.product.id))
+
+        // Riwayat produk lain dalam transaksi yang sama tidak ikut menolak: satu produk hanya punya
+        // harga lama 100, satu lagi hanya punya faktor lama 12.
+        val onlyPrice = fixture.copy(product = createProductFixture())
+        putProductUnit(owner, onlyPrice.product, null, null, priceRetail = "1200.00")
+        val onlyFactor = fixture.copy(product = createProductFixture())
+        insertUnitConversion(onlyFactor.product.id, fixture.dusId, onlyFactor.product.unitId, "12")
+        putProductUnit(owner, onlyFactor.product, null, null, priceRetail = "1200.00")
+        execute("DELETE FROM inventory.price_history WHERE product_id = '${onlyFactor.product.id}'")
+        listOf(onlyPrice, onlyFactor).forEach { moveHistoryOutsideWindow(it.product) }
+        val accepted = syncOfflineBody(
+            fixture,
+            fixture.saleBody(
+                listOf(
+                    fixture.pcsLine("1.00", price = "1200.00"),
+                    onlyPrice.dusLine(unitId = null, baseQuantity = null),
+                    onlyFactor.dusLine(unitId = null, baseQuantity = null)
+                )
+            )
+        )
+        assertEquals(HttpStatusCode.Created, accepted.status, accepted.bodyAsText())
+        assertEquals(BigDecimal("8.00"), stockQuantity(onlyPrice.product.id))
+        assertEquals(BigDecimal("8.00"), stockQuantity(onlyFactor.product.id))
+    }
+
+    @Test
+    fun test_replaced_factor_with_same_secondary_price_is_rejected_for_legacy_client() = testApplication {
+        application { configureIntegrationApplication() }
+        val owner = loginAsOwner()
+        val fixture = offlineUnitFixture("60.00")
+        val legacy = fixture.dusLine("1.00", unitId = null, baseQuantity = null)
+        // Dulu 12 x 100, sekarang 24 x 50: harga dus tetap 1.200.
+        putProductUnit(owner, fixture.product, fixture.dusId, "24", priceRetail = "50.00")
+        assertOfflineConflict(fixture, legacy)
+        moveHistoryOutsideWindow(fixture.product)
+        assertOfflineConflict(fixture, legacy)
+
+        val explicit = syncOfflineBody(fixture, fixture.saleBody(listOf(fixture.dusLine("1.00"))))
+        assertEquals(HttpStatusCode.Created, explicit.status, explicit.bodyAsText())
+        assertEquals(BigDecimal("36.00"), stockQuantity(fixture.product.id))
+
+        // Faktor menuju satuan dasar lain bukan penjelasan.
+        val otherUnit = unitOtherThan(fixture.product.unitId, fixture.dusId)
+        execute("UPDATE inventory.unit_conversion_history SET to_unit_id = '$otherUnit' WHERE product_id = '${fixture.product.id}'")
+        val accepted = syncOfflineBody(fixture, fixture.saleBody(listOf(legacy)))
+        assertEquals(HttpStatusCode.Created, accepted.status, accepted.bodyAsText())
+        assertEquals(BigDecimal("12.00"), stockQuantity(fixture.product.id))
+    }
+
+    @Test
+    fun test_old_contractor_price_only_rejects_for_contractor_customer() = testApplication {
+        application { configureIntegrationApplication() }
+        val owner = loginAsOwner()
+        val fixture = offlineUnitFixture("30.00")
+        val customerId = createReceivableCustomerFixture(BigDecimal("1000000.00"))
+        // Harga kontraktor lama 90 x 12 = 1.080 = harga kontraktor/eceran satuan dasar sekarang.
+        putProductUnit(owner, fixture.product, null, null, priceRetail = "1080.00", priceContractor = "1080.00")
+        moveHistoryOutsideWindow(fixture.product)
+        val line = fixture.dusLine("1.00", price = "1080.00", unitId = null, baseQuantity = null)
+
+        execute("UPDATE receivable.customers SET is_contractor = TRUE WHERE id = '$customerId'")
+        assertOfflineConflict(fixture, line, customerId = customerId)
+        execute("UPDATE receivable.customers SET is_contractor = FALSE WHERE id = '$customerId'")
+        val accepted = syncOfflineBody(fixture, fixture.saleBody(listOf(line), customerId = customerId))
+        assertEquals(HttpStatusCode.Created, accepted.status, accepted.bodyAsText())
+        assertEquals(BigDecimal("29.00"), stockQuantity(fixture.product.id))
+    }
+
+    @Test
+    fun test_old_factor_respects_trusted_window_and_current_base_unit() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("60.00")
+        val line = fixture.dusLine("1.00", baseQuantity = "12.00")
+        execute("UPDATE inventory.unit_conversions SET factor = 10 WHERE product_id = '${fixture.product.id}'")
+
+        // openedAt mundur tidak memperlebar jendela: perubahan 4 hari lalu tetap di luar 72 jam.
+        execute("UPDATE sales.cash_sessions SET opened_at = NOW() - INTERVAL '30 days' WHERE id = '${fixture.sessionId}'")
+        execute("UPDATE inventory.unit_conversion_history SET changed_at = NOW() - INTERVAL '4 days' WHERE product_id = '${fixture.product.id}'")
+        assertOfflineConflict(fixture, line)
+        execute("UPDATE inventory.unit_conversion_history SET changed_at = NOW() - INTERVAL '2 days' WHERE product_id = '${fixture.product.id}'")
+        // Faktor ke satuan dasar lama bukan faktor ke satuan dasar sekarang.
+        val otherUnit = unitOtherThan(fixture.product.unitId, fixture.dusId)
+        execute("UPDATE inventory.unit_conversion_history SET to_unit_id = '$otherUnit' WHERE product_id = '${fixture.product.id}'")
+        assertOfflineConflict(fixture, line)
+        execute("UPDATE inventory.unit_conversion_history SET to_unit_id = '${fixture.product.unitId}' WHERE product_id = '${fixture.product.id}'")
+        val accepted = syncOfflineBody(fixture, fixture.saleBody(listOf(line)))
+        assertEquals(HttpStatusCode.Created, accepted.status, accepted.bodyAsText())
+        assertEquals(BigDecimal("48.00"), stockQuantity(fixture.product.id))
+    }
+
+    @Test
+    fun test_unit_conversion_history_records_only_real_changes() = testApplication {
+        application { configureIntegrationApplication() }
+        val owner = loginAsOwner()
+        val product = createProductFixture()
+        val dusId = unitOtherThan(product.unitId)
+        val packId = unitOtherThan(product.unitId, dusId)
+        fun history() = conversionHistory(product.id)
+
+        putProductUnit(owner, product, dusId, "12")
+        val conversionId = firstString("SELECT id::text FROM inventory.unit_conversions WHERE product_id = '${product.id}'")
+        putProductUnit(owner, product, dusId, "12.0000")
+        execute("UPDATE inventory.unit_conversions SET factor = 12 WHERE product_id = '${product.id}'")
+        assertEquals("", history())
+        assertEquals(conversionId, firstString("SELECT id::text FROM inventory.unit_conversions WHERE product_id = '${product.id}'"))
+
+        // Ganti faktor, ganti satuan dengan faktor sama, lalu hapus.
+        putProductUnit(owner, product, dusId, "12.5")
+        putProductUnit(owner, product, packId, "12.5")
+        assertEquals(
+            "$packId|12.5000",
+            firstString("SELECT from_unit_id || '|' || factor FROM inventory.unit_conversions WHERE product_id = '${product.id}'")
+        )
+        putProductUnit(owner, product, null, null)
+        putProductUnit(owner, product, null, null)
+        val base = product.unitId
+        assertEquals("12.0000|$dusId|$base,12.5000|$dusId|$base,12.5000|$packId|$base", history())
+
+        // Transaksi yang gagal tidak meninggalkan riwayat; hapus permanen produk tidak terhalang trigger.
+        insertUnitConversion(product.id, dusId, base, "6")
+        inRolledBackTransaction { connection ->
+            connection.createStatement().use { it.execute("DELETE FROM inventory.unit_conversions WHERE product_id = '${product.id}'") }
+        }
+        assertEquals(3, history().split(',').size)
+        execute("DELETE FROM inventory.stock_movements WHERE product_id = '${product.id}'")
+        execute("DELETE FROM inventory.products WHERE id = '${product.id}'")
+        assertEquals("", history())
+    }
+
+    @Test
+    fun test_changing_base_unit_rewrites_conversion_and_records_old_factor() = testApplication {
+        application { configureIntegrationApplication() }
+        val owner = loginAsOwner()
+        val product = createProductFixture()
+        val dusId = unitOtherThan(product.unitId)
+        val packId = unitOtherThan(product.unitId, dusId)
+        putProductUnit(owner, product, dusId, "12")
+        putProductUnit(owner, product, dusId, "12", baseUnitId = packId)
+        assertEquals(
+            "$dusId|$packId|12.0000",
+            firstString("SELECT concat_ws('|', from_unit_id, to_unit_id, factor) FROM inventory.unit_conversions WHERE product_id = '${product.id}'")
+        )
+        assertEquals("12.0000|$dusId|${product.unitId}", conversionHistory(product.id))
+    }
+
+    @Test
+    fun test_v47_keeps_existing_conversions_and_starts_with_empty_history() {
+        val migration = requireNotNull(
+            javaClass.classLoader.getResource("db/migration/V47__unit_conversion_history.sql")
+        ).readText()
+        val product = createProductFixture()
+        insertUnitConversion(product.id, unitOtherThan(product.unitId), product.unitId, "12")
+        inRolledBackTransaction { connection ->
+            connection.createStatement().use { statement ->
+                fun value(sql: String) = statement.executeQuery(sql).use { rows -> rows.next(); rows.getString(1) }
+                val snapshot = "SELECT md5(string_agg(c::text, ',' ORDER BY id)) FROM inventory.unit_conversions c"
+                // Kembalikan skema ke V46, lalu jalankan V47 di atas data yang ada.
+                statement.execute("DROP TRIGGER trg_unit_conversions_history ON inventory.unit_conversions")
+                statement.execute("DROP FUNCTION inventory.fn_log_unit_conversion_history()")
+                statement.execute("DROP TABLE inventory.unit_conversion_history")
+                val before = value(snapshot)
+                statement.execute(migration)
+                assertEquals(before, value(snapshot))
+                assertEquals("0", value("SELECT COUNT(*) FROM inventory.unit_conversion_history"))
+                statement.execute("DELETE FROM inventory.unit_conversions WHERE product_id = '${product.id}'")
+                assertEquals("12.0000", value("SELECT old_factor FROM inventory.unit_conversion_history WHERE product_id = '${product.id}'"))
+            }
+        }
     }
 
     @Test

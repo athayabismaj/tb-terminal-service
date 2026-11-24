@@ -73,7 +73,8 @@ internal fun resolveItemForOfflineSync(
         expectedBaseUnitPrice = { baseQuantity ->
             pricingContext.tierPricing.resolveUnitPrice(product, baseQuantity)
         },
-        historicalBaseUnitPrices = pricingContext.historicalPricesByProduct[item.productId].orEmpty()
+        historicalBaseUnitPrices = pricingContext.historicalPricesByProduct[item.productId].orEmpty(),
+        rejectOnlyHistory = pricingContext.rejectOnlyHistory(item.productId, baseUnitId)
     )
     val resolved = when (resolution) {
         is OfflineUnitResolution.Resolved -> resolution
