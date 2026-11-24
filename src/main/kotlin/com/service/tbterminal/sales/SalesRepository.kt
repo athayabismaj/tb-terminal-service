@@ -930,23 +930,7 @@ class SalesRepositoryImpl(
 
         // Ambil data transaksi yang baru dibuat (inline, tidak memanggil suspend function)
         val trxRow = TransactionsTable.select { TransactionsTable.id eq trxId }.single()
-        val items = TransactionItemsTable.select { TransactionItemsTable.transactionId eq trxId }
-            .map { row ->
-                TransactionItemResponse(
-                    productId = row[TransactionItemsTable.productId].toString(),
-                    productName = resolvedItems.firstOrNull { it.productId.toString() == row[TransactionItemsTable.productId].toString() }?.productName ?: "",
-                    unitId = row[TransactionItemsTable.unitId].toString(),
-                    quantity = row[TransactionItemsTable.quantity],
-                    priceAtTransaction = row[TransactionItemsTable.priceAtTransaction],
-                    cogsAtTransaction = row[TransactionItemsTable.cogsAtTransaction],
-                    grossLineTotal = row[TransactionItemsTable.grossLineTotal],
-                    discountType = row[TransactionItemsTable.discountType]?.name,
-                    discountValue = row[TransactionItemsTable.discountValue],
-                    discount = row[TransactionItemsTable.discount],
-                    subtotal = row[TransactionItemsTable.subtotal],
-                    note = row[TransactionItemsTable.note]
-                )
-            }
+        val items = loadTransactionItems(trxId)
         val paymentResponses = PaymentsTable.select { PaymentsTable.transactionId eq trxId }
             .orderBy(PaymentsTable.paidAt to SortOrder.ASC)
             .map { row ->
@@ -1416,23 +1400,7 @@ class SalesRepositoryImpl(
             .singleOrNull()
             ?: return null
 
-        val items = TransactionItemsTable.select { TransactionItemsTable.transactionId eq id }
-            .map { row ->
-                TransactionItemResponse(
-                    productId = row[TransactionItemsTable.productId].toString(),
-                    productName = row[TransactionItemsTable.productName],
-                    unitId = row[TransactionItemsTable.unitId].toString(),
-                    quantity = row[TransactionItemsTable.quantity],
-                    priceAtTransaction = row[TransactionItemsTable.priceAtTransaction],
-                    cogsAtTransaction = row[TransactionItemsTable.cogsAtTransaction],
-                    grossLineTotal = row[TransactionItemsTable.grossLineTotal],
-                    discountType = row[TransactionItemsTable.discountType]?.name,
-                    discountValue = row[TransactionItemsTable.discountValue],
-                    discount = row[TransactionItemsTable.discount],
-                    subtotal = row[TransactionItemsTable.subtotal],
-                    note = row[TransactionItemsTable.note]
-                )
-            }
+        val items = loadTransactionItems(id)
 
         val customerName = trxRow.getOrNull(CustomersTable.name)
         val userId = trxRow[TransactionsTable.userId]
