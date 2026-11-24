@@ -127,8 +127,8 @@ repository, log, atau file dump.
 
 API ini menerapkan *Role-Based Access Control* ketat:
 - **OWNER**: Seluruh operasi, termasuk pengguna/role, konfigurasi keamanan, dan backup/restore database.
-- **ADMIN**: Master data, stok, pembelian, piutang, sesi kas, void, audit, dan laporan. Tidak dapat mengelola pengguna/role, keamanan sistem, atau backup/restore.
-- **KASIR**: Operasi POS/sesi sendiri, akses piutang operasional yang memang dibutuhkan, dan baca profil toko. Tidak dapat mengubah master data atau melihat laporan manajemen.
+- **ADMIN**: Master data, stok, pembelian, piutang, pengawasan sesi kas (lihat dan tutup paksa), void, audit, dan laporan. Tidak dapat mengelola pengguna/role, keamanan sistem, atau backup/restore.
+- **KASIR**: Satu-satunya role yang dapat membuka sesi kas (online maupun sync offline). Operasi POS/sesi sendiri, akses piutang operasional yang memang dibutuhkan, dan baca profil toko. Tidak dapat mengubah master data atau melihat laporan manajemen.
 
 Matriks ringkas:
 
@@ -141,7 +141,9 @@ Matriks ringkas:
 | Audit dan laporan | Baca | Baca | Ditolak |
 | Produk, kategori, satuan, stok, impor | Kelola | Kelola | Baca |
 | Pembelian dan hutang supplier | Kelola | Kelola | Ditolak |
-| POS dan sesi kas sendiri | Operasional | Operasional | Operasional |
+| Buka sesi kas (`/sessions/open`, `/sessions/sync/open`) | Ditolak | Ditolak | Ya |
+| Daftar dan tutup paksa sesi kas | Kelola | Kelola | Ditolak |
+| Checkout POS (butuh sesi kas sendiri yang aktif) | Hanya bila punya sesi aktif | Hanya bila punya sesi aktif | Ya |
 | Meminta manager approval | Ya | Ya | Ya |
 | Menjadi approver | Ya | Ya | Ditolak |
 

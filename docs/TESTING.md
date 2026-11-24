@@ -10,6 +10,14 @@ Dengan Docker aktif, `gradlew test --no-configuration-cache` memakai PostgreSQL 
 
 Script membuat database bernama acak, menjalankan seluruh unit/integration/E2E termasuk backup/restore, lalu menghapus database dan direktori dump sementara dalam `finally`. Jangan menunjuk `TEST_DB_URL` ke database development atau production.
 
+Tanpa Docker dan tanpa `TEST_DB_URL`, integration test di-skip supaya unit test tetap bisa dijalankan di mesin dev. Di CI atau sebelum rilis, wajibkan integration test:
+
+```bash
+./gradlew test -PrequireIntegrationTests=true --no-configuration-cache
+```
+
+Dengan properti itu build **gagal** bila database test tidak tersedia, dan test selalu dijalankan ulang (hasil cache tidak dipakai). Test backup/restore tetap di-skip kecuali `RESTORE_ENABLED=true` dan `BACKUP_DIRECTORY` diisi.
+
 Build artifact: `gradlew clean test buildFatJar --no-configuration-cache`.
 
 ## Mobile
