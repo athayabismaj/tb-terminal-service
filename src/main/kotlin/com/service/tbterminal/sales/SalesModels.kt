@@ -82,7 +82,12 @@ data class CashExpenseRequest(
 data class PayDebtRequest(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val amount: java.math.BigDecimal,
-    val method: String // "tunai", "transfer", "qris"
+    val method: String, // "tunai", "transfer", "qris"
+    /**
+     * Opsional demi kompatibilitas klien lama, tetapi SANGAT disarankan: kirim UUID
+     * yang sama saat retry agar pembayaran tidak tercatat dua kali.
+     */
+    val idempotencyKey: String? = null
 )
 
 @Serializable
@@ -453,7 +458,12 @@ data class OfflineCheckoutItemRequest(
     val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val subtotal: java.math.BigDecimal,
-    val note: String? = null
+    val note: String? = null,
+    /** Satuan yang dijual. Opsional demi klien lama; wajib bersama [baseQuantity]. */
+    val unitId: String? = null,
+    /** Jumlah dalam satuan dasar: `quantity` × faktor satuan, tanpa pembulatan. */
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val baseQuantity: java.math.BigDecimal? = null
 )
 
 @Serializable

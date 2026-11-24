@@ -12,6 +12,7 @@ import io.ktor.server.application.*
 import io.ktor.server.auth.*
 import io.ktor.server.auth.jwt.*
 import io.ktor.server.response.respond
+import io.ktor.server.plugins.origin
 import io.ktor.server.plugins.ratelimit.*
 import kotlin.time.Duration.Companion.minutes
 import org.koin.ktor.ext.inject
@@ -23,14 +24,28 @@ fun Application.configureSecurity() {
     val jwtIssuer = EnvironmentConfig.jwtIssuer
     val jwtSecret = EnvironmentConfig.jwtSecret
 
+    // Kunci rate limit = IP klien asli dari request.origin (sudah diproses XForwardedHeaders).
+    // JANGAN pakai request.local.remoteHost: di belakang nginx nilainya selalu IP container
+    // nginx sehingga semua user berbagi satu kuota (1 penyerang bisa memblokir semua login).
     install(RateLimit) {
         register(RateLimitName("login")) {
             rateLimiter(limit = 5, refillPeriod = 1.minutes)
-            requestKey { call -> call.request.local.remoteHost }
+            requestKey { call -> call.request.origin.remoteAddress }
         }
         register(RateLimitName("manager-approval")) {
             rateLimiter(limit = 5, refillPeriod = 1.minutes)
-            requestKey { call -> call.request.local.remoteHost }
+            requestKey { call -> call.request.origin.remoteAddress }
+        }
+        register(RateLimitName("refresh")) {
+            rateLimiter(limit = 30, refillPeriod = 1.minutes)
+            requestKey { call -> call.request.origin.remoteAddress }
+        }
+        // Unlock PIN, reset PIN, ganti PIN/password. Perlindungan utama adalah lockout
+        // per akun; ini lapisan kasar per IP. Dibuat longgar karena beberapa perangkat
+        // kasir di satu toko biasanya keluar lewat IP publik yang sama.
+        register(RateLimitName("credential-check")) {
+            rateLimiter(limit = 30, refillPeriod = 1.minutes)
+            requestKey { call -> call.request.origin.remoteAddress }
         }
     }
 

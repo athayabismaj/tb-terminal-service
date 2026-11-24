@@ -1,34 +1,22 @@
 package com.service.tbterminal.system
 
+import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.EnvironmentConfig
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.Role
+import com.service.tbterminal.shared.TooManyAttemptsException
+import com.service.tbterminal.shared.UnauthorizedException
 import com.service.tbterminal.shared.ValidationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.mindrot.jbcrypt.BCrypt
 import java.time.Clock
+import java.time.Duration
 import java.time.OffsetDateTime
-import java.time.ZoneOffset
 import java.util.UUID
-
-data class PinAttemptState(
-    val failedAttempts: Int = 0,
-    val lockedUntil: OffsetDateTime? = null
-)
-
-data class PinRolePolicy(
-    val consecutiveThreshold: Int,
-    val maxTotalFailures: Int,
-    val backoffSeconds: List<Long>
-)
-
-interface PinAttemptStore {
-    suspend fun getPinAttemptState(userId: UUID, deviceId: String): PinAttemptState?
-    suspend fun savePinAttemptState(userId: UUID, deviceId: String, failedAttempts: Int, lockedUntil: OffsetDateTime?)
-    suspend fun resetPinAttemptState(userId: UUID, deviceId: String)
-    suspend fun resetAllPinAttemptStatesForUser(userId: UUID)
-}
 
 interface PinVerificationGateway : PinAttemptStore {
     suspend fun findPinUserById(userId: UUID): UserRow?
@@ -46,6 +34,8 @@ interface PinVerificationGateway : PinAttemptStore {
 object PinVerificationPolicy {
     const val MAX_DEVICE_ID_LENGTH = 128
     const val DEFAULT_DEVICE_ID = "default-device"
+    private val DEVICE_ID_ALLOWED = Regex("[^A-Za-z0-9._:-]")
+    val PIN_PATTERN = Regex("^[0-9]{4,6}$")
 
     private val CASHIER_POLICY = PinRolePolicy(
         consecutiveThreshold = 5,
@@ -59,6 +49,17 @@ object PinVerificationPolicy {
         backoffSeconds = listOf(60L, 300L, 900L, 1800L)
     )
 
+    /**
+     * PIN approver dimasukkan oleh orang lain (biasanya kasir). Tidak ada "force logout"
+     * karena itu akan memberi kasir cara mengeluarkan manager; sebagai gantinya kunci
+     * terus memanjang hingga 30 menit per percobaan sampai PIN benar dimasukkan.
+     */
+    val MANAGER_APPROVAL_POLICY = PinRolePolicy(
+        consecutiveThreshold = 3,
+        maxTotalFailures = Int.MAX_VALUE,
+        backoffSeconds = listOf(60L, 300L, 900L, 1800L)
+    )
+
     fun forRole(role: String): PinRolePolicy {
         return when (role.trim().lowercase()) {
             Role.ADMIN, Role.OWNER -> PRIVILEGED_POLICY
@@ -66,28 +67,38 @@ object PinVerificationPolicy {
         }
     }
 
+    /**
+     * deviceId hanya dipakai sebagai metadata audit. Karakter di luar allowlist
+     * diganti `_` agar aman disimpan/di-log dan tidak bisa merusak JSON audit.
+     */
     fun normalizeDeviceId(rawDeviceId: String?): String {
         val trimmed = rawDeviceId?.trim()?.takeIf(String::isNotBlank) ?: return DEFAULT_DEVICE_ID
-        return trimmed.take(MAX_DEVICE_ID_LENGTH)
+        return trimmed.take(MAX_DEVICE_ID_LENGTH).replace(DEVICE_ID_ALLOWED, "_")
     }
 
-    fun lockoutDurationSeconds(policy: PinRolePolicy, failedAttempts: Int): Long {
-        val index = (failedAttempts - policy.consecutiveThreshold)
-            .coerceIn(0, policy.backoffSeconds.lastIndex)
-        return policy.backoffSeconds[index]
+    /** Validasi format PIN tunggal yang dipakai di semua endpoint. */
+    fun validatePinFormat(pin: String, fieldLabel: String = "PIN") {
+        if (!pin.matches(PIN_PATTERN)) {
+            throw ValidationException("$fieldLabel harus terdiri dari 4 sampai 6 digit angka")
+        }
     }
+
+    fun lockoutDurationSeconds(policy: PinRolePolicy, failedAttempts: Int): Long =
+        CredentialAttemptGuard.lockoutDurationSeconds(policy, failedAttempts)
 }
 
 class PinVerificationService(
     private val gateway: PinVerificationGateway,
     private val clock: Clock = Clock.systemUTC()
 ) {
+    private val guard = CredentialAttemptGuard(gateway, clock)
+
     suspend fun verifyUnlock(
         userId: UUID,
         request: UnlockRequest,
         headerDeviceId: String? = null,
         ipAddress: String? = null
-    ): com.service.tbterminal.shared.ApiResponse<PinUnlockResponse> {
+    ): ApiResponse<PinUnlockResponse> {
         if (request.pin.isBlank()) throw ValidationException("PIN wajib diisi")
 
         val userRow = gateway.findPinUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
@@ -96,7 +107,7 @@ class PinVerificationService(
 
         if (!userRow.isActive) {
             gateway.revokeSessionsForUser(userId)
-            return com.service.tbterminal.shared.ApiResponse(
+            return ApiResponse(
                 success = false,
                 data = PinUnlockResponse(valid = false, attemptsLeft = 0, lockedUntil = null, forceLogout = true),
                 error = "Akun tidak aktif. Silakan login kembali.",
@@ -104,32 +115,25 @@ class PinVerificationService(
             )
         }
 
-        val now = OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)
-        val currentState = gateway.getPinAttemptState(userId, deviceId) ?: PinAttemptState()
-
-        val activeLockUntil = currentState.lockedUntil
-        if (activeLockUntil != null && activeLockUntil.isAfter(now)) {
-            recordPinSecurityAudit(
-                userId = userId,
-                action = AuditAction.UPDATE,
-                tableName = "pin_unlock_locked",
-                ipAddress = ipAddress,
-                deviceId = deviceId,
-                failedAttempts = currentState.failedAttempts,
-                attemptsLeft = 0,
-                lockedUntil = activeLockUntil
-            )
-            return com.service.tbterminal.shared.ApiResponse(
-                success = false,
-                data = PinUnlockResponse(
-                    valid = false,
-                    attemptsLeft = 0,
-                    lockedUntil = activeLockUntil.toString(),
-                    forceLogout = false
-                ),
-                error = "Terlalu banyak percobaan gagal. Tunggu hingga masa tunggu berakhir.",
-                code = "PIN_LOCKED"
-            )
+        val reservation = when (val result = guard.reserve(userId, CredentialScope.PIN, policy)) {
+            is AttemptReservation.Granted -> result
+            is AttemptReservation.Locked -> {
+                recordSecurityAudit(
+                    userId, AuditAction.UPDATE, "pin_unlock_locked", ipAddress, deviceId,
+                    result.failedAttempts, attemptsLeft = 0, lockedUntil = result.lockedUntil
+                )
+                return ApiResponse(
+                    success = false,
+                    data = PinUnlockResponse(
+                        valid = false,
+                        attemptsLeft = 0,
+                        lockedUntil = result.lockedUntil.toString(),
+                        forceLogout = false
+                    ),
+                    error = "Terlalu banyak percobaan gagal. Tunggu hingga masa tunggu berakhir.",
+                    code = "PIN_LOCKED"
+                )
+            }
         }
 
         val isValid = withContext(Dispatchers.IO) {
@@ -137,12 +141,13 @@ class PinVerificationService(
         }
 
         if (isValid) {
+            guard.release(userId, CredentialScope.PIN, reservation)
             if (EnvironmentConfig.isProduction && request.pin in DEFAULT_PINS) {
-                return com.service.tbterminal.shared.ApiResponse(
+                return ApiResponse(
                     success = false,
                     data = PinUnlockResponse(
                         valid = false,
-                        attemptsLeft = (policy.consecutiveThreshold - currentState.failedAttempts).coerceAtLeast(0),
+                        attemptsLeft = policy.consecutiveThreshold,
                         lockedUntil = null,
                         forceLogout = false
                     ),
@@ -151,8 +156,7 @@ class PinVerificationService(
                 )
             }
 
-            gateway.resetPinAttemptState(userId, deviceId)
-            return com.service.tbterminal.shared.ApiResponse.success(
+            return ApiResponse.success(
                 PinUnlockResponse(
                     valid = true,
                     attemptsLeft = policy.consecutiveThreshold,
@@ -163,96 +167,136 @@ class PinVerificationService(
             )
         }
 
-        val nextFailures = currentState.failedAttempts + 1
-        if (nextFailures >= policy.maxTotalFailures) {
-            gateway.revokeSessionsForUser(userId)
-            gateway.resetPinAttemptState(userId, deviceId)
-            recordPinSecurityAudit(
-                userId = userId,
-                action = AuditAction.UPDATE,
-                tableName = "pin_unlock_revoked",
-                ipAddress = ipAddress,
-                deviceId = deviceId,
-                failedAttempts = nextFailures,
-                attemptsLeft = 0,
-                lockedUntil = null
-            )
-            return com.service.tbterminal.shared.ApiResponse(
-                success = false,
-                data = PinUnlockResponse(
-                    valid = false,
-                    attemptsLeft = 0,
-                    lockedUntil = null,
-                    forceLogout = true
-                ),
-                error = "Batas percobaan PIN terlampaui. Silakan login kembali.",
-                code = "PIN_MAX_ATTEMPTS_EXCEEDED"
-            )
+        return when (val outcome = guard.failureOutcome(reservation, policy)) {
+            is AttemptOutcome.MaxExceeded -> {
+                gateway.revokeSessionsForUser(userId)
+                guard.release(userId, CredentialScope.PIN, reservation)
+                recordSecurityAudit(
+                    userId, AuditAction.UPDATE, "pin_unlock_revoked", ipAddress, deviceId,
+                    outcome.failedAttempts, attemptsLeft = 0, lockedUntil = null
+                )
+                ApiResponse(
+                    success = false,
+                    data = PinUnlockResponse(valid = false, attemptsLeft = 0, lockedUntil = null, forceLogout = true),
+                    error = "Batas percobaan PIN terlampaui. Silakan login kembali.",
+                    code = "PIN_MAX_ATTEMPTS_EXCEEDED"
+                )
+            }
+
+            is AttemptOutcome.LockedNow -> {
+                recordSecurityAudit(
+                    userId, AuditAction.UPDATE, "pin_unlock_locked", ipAddress, deviceId,
+                    outcome.failedAttempts, attemptsLeft = 0, lockedUntil = outcome.lockedUntil
+                )
+                ApiResponse(
+                    success = false,
+                    data = PinUnlockResponse(
+                        valid = false,
+                        attemptsLeft = 0,
+                        lockedUntil = outcome.lockedUntil.toString(),
+                        forceLogout = false
+                    ),
+                    error = "PIN salah",
+                    code = "PIN_LOCKED"
+                )
+            }
+
+            is AttemptOutcome.Invalid -> {
+                recordSecurityAudit(
+                    userId, AuditAction.INSERT, "pin_unlock_failed", ipAddress, deviceId,
+                    outcome.failedAttempts, attemptsLeft = outcome.attemptsLeft, lockedUntil = null
+                )
+                ApiResponse(
+                    success = false,
+                    data = PinUnlockResponse(
+                        valid = false,
+                        attemptsLeft = outcome.attemptsLeft,
+                        lockedUntil = null,
+                        forceLogout = false
+                    ),
+                    error = "PIN salah",
+                    code = "INVALID_PIN"
+                )
+            }
+        }
+    }
+
+    /**
+     * Memverifikasi PIN/password lama sebelum perubahan kredensial (ganti PIN,
+     * reset PIN, ganti password). Memakai penghitung yang sama dengan unlock
+     * sehingga endpoint ini tidak bisa dipakai untuk brute force tanpa batas.
+     *
+     * @throws TooManyAttemptsException bila sedang/baru saja terkunci.
+     * @throws UnauthorizedException bila batas total terlampaui (semua sesi dicabut).
+     * @throws ValidationException bila kredensial salah.
+     */
+    suspend fun verifyCredentialForSensitiveChange(
+        userRow: UserRow,
+        scope: CredentialScope,
+        candidate: String,
+        deviceId: String?,
+        ipAddress: String?,
+        invalidMessage: String
+    ) {
+        require(scope == CredentialScope.PIN || scope == CredentialScope.PASSWORD) {
+            "Scope $scope tidak didukung untuk verifikasi kredensial milik sendiri"
+        }
+        val normalizedDeviceId = PinVerificationPolicy.normalizeDeviceId(deviceId)
+        val auditPrefix = if (scope == CredentialScope.PIN) "pin_change" else "password_check"
+
+        val policy = PinVerificationPolicy.forRole(userRow.roleName)
+        val reservation = when (val result = guard.reserve(userRow.id, scope, policy)) {
+            is AttemptReservation.Granted -> result
+            is AttemptReservation.Locked -> throw lockedException(result.lockedUntil)
         }
 
-        if (nextFailures >= policy.consecutiveThreshold) {
-            val lockSeconds = PinVerificationPolicy.lockoutDurationSeconds(policy, nextFailures)
-            val lockedUntil = now.plusSeconds(lockSeconds)
-            gateway.savePinAttemptState(
-                userId = userId,
-                deviceId = deviceId,
-                failedAttempts = nextFailures,
-                lockedUntil = lockedUntil
-            )
-            recordPinSecurityAudit(
-                userId = userId,
-                action = AuditAction.UPDATE,
-                tableName = "pin_unlock_locked",
-                ipAddress = ipAddress,
-                deviceId = deviceId,
-                failedAttempts = nextFailures,
-                attemptsLeft = 0,
-                lockedUntil = lockedUntil
-            )
-            return com.service.tbterminal.shared.ApiResponse(
-                success = false,
-                data = PinUnlockResponse(
-                    valid = false,
-                    attemptsLeft = 0,
-                    lockedUntil = lockedUntil.toString(),
-                    forceLogout = false
-                ),
-                error = "PIN salah",
-                code = "PIN_LOCKED"
-            )
+        val hash = if (scope == CredentialScope.PIN) userRow.pinHash else userRow.passwordHash
+        val isValid = candidate.isNotEmpty() && withContext(Dispatchers.IO) {
+            runCatching { BCrypt.checkpw(candidate, hash) }.getOrDefault(false)
+        }
+        if (isValid) {
+            guard.release(userRow.id, scope, reservation)
+            return
         }
 
-        val attemptsLeft = (policy.consecutiveThreshold - nextFailures).coerceAtLeast(0)
-        gateway.savePinAttemptState(
-            userId = userId,
-            deviceId = deviceId,
-            failedAttempts = nextFailures,
-            lockedUntil = null
-        )
-        recordPinSecurityAudit(
-            userId = userId,
-            action = AuditAction.INSERT,
-            tableName = "pin_unlock_failed",
-            ipAddress = ipAddress,
-            deviceId = deviceId,
-            failedAttempts = nextFailures,
-            attemptsLeft = attemptsLeft,
-            lockedUntil = null
-        )
-        return com.service.tbterminal.shared.ApiResponse(
-            success = false,
-            data = PinUnlockResponse(
-                valid = false,
-                attemptsLeft = attemptsLeft,
-                lockedUntil = null,
-                forceLogout = false
-            ),
-            error = "PIN salah",
-            code = "INVALID_PIN"
+        when (val outcome = guard.failureOutcome(reservation, policy)) {
+            is AttemptOutcome.MaxExceeded -> {
+                gateway.revokeSessionsForUser(userRow.id)
+                guard.release(userRow.id, scope, reservation)
+                recordSecurityAudit(
+                    userRow.id, AuditAction.UPDATE, "${auditPrefix}_revoked", ipAddress, normalizedDeviceId,
+                    outcome.failedAttempts, attemptsLeft = 0, lockedUntil = null
+                )
+                throw UnauthorizedException("Batas percobaan terlampaui. Silakan login kembali.")
+            }
+
+            is AttemptOutcome.LockedNow -> {
+                recordSecurityAudit(
+                    userRow.id, AuditAction.UPDATE, "${auditPrefix}_locked", ipAddress, normalizedDeviceId,
+                    outcome.failedAttempts, attemptsLeft = 0, lockedUntil = outcome.lockedUntil
+                )
+                throw lockedException(outcome.lockedUntil)
+            }
+
+            is AttemptOutcome.Invalid -> {
+                recordSecurityAudit(
+                    userRow.id, AuditAction.INSERT, "${auditPrefix}_failed", ipAddress, normalizedDeviceId,
+                    outcome.failedAttempts, attemptsLeft = outcome.attemptsLeft, lockedUntil = null
+                )
+                throw ValidationException(invalidMessage)
+            }
+        }
+    }
+
+    private fun lockedException(lockedUntil: OffsetDateTime): TooManyAttemptsException {
+        val retryAfter = Duration.between(guard.now(), lockedUntil).seconds.coerceAtLeast(1)
+        return TooManyAttemptsException(
+            message = "Terlalu banyak percobaan gagal. Coba lagi setelah $lockedUntil",
+            retryAfterSeconds = retryAfter
         )
     }
 
-    private suspend fun recordPinSecurityAudit(
+    private suspend fun recordSecurityAudit(
         userId: UUID,
         action: AuditAction,
         tableName: String,
@@ -262,9 +306,12 @@ class PinVerificationService(
         attemptsLeft: Int,
         lockedUntil: OffsetDateTime?
     ) {
-        val escapedDeviceId = deviceId.replace("\\", "\\\\").replace("\"", "\\\"")
-        val lockedField = lockedUntil?.let { "\"$it\"" } ?: "null"
-        val metadata = """{"deviceId":"$escapedDeviceId","failedAttempts":$failedAttempts,"attemptsLeft":$attemptsLeft,"lockedUntil":$lockedField}"""
+        val metadata = buildJsonObject {
+            put("deviceId", deviceId)
+            put("failedAttempts", failedAttempts)
+            put("attemptsLeft", attemptsLeft)
+            if (lockedUntil != null) put("lockedUntil", lockedUntil.toString()) else put("lockedUntil", JsonNull)
+        }.toString()
         gateway.recordPinAuditLog(
             actorUserId = userId,
             action = action,

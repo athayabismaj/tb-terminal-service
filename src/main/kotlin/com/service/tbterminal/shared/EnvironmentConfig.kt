@@ -53,6 +53,11 @@ object EnvironmentConfig {
         resolve("MANAGER_APPROVAL_TTL_MINUTES", "5").toLongOrNull()?.coerceIn(1, 15) ?: 5
     }
 
+    /** Umur maksimum sesi kas offline saat di-sync; juga membatasi jendela harga dan pengaturan lama. */
+    val offlineMaxSessionAgeHours: Long by lazy {
+        parseOfflineMaxSessionAgeHours(resolve("OFFLINE_MAX_SESSION_AGE_HOURS", ""))
+    }
+
     // PostgreSQL backup files must live outside the application repository/public web roots.
     val backupDirectory: String by lazy { resolve("BACKUP_DIRECTORY", "") }
     val backupEnabled: Boolean by lazy { resolve("BACKUP_ENABLED", "false").toBooleanStrictOrNull() ?: false }
@@ -76,6 +81,10 @@ object EnvironmentConfig {
             ?: DEFAULT_MAX_IMAGE_BYTES
     }
 
+    internal fun parseOfflineMaxSessionAgeHours(raw: String): Long =
+        raw.trim().toLongOrNull()?.coerceIn(1, 168) ?: DEFAULT_OFFLINE_MAX_SESSION_AGE_HOURS
+
+    private const val DEFAULT_OFFLINE_MAX_SESSION_AGE_HOURS = 72L
     private const val DEFAULT_MAX_IMAGE_BYTES = 5L * 1024 * 1024
 
     fun validateProductionConfiguration() {

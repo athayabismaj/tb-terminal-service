@@ -54,8 +54,19 @@ dependencies {
     testImplementation("org.testcontainers:postgresql:1.20.4")
 }
 
+// -PrequireIntegrationTests (=true) untuk CI: build gagal bila database test tidak tersedia.
+val requireIntegrationTests = providers.gradleProperty("requireIntegrationTests")
+    .map { it.isBlank() || it.toBooleanStrict() }
+    .getOrElse(false)
+
 tasks.test {
     useJUnitPlatform()
+    systemProperty("requireIntegrationTests", requireIntegrationTests)
+    if (requireIntegrationTests) {
+        // Hasil lama (cache/UP-TO-DATE) bukan bukti integration test benar-benar jalan.
+        outputs.upToDateWhen { false }
+        outputs.cacheIf { false }
+    }
     environment("JWT_SECRET", "integration-test-jwt-secret-that-is-not-used-outside-tests")
     environment("JWT_ISSUER", "tb-terminal-integration-tests")
     environment("JWT_AUDIENCE", "tb-terminal-integration-tests")

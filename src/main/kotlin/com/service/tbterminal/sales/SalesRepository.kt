@@ -14,6 +14,8 @@ import com.service.tbterminal.receivable.RecPaymentMethod
 import com.service.tbterminal.receivable.ReceivablesTable
 import com.service.tbterminal.receivable.ensureReceivableCreditLimit
 import com.service.tbterminal.receivable.receivableToday
+import com.service.tbterminal.receivable.validatePaymentIdempotencyKey
+import com.service.tbterminal.shared.EnvironmentConfig
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.SessionNotFoundException
 import com.service.tbterminal.shared.StockInsufficientException
@@ -39,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Duration
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.util.UUID
@@ -158,7 +161,8 @@ data class OfflineCheckoutSyncItemCommand(
     val discountValue: java.math.BigDecimal,
     val discount: java.math.BigDecimal,
     val subtotal: java.math.BigDecimal,
-    val note: String? = null
+    val note: String? = null,
+    val unit: OfflineItemUnit? = null
 )
 
 data class CheckoutCommand(
@@ -260,7 +264,8 @@ data class TransactionSummary(
 
 class SalesRepositoryImpl(
     private val managerApprovalService: ManagerApprovalService,
-    private val discountRepository: DiscountRepository
+    private val discountRepository: DiscountRepository,
+    private val maxOfflineSessionAge: Duration = Duration.ofHours(EnvironmentConfig.offlineMaxSessionAgeHours)
 ) : SalesRepository {
 
     override suspend fun getActiveSession(userId: UUID): CashSessionResponse? = newSuspendedTransaction(Dispatchers.IO) {
@@ -452,6 +457,12 @@ class SalesRepositoryImpl(
                 syncedAt = (session[CashSessionsTable.closeOfflineSyncedAt] ?: existingClosedAt).toString()
             )
         }
+
+        requireValidSessionTime(
+            OfflineSessionEvent.SESSION_CLOSE,
+            command.closedAt,
+            session[CashSessionsTable.openedAt]
+        )
 
         val syncedAt = OffsetDateTime.now()
         val systemCash = session[CashSessionsTable.systemCash]
@@ -648,6 +659,11 @@ class SalesRepositoryImpl(
         if (session[CashSessionsTable.closedAt] != null) {
             throw ValidationException("Sesi kas server sudah ditutup. Sync pengeluaran offline tidak dapat diproses.")
         }
+        requireValidSessionTime(
+            OfflineSessionEvent.CASH_EXPENSE,
+            command.occurredAt,
+            session[CashSessionsTable.openedAt]
+        )
 
         val expenseId = UUID.randomUUID()
         val syncedAt = OffsetDateTime.now()
@@ -1036,8 +1052,43 @@ class SalesRepositoryImpl(
             throw ValidationException("Sesi kasir tidak sesuai dengan cashierUserId sync offline")
         }
 
-        val lockedStockIds = lockAndValidateOfflineStocks(command.items)
-        val resolvedItems = command.items.map(::resolveItemForOfflineSync)
+        val sessionOpenedAt = session[CashSessionsTable.openedAt]
+        requireValidSessionTime(OfflineSessionEvent.TRANSACTION, command.occurredAt, sessionOpenedAt)
+
+        val windowStart = OfflineCheckoutGuard.trustedWindowStart(
+            openedAt = sessionOpenedAt,
+            serverRecordedAt = session[CashSessionsTable.offlineSyncedAt] ?: session[CashSessionsTable.createdAt],
+            maxSessionAge = maxOfflineSessionAge
+        )
+        val storeSettings = StoreSettingsTable.selectAll().limit(1).singleOrNull()
+            ?: throw ValidationException("Pengaturan toko belum tersedia")
+        OfflineCheckoutGuard.validateRounding(
+            roundingAmount = command.roundingAmount,
+            totalAfterRounding = command.total,
+            currentRoundingUnit = storeSettings[StoreSettingsTable.cashRoundingUnit],
+            settingsChangedDuringSession =
+                storeSettings[StoreSettingsTable.roundingSettingsUpdatedAt].isAfter(windowStart)
+        )?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_ROUNDING_CONFLICT, it) }
+        OfflineCheckoutGuard.validateTaxSnapshot(
+            requestTaxEnabled = command.taxEnabled,
+            requestTaxMode = command.taxMode?.name,
+            requestTaxRate = command.taxRate,
+            storeTaxEnabled = storeSettings[StoreSettingsTable.taxEnabled],
+            storeTaxMode = storeSettings[StoreSettingsTable.taxMode].name,
+            storeTaxRate = storeSettings[StoreSettingsTable.taxRate],
+            settingsChangedDuringSession =
+                storeSettings[StoreSettingsTable.taxSettingsUpdatedAt].isAfter(windowStart)
+        )?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_TAX_CONFLICT, it) }
+
+        val lockedStocks = lockOfflineStocks(command.items.map(OfflineCheckoutSyncItemCommand::productId))
+        val pricingContext = loadOfflinePricingContext(
+            customerId = command.customerId,
+            productIds = command.items.map(OfflineCheckoutSyncItemCommand::productId),
+            windowStart = windowStart
+        )
+        val offlineItems = command.items.map { item -> resolveItemForOfflineSync(item, pricingContext) }
+        requireSufficientOfflineStocks(lockedStocks, offlineItems)
+        val resolvedItems = offlineItems.map(ResolvedOfflineItem::item)
         val itemTotal = resolvedItems.fold(BigDecimal.ZERO) { total, item -> total.add(item.subtotal) }
             .normalizeMoney()
         val totalAmount = command.total.normalizeMoney()
@@ -1163,13 +1214,15 @@ class SalesRepositoryImpl(
         }
 
         insertCheckoutAudit(command.cashierUserId, "sales", "transactions", trxId)
-        transactionItemIds.forEach {
-            insertCheckoutAudit(command.cashierUserId, "sales", "transaction_items", it)
+        transactionItemIds.zip(offlineItems).forEach { (itemId, offlineItem) ->
+            insertCheckoutAudit(
+                command.cashierUserId, "sales", "transaction_items", itemId, newData = offlineItem.auditMetadata()
+            )
         }
         paymentIds.forEach { insertCheckoutAudit(command.cashierUserId, "sales", "payments", it) }
         receivableId?.let { insertCheckoutAudit(command.cashierUserId, "receivable", "receivables", it) }
-        lockedStockIds.values.forEach {
-            insertCheckoutAudit(command.cashierUserId, "inventory", "stock", it, AuditAction.UPDATE)
+        lockedStocks.values.forEach {
+            insertCheckoutAudit(command.cashierUserId, "inventory", "stock", it.id, AuditAction.UPDATE)
         }
         if (payment.cashAppliedTotal > BigDecimal.ZERO) {
             insertCheckoutAudit(
@@ -1185,66 +1238,6 @@ class SalesRepositoryImpl(
             serverPaymentIds = paymentIds.map { it.toString() },
             serverReceivableId = receivableId?.toString(),
             syncedAt = syncedAt.toString()
-        )
-    }
-
-    private fun resolveItemForOfflineSync(item: OfflineCheckoutSyncItemCommand): ResolvedItem {
-        if (item.quantity <= BigDecimal.ZERO) {
-            throw ValidationException("Quantity untuk produk ${item.productId} harus lebih dari 0")
-        }
-        if (item.quantity.scale() > 2) {
-            throw ValidationException("Quantity maksimal memiliki 2 angka desimal")
-        }
-        if (listOf(
-                item.priceAtTransaction, item.cogsAtTransaction, item.grossLineTotal,
-                item.discountValue, item.discount, item.subtotal
-            ).any { it.scale() > 2 }
-        ) {
-            throw ValidationException("Nilai uang item checkout maksimal memiliki 2 angka desimal")
-        }
-        if (item.priceAtTransaction < BigDecimal.ZERO) {
-            throw ValidationException("Harga produk ${item.productId} tidak boleh negatif")
-        }
-        if (item.cogsAtTransaction < BigDecimal.ZERO) {
-            throw ValidationException("HPP produk ${item.productId} tidak boleh negatif")
-        }
-        if (item.discount < BigDecimal.ZERO) {
-            throw ValidationException("Diskon produk ${item.productId} tidak boleh negatif")
-        }
-        if (item.discountType != null || item.discountValue.compareTo(BigDecimal.ZERO) != 0 ||
-            item.discount.compareTo(BigDecimal.ZERO) != 0
-        ) {
-            throw ValidationException("Diskon offline tidak didukung")
-        }
-
-        val product = ProductsTable.select {
-            (ProductsTable.id eq item.productId) and (ProductsTable.isActive eq true)
-        }.forUpdate().singleOrNull()
-            ?: throw NotFoundException("Produk dengan ID ${item.productId} tidak ditemukan atau tidak aktif")
-
-        val expectedGross = item.priceAtTransaction.multiply(item.quantity).normalizeMoney()
-        if (item.grossLineTotal.normalizeMoney().compareTo(expectedGross) != 0) {
-            throw ValidationException("Gross line total sync tidak valid untuk produk ${item.productId}")
-        }
-        val expectedSubtotal = expectedGross.subtract(item.discount).normalizeMoney()
-        val requestedSubtotal = item.subtotal.normalizeMoney()
-        if (requestedSubtotal.compareTo(expectedSubtotal) != 0) {
-            throw ValidationException("Subtotal item sync tidak valid untuk produk ${item.productId}")
-        }
-
-        return ResolvedItem(
-            productId = item.productId,
-            unitId = product[ProductsTable.baseUnitId],
-            productName = item.productNameSnapshot.trim(),
-            qty = item.quantity,
-            priceAtTransaction = item.priceAtTransaction.normalizeMoney(),
-            cogsAtTransaction = item.cogsAtTransaction.normalizeMoney(),
-            grossLineTotal = item.grossLineTotal.normalizeMoney(),
-            discountType = item.discountType,
-            discountValue = item.discountValue.normalizeMoney(),
-            discount = item.discount.normalizeMoney(),
-            subtotal = requestedSubtotal,
-            note = item.note
         )
     }
 
@@ -1366,35 +1359,13 @@ class SalesRepositoryImpl(
         return lockedStocks.mapValues { (_, stock) -> stock.first }
     }
 
-    private fun lockAndValidateOfflineStocks(items: List<OfflineCheckoutSyncItemCommand>): Map<UUID, UUID> {
-        val requested = items.groupBy(OfflineCheckoutSyncItemCommand::productId)
-            .mapValues { (_, rows) -> rows.fold(BigDecimal.ZERO) { total, row -> total.add(row.quantity) } }
-        val productIds = requested.keys.sortedBy(UUID::toString)
-        val lockedStocks = StockTable.select { StockTable.productId inList productIds }
-            .orderBy(StockTable.productId to SortOrder.ASC)
-            .forUpdate()
-            .associate { row ->
-                row[StockTable.productId] to (row[StockTable.id] to row[StockTable.quantity])
-            }
-        productIds.forEach { productId ->
-            val available = lockedStocks[productId]?.second
-                ?: throw NotFoundException("Data stok untuk produk $productId tidak ditemukan")
-            val quantity = requireNotNull(requested[productId])
-            if (quantity > available) {
-                throw StockInsufficientException(
-                    "Stok produk $productId tidak cukup. Tersedia ${available.toPlainString()}, diminta ${quantity.toPlainString()}"
-                )
-            }
-        }
-        return lockedStocks.mapValues { (_, stock) -> stock.first }
-    }
-
     private fun insertCheckoutAudit(
         userId: UUID,
         schema: String,
         table: String,
         recordId: UUID,
-        auditAction: AuditAction = AuditAction.INSERT
+        auditAction: AuditAction = AuditAction.INSERT,
+        newData: String? = null
     ) {
         AuditLogsTable.insert {
             it[id] = UUID.randomUUID()
@@ -1403,6 +1374,7 @@ class SalesRepositoryImpl(
             it[targetSchemaName] = schema
             it[targetTableName] = table
             it[this.recordId] = recordId
+            it[this.newData] = newData
         }
     }
 
@@ -2128,6 +2100,7 @@ class SalesRepositoryImpl(
             it.dbValue.equals(request.method, ignoreCase = true)
         }?.takeIf { it in setOf(PaymentMethod.TUNAI, PaymentMethod.TRANSFER, PaymentMethod.QRIS) }
             ?: throw ValidationException("Metode pembayaran harus tunai, transfer, atau qris")
+        val receivableMethod = methodEnum.toReceivablePaymentMethod()
 
         // Urutan lock sama dengan endpoint pembayaran piutang: receivable lalu transaction.
         val receivableRow = ReceivablesTable.select {
@@ -2137,6 +2110,27 @@ class SalesRepositoryImpl(
         val trxRow = TransactionsTable.select { TransactionsTable.id eq transactionId }
             .forUpdate().singleOrNull()
             ?: throw NotFoundException("Transaksi tidak ditemukan")
+
+        // Idempotensi dicek setelah row piutang terkunci sehingga retry paralel dengan
+        // key yang sama diproses berurutan dan yang kedua menerima hasil yang sama.
+        val idempotencyKey = request.idempotencyKey?.takeIf(String::isNotBlank)
+            ?.let(::validatePaymentIdempotencyKey)
+        if (idempotencyKey != null) {
+            val existing = ReceivablePaymentsTable
+                .select { ReceivablePaymentsTable.idempotencyKey eq idempotencyKey }
+                .singleOrNull()
+            if (existing != null) {
+                val samePayment = existing[ReceivablePaymentsTable.entryType] == ReceivablePaymentEntryType.PAYMENT &&
+                    existing[ReceivablePaymentsTable.receivableId] == receivableRow[ReceivablesTable.id] &&
+                    existing[ReceivablePaymentsTable.amount].compareTo(request.amount) == 0 &&
+                    existing[ReceivablePaymentsTable.method] == receivableMethod
+                if (!samePayment) {
+                    throw ValidationException("Idempotency key sudah dipakai untuk pembayaran lain")
+                }
+                return@newSuspendedTransaction getTransactionByIdInTransaction(transactionId)
+                    ?: throw NotFoundException("Transaksi tidak ditemukan")
+            }
+        }
 
         val currentPaid = trxRow[TransactionsTable.paidAmount]
         val total = trxRow[TransactionsTable.total]
@@ -2163,12 +2157,8 @@ class SalesRepositoryImpl(
             it[receivableId] = receivableRow[ReceivablesTable.id]
             it[this.userId] = userId
             it[amount] = request.amount
-            it[method] = when (methodEnum) {
-                PaymentMethod.TUNAI -> RecPaymentMethod.TUNAI
-                PaymentMethod.TRANSFER -> RecPaymentMethod.TRANSFER
-                PaymentMethod.QRIS -> RecPaymentMethod.QRIS
-                else -> error("Metode pembayaran piutang tidak valid")
-            }
+            it[this.idempotencyKey] = idempotencyKey ?: "sales-pay-${UUID.randomUUID()}"
+            it[method] = receivableMethod
         }
 
         val newPaidAmount = currentPaid.add(request.amount).min(total)
@@ -2202,6 +2192,13 @@ class SalesRepositoryImpl(
         getTransactionByIdInTransaction(transactionId)
             ?: throw NotFoundException("Transaksi tidak ditemukan setelah pembayaran")
     }
+}
+
+private fun PaymentMethod.toReceivablePaymentMethod(): RecPaymentMethod = when (this) {
+    PaymentMethod.TUNAI -> RecPaymentMethod.TUNAI
+    PaymentMethod.TRANSFER -> RecPaymentMethod.TRANSFER
+    PaymentMethod.QRIS -> RecPaymentMethod.QRIS
+    else -> error("Metode pembayaran piutang tidak valid")
 }
 
 private fun parseStartDate(value: String?): OffsetDateTime? {

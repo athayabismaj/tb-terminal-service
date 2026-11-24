@@ -18,8 +18,15 @@ import java.util.UUID
 class ManagerApprovalService(
     private val repository: ManagerApprovalRepository,
     private val clock: Clock = Clock.systemUTC(),
-    private val ttl: Duration = Duration.ofMinutes(EnvironmentConfig.managerApprovalTtlMinutes)
+    private val ttl: Duration = Duration.ofMinutes(EnvironmentConfig.managerApprovalTtlMinutes),
+    /**
+     * Penghitung percobaan PIN approver. Wajib diisi di produksi (lihat AppModule);
+     * `null` hanya untuk unit test yang tidak menguji lockout.
+     */
+    attemptStore: PinAttemptStore? = null
 ) {
+    private val attemptGuard = attemptStore?.let { CredentialAttemptGuard(it, clock) }
+
     init {
         require(!ttl.isZero && !ttl.isNegative) { "Manager approval TTL harus positif" }
     }
@@ -38,25 +45,45 @@ class ManagerApprovalService(
         }
 
         val approver = repository.findApproverByUsername(approverUsername)
-            ?.takeIf(ManagerApprovalApprover::isActive)
-            ?: throw invalidApprover()
+        if (approver == null || !approver.isActive) {
+            // Samakan waktu respons dengan jalur username valid (anti-enumerasi).
+            withContext(Dispatchers.IO) { BCrypt.checkpw(request.approverPin, DUMMY_PIN_HASH) }
+            throw invalidApprover()
+        }
         if (approver.userId == requesterUserId) {
             throw ManagerApprovalException(
                 ManagerApprovalError.SELF_APPROVAL_FORBIDDEN,
                 "Persetujuan tidak boleh dilakukan oleh pengguna yang sama"
             )
         }
+
+        val approvalPolicy = PinVerificationPolicy.MANAGER_APPROVAL_POLICY
+        val reservation = when (
+            val result = attemptGuard?.reserve(approver.userId, CredentialScope.MANAGER_APPROVAL, approvalPolicy)
+        ) {
+            is AttemptReservation.Locked -> throw approverLocked()
+            is AttemptReservation.Granted -> result
+            null -> null
+        }
+
+        val pinValid = withContext(Dispatchers.IO) {
+            BCrypt.checkpw(request.approverPin, approver.pinHash)
+        }
+        if (!pinValid) {
+            val outcome = reservation?.let { attemptGuard?.failureOutcome(it, approvalPolicy) }
+            if (outcome is AttemptOutcome.LockedNow) throw approverLocked()
+            throw invalidApprover()
+        }
+        reservation?.let { attemptGuard?.release(approver.userId, CredentialScope.MANAGER_APPROVAL, it) }
+
+        // Role baru diperiksa setelah PIN benar, sehingga tanpa PIN yang tepat kasir
+        // tidak bisa memetakan username mana yang manager dan mana yang bukan.
         if (!AccessPolicy.isAllowed(approver.role, Permission.APPROVE_SENSITIVE_ACTION)) {
             throw ManagerApprovalException(
                 ManagerApprovalError.APPROVER_FORBIDDEN,
                 "Pengguna tersebut tidak dapat memberikan persetujuan"
             )
         }
-
-        val pinValid = withContext(Dispatchers.IO) {
-            BCrypt.checkpw(request.approverPin, approver.pinHash)
-        }
-        if (!pinValid) throw invalidApprover()
 
         val createdAt = now()
         return repository.createApproval(
@@ -201,7 +228,13 @@ class ManagerApprovalService(
         "Kredensial manager tidak valid"
     )
 
+    private fun approverLocked() = ManagerApprovalException(
+        ManagerApprovalError.APPROVER_LOCKED,
+        "Terlalu banyak PIN manager salah. Persetujuan untuk akun ini dikunci sementara"
+    )
+
     private companion object {
-        val PIN_PATTERN = Regex("^[0-9]{4,6}$")
+        val PIN_PATTERN = PinVerificationPolicy.PIN_PATTERN
+        val DUMMY_PIN_HASH: String by lazy { BCrypt.hashpw("000000", BCrypt.gensalt()) }
     }
 }

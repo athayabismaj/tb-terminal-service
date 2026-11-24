@@ -5,6 +5,7 @@ import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.ValidationException
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.getUserRole
+import com.service.tbterminal.shared.clientIpAddress
 import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.SystemService
@@ -89,9 +90,7 @@ fun Application.backupRoutes() {
                     val actor = call.getUserId()
                     val actorRole = call.getUserRole()
                     val id = call.uuidParameter()
-                    val auditIpAddress = call.request.headers["X-Forwarded-For"]
-                        ?.substringBefore(",")?.trim()?.takeIf(String::isNotBlank)
-                        ?: call.request.headers["X-Real-IP"]?.trim()?.takeIf(String::isNotBlank)
+                    val auditIpAddress = call.clientIpAddress()
                     val result = service.queueRestore(actorRole, id, call.receive(), actor)
                     systemService.recordOperationalAudit(call, actor, AuditAction.UPDATE, "system", "database_backup_jobs", result.id)
                     application.launch {

@@ -1,6 +1,7 @@
 package com.service.tbterminal.sales
 
 import com.service.tbterminal.inventory.PaginatedResponse
+import com.service.tbterminal.shared.EnvironmentConfig
 import com.service.tbterminal.shared.ForbiddenException
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.SessionNotFoundException
@@ -8,12 +9,16 @@ import com.service.tbterminal.shared.ValidationException
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Duration
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.util.UUID
 
-class SalesService(private val repository: SalesRepository) {
+class SalesService(
+    private val repository: SalesRepository,
+    private val maxOfflineSessionAge: Duration = Duration.ofHours(EnvironmentConfig.offlineMaxSessionAgeHours)
+) {
 
     // ==========================================
     // CASH SESSIONS (SHIFT KASIR)
@@ -72,11 +77,16 @@ class SalesService(private val repository: SalesRepository) {
 
         repository.findOfflineSyncedCashSession(deviceId, clientGeneratedId, cashierUserId)?.let { return it }
 
+        // Setelah cek duplikat: retry sesi yang sudah tersimpan tetap dijawab DUPLICATE.
+        val openedAt = parseSyncOccurredAt(request.openedAt)
+        OfflineCheckoutGuard.validateOpenedAt(openedAt, OffsetDateTime.now(), maxOfflineSessionAge)
+            ?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_OPENED_AT_INVALID, it) }
+
         val command = OfflineCashSessionOpenSyncCommand(
             clientGeneratedId = clientGeneratedId,
             deviceId = deviceId,
             cashierUserId = cashierUserId,
-            openedAt = parseSyncOccurredAt(request.openedAt),
+            openedAt = openedAt,
             startingCash = request.startingCash.normalizeMoney(),
             openingNote = request.openingNote?.trim()?.takeIf(String::isNotBlank)
         )
@@ -398,7 +408,8 @@ class SalesService(private val repository: SalesRepository) {
                 discountValue = BigDecimal.ZERO.setScale(MONEY_SCALE),
                 discount = item.discount,
                 subtotal = item.subtotal,
-                note = itemNote
+                note = itemNote,
+                unit = parseOfflineItemUnit(item)
             )
         }
 
@@ -648,7 +659,7 @@ class SalesService(private val repository: SalesRepository) {
     }
 
     suspend fun payTransactionDebt(userId: UUID, transactionId: String, request: PayDebtRequest): TransactionResponse {
-        return repository.payTransactionDebt(userId, UUID.fromString(transactionId), request)
+        return repository.payTransactionDebt(userId, parseUuid(transactionId, "Transaction ID"), request)
     }
 
     private fun validateSyncKey(value: String, fieldName: String): String {

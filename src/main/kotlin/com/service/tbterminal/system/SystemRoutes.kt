@@ -15,6 +15,7 @@ import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.getUserRole
+import com.service.tbterminal.shared.clientIpAddress
 
 fun Application.systemRoutes() {
     val service: SystemService by inject()
@@ -49,22 +50,25 @@ fun Application.systemRoutes() {
             }
             }
 
-            post("/refresh") {
-                val response = service.refresh(call.receive<RefreshTokenRequest>())
-                if (response.success) {
-                    call.respond(HttpStatusCode.OK, response)
-                } else {
-                    call.respond(
-                        HttpStatusCode.Unauthorized,
-                        ErrorResponse(
-                            code = response.code ?: "UNAUTHORIZED",
-                            message = response.error ?: "Refresh token tidak valid"
+            rateLimit(RateLimitName("refresh")) {
+                post("/refresh") {
+                    val response = service.refresh(call.receive<RefreshTokenRequest>())
+                    if (response.success) {
+                        call.respond(HttpStatusCode.OK, response)
+                    } else {
+                        call.respond(
+                            HttpStatusCode.Unauthorized,
+                            ErrorResponse(
+                                code = response.code ?: "UNAUTHORIZED",
+                                message = response.error ?: "Refresh token tidak valid"
+                            )
                         )
-                    )
+                    }
                 }
             }
 
             authenticate("jwt-auth") {
+                rateLimit(RateLimitName("credential-check")) {
                 post("/unlock") {
                     val userId = call.getUserId()
                     val request = call.receive<UnlockRequest>()
@@ -95,6 +99,7 @@ fun Application.systemRoutes() {
                         ipAddress = call.clientIpAddress()
                     )
                     call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "PIN berhasil diatur ulang"))
+                }
                 }
 
                 post("/logout") {
@@ -161,10 +166,16 @@ fun Application.systemRoutes() {
                 // USERS
                 route("/users") {
                     // Update Password sendiri (bisa oleh Kasir, Admin, Owner)
+                    rateLimit(RateLimitName("credential-check")) {
                     put("/me/password") {
                         val userId = call.getUserId()
                         val request = call.receive<ChangePasswordRequest>()
-                        service.changeMyPassword(userId, request)
+                        service.changeMyPassword(
+                            userId = userId,
+                            request = request,
+                            deviceId = call.request.headers["X-Device-Id"],
+                            ipAddress = call.clientIpAddress()
+                        )
                         service.recordAuditLog(
                             actorUserId = userId,
                             action = AuditAction.UPDATE,
@@ -173,14 +184,22 @@ fun Application.systemRoutes() {
                             recordId = userId.toString(),
                             ipAddress = call.clientIpAddress()
                         )
-                        call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Password berhasil diubah"))
+                        call.respond(
+                            HttpStatusCode.OK,
+                            ApiResponse.success(Unit, "Password berhasil diubah. Silakan login kembali dengan password baru.")
+                        )
                     }
 
                     // Update PIN sendiri (bisa oleh Kasir, Admin, Owner)
                     put("/me/pin") {
                         val userId = call.getUserId()
                         val request = call.receive<ChangePinRequest>()
-                        service.changeMyPin(userId, request)
+                        service.changeMyPin(
+                            userId = userId,
+                            request = request,
+                            deviceId = call.request.headers["X-Device-Id"],
+                            ipAddress = call.clientIpAddress()
+                        )
                         service.recordAuditLog(
                             actorUserId = userId,
                             action = AuditAction.UPDATE,
@@ -190,6 +209,7 @@ fun Application.systemRoutes() {
                             ipAddress = call.clientIpAddress()
                         )
                         call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "PIN berhasil diubah"))
+                    }
                     }
 
                     // List Users
@@ -330,14 +350,6 @@ fun Application.systemRoutes() {
             }
         }
     }
-}
-
-private fun ApplicationCall.clientIpAddress(): String? {
-    return request.headers["X-Forwarded-For"]
-        ?.substringBefore(",")
-        ?.trim()
-        ?.takeIf(String::isNotBlank)
-        ?: request.headers["X-Real-IP"]?.trim()?.takeIf(String::isNotBlank)
 }
 
 private fun UserUpdateRequest.auditTableName(): String {

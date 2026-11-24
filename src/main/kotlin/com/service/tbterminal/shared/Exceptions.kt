@@ -39,6 +39,21 @@ class PayloadTooLargeException(message: String = "Ukuran file melebihi batas mak
 /** Fitur atau layanan eksternal sedang nonaktif atau tidak tersedia */
 class ServiceUnavailableException(message: String = "Layanan sementara tidak tersedia") : RuntimeException(message)
 
+/**
+ * Data valid secara format tetapi bertentangan dengan aturan bisnis/data server
+ * (misalnya harga transaksi offline tidak dikenali). Dipetakan ke HTTP 409.
+ */
+class BusinessConflictException(
+    val code: String,
+    message: String
+) : RuntimeException(message)
+
+/** Terlalu banyak percobaan kredensial gagal; klien wajib menunggu. Dipetakan ke HTTP 429. */
+class TooManyAttemptsException(
+    message: String = "Terlalu banyak percobaan gagal. Silakan tunggu sebelum mencoba lagi",
+    val retryAfterSeconds: Long? = null
+) : RuntimeException(message)
+
 enum class ManagerApprovalError(val code: String) {
     REQUIRED("MANAGER_APPROVAL_REQUIRED"),
     INVALID("MANAGER_APPROVAL_INVALID"),
@@ -48,7 +63,8 @@ enum class ManagerApprovalError(val code: String) {
     SCOPE_MISMATCH("MANAGER_APPROVAL_SCOPE_MISMATCH"),
     ACTION_MISMATCH("MANAGER_APPROVAL_ACTION_MISMATCH"),
     REQUESTER_MISMATCH("MANAGER_APPROVAL_REQUESTER_MISMATCH"),
-    SELF_APPROVAL_FORBIDDEN("MANAGER_APPROVAL_SELF_APPROVAL_FORBIDDEN")
+    SELF_APPROVAL_FORBIDDEN("MANAGER_APPROVAL_SELF_APPROVAL_FORBIDDEN"),
+    APPROVER_LOCKED("MANAGER_APPROVER_LOCKED")
 }
 
 class ManagerApprovalException(

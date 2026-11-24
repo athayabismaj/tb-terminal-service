@@ -2,6 +2,7 @@ package com.service.tbterminal.system
 
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.log
+import com.service.tbterminal.shared.clientIpAddress
 import kotlinx.coroutines.CancellationException
 import java.util.UUID
 
@@ -20,7 +21,7 @@ suspend fun SystemService.recordOperationalAudit(
             schemaName = schemaName,
             tableName = tableName,
             recordId = recordId,
-            ipAddress = call.auditClientIpAddress()
+            ipAddress = call.clientIpAddress()
         )
     } catch (cause: CancellationException) {
         throw cause
@@ -30,12 +31,4 @@ suspend fun SystemService.recordOperationalAudit(
             cause
         )
     }
-}
-
-private fun ApplicationCall.auditClientIpAddress(): String? {
-    return request.headers["X-Forwarded-For"]
-        ?.substringBefore(",")
-        ?.trim()
-        ?.takeIf(String::isNotBlank)
-        ?: request.headers["X-Real-IP"]?.trim()?.takeIf(String::isNotBlank)
 }

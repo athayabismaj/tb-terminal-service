@@ -13,6 +13,10 @@ Salin `deploy/production.env.example` ke lokasi aman di host, lalu isi `DB_PASSW
 
 Pada startup pertama saja, isi `BOOTSTRAP_OWNER_PASSWORD` (minimal 12 karakter, bukan password umum) dan `BOOTSTRAP_OWNER_PIN` (6 digit, bukan PIN umum). Setelah login owner berhasil, kosongkan kedua nilai dan recreate container backend. Startup production akan ditolak jika akun aktif masih memakai password/PIN bawaan atau identitas toko masih berupa data contoh.
 
+## Konfigurasi opsional
+
+`OFFLINE_MAX_SESSION_AGE_HOURS` (default 72, rentang 1–168) membatasi umur sesi kas offline saat pertama kali di-sync. Nilai di luar rentang dijepit ke batas terdekat, nilai yang bukan angka memakai default. Angka yang lebih besar memberi toko waktu lebih lama tanpa koneksi, tetapi juga memperpanjang masa berlaku harga dan pengaturan lama pada transaksi offline. Perubahan berlaku setelah container backend dibuat ulang.
+
 ## Deployment
 
 ```bash

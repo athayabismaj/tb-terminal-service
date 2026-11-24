@@ -3,6 +3,9 @@ package com.service.tbterminal.system
 import com.service.tbterminal.shared.ManagerApprovalError
 import com.service.tbterminal.shared.ManagerApprovalException
 import com.service.tbterminal.shared.Role
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
@@ -100,6 +103,75 @@ class ManagerApprovalServiceTest {
         assertEquals(ManagerApprovalError.INVALID, error.reason)
         assertEquals("Kredensial manager tidak valid", error.message)
         assertTrue(repository.records.isEmpty())
+    }
+
+    @Test
+    fun `approver is locked after repeated wrong PINs even if the next PIN is correct`() = runBlocking {
+        val repository = FakeManagerApprovalRepository().apply {
+            approvers["admin"] = approver(adminId, Role.ADMIN)
+        }
+        val service = ManagerApprovalService(
+            repository = repository,
+            clock = Clock.fixed(fixedInstant, ZoneOffset.UTC),
+            ttl = Duration.ofMinutes(5),
+            attemptStore = InMemoryAttemptStore()
+        )
+        val wrong = request("admin").copy(approverPin = "654321")
+
+        repeat(2) {
+            val error = assertFailsWith<ManagerApprovalException> {
+                service.createApproval(requesterId, Role.KASIR, wrong, null)
+            }
+            assertEquals(ManagerApprovalError.INVALID, error.reason)
+        }
+        val locked = assertFailsWith<ManagerApprovalException> {
+            service.createApproval(requesterId, Role.KASIR, wrong, null)
+        }
+        assertEquals(ManagerApprovalError.APPROVER_LOCKED, locked.reason)
+
+        val stillLocked = assertFailsWith<ManagerApprovalException> {
+            service.createApproval(requesterId, Role.KASIR, request("admin"), null)
+        }
+        assertEquals(ManagerApprovalError.APPROVER_LOCKED, stillLocked.reason)
+        assertTrue(repository.records.isEmpty())
+    }
+
+    @Test
+    fun `parallel wrong approver PINs never evaluate more guesses than the threshold`() = runBlocking {
+        val repository = FakeManagerApprovalRepository().apply {
+            approvers["admin"] = approver(adminId, Role.ADMIN)
+        }
+        val store = InMemoryAttemptStore()
+        val service = ManagerApprovalService(
+            repository = repository,
+            clock = Clock.fixed(fixedInstant, ZoneOffset.UTC),
+            ttl = Duration.ofMinutes(5),
+            attemptStore = store
+        )
+        val wrong = request("admin").copy(approverPin = "654321")
+
+        val errors = (1..30).map {
+            async(Dispatchers.IO) {
+                assertFailsWith<ManagerApprovalException> {
+                    service.createApproval(requesterId, Role.KASIR, wrong, null)
+                }.reason
+            }
+        }.awaitAll()
+
+        assertEquals(2, errors.count { it == ManagerApprovalError.INVALID })
+        assertEquals(28, errors.count { it == ManagerApprovalError.APPROVER_LOCKED })
+        assertEquals(3, store.states.values.single().failedAttempts)
+    }
+
+    @Test
+    fun `cashier role is not revealed without the correct PIN`() = runBlocking {
+        val repository = FakeManagerApprovalRepository().apply {
+            approvers["cashier"] = approver(adminId, Role.KASIR)
+        }
+        val error = assertFailsWith<ManagerApprovalException> {
+            service(repository).createApproval(requesterId, Role.KASIR, request("cashier").copy(approverPin = "654321"), null)
+        }
+        assertEquals(ManagerApprovalError.INVALID, error.reason)
     }
 
     @Test

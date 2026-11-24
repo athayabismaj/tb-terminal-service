@@ -11,8 +11,8 @@ Lingkungan local/staging test: __________  Backend: __________  APK debug: _____
 | OWN-03 | Produk valid tersimpan; field kosong/SKU invalid atau duplikat ditolak | | |
 | OWN-04 | Preview CSV menunjukkan baris valid/gagal; commit invalid tidak menyimpan data parsial | | |
 | OWN-05 | Saldo awal stok menghasilkan mutasi bertanggal; saldo akhir kartu stok sama dengan stok produk | | |
-| OWN-06 | Sesi kas hanya dapat dibuka sekali dan tutup sesi memvalidasi kas fisik serta menulis audit | | |
-| OWN-07 | Double tap/retry checkout menghasilkan satu transaksi; stok tidak cukup/produk nonaktif/data desimal invalid ditolak | | |
+| OWN-06 | Owner tidak dapat membuka sesi kas (menu tidak tersedia, endpoint 403). Sesi dibuka oleh KASIR dan hanya dapat dibuka sekali; Owner melihat daftar sesi serta menutup paksa dengan validasi kas fisik, dan audit tercatat | | |
+| OWN-07 | Checkout Owner tanpa sesi kas aktif ditolak. Dijalankan dengan akun KASIR yang sesinya terbuka: double tap/retry checkout menghasilkan satu transaksi yang terlihat Owner di riwayat; stok tidak cukup/produk nonaktif/data desimal invalid ditolak | | |
 | OWN-08 | Penjualan DP/hutang, saldo awal, adjustment beralasan, ringkasan dan jatuh tempo piutang konsisten | | |
 | OWN-09 | Pembayaran parsial/pelunasan, duplicate retry, reversal, bukti lihat/cetak, dan saldo sebelum/sesudah konsisten | | |
 | OWN-10 | Void dengan alasan mengubah status ke VOIDED, mengompensasi stok/kas/piutang, dan void ulang tidak menggandakan | | |
