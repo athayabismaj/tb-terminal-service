@@ -84,6 +84,13 @@ Pelanggaran dijawab **HTTP 409** dengan kode `OFFLINE_PRICE_CONFLICT`,
   yang sama mengembalikan hasil yang sama tanpa mencatat pembayaran dua kali.
 - ID transaksi yang formatnya salah kini dijawab 400, bukan 500.
 
+## 7. Perubahan kontrak di luar keamanan
+
+`GET /api/analytics/sales/report`: `totals.netRevenue` kini selalu dikirim.
+Sebelumnya field ini hilang dari JSON saat nilainya sama dengan
+`grossRevenue − discountAmount − refundAmount`. Perubahan bersifat aditif;
+aplikasi Android tidak perlu diubah.
+
 ## Yang perlu disesuaikan di aplikasi Android
 
 1. **Refresh token** — `RefreshTokenAuthenticator` sudah menyimpan refresh token

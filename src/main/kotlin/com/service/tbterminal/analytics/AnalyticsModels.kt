@@ -1,5 +1,7 @@
 package com.service.tbterminal.analytics
 
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.date
@@ -145,6 +147,7 @@ data class SalesReportRange(
     val endDate: String
 )
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class SalesReportTotals(
     val transactionCount: Long,
@@ -156,6 +159,8 @@ data class SalesReportTotals(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val outstandingAmount: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val grossProfit: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val refundAmount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
+    /** Selalu dikirim; tanpa EncodeDefault field ini hilang dari JSON saat sama dengan rumus default-nya. */
+    @EncodeDefault
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val netRevenue: java.math.BigDecimal = grossRevenue.subtract(discountAmount).subtract(refundAmount)
 )
 
