@@ -2116,6 +2116,9 @@ class IntegrationTest {
             assertEquals(HttpStatusCode.BadRequest, invalid.status, invalid.bodyAsText())
             assertTrue(invalid.bodyAsText().contains("VALIDATION_ERROR"), invalid.bodyAsText())
         }
+        val notANumber = syncOfflineBody(fixture, fixture.saleBody(listOf(fixture.dusLine(baseQuantity = "dua puluh"))))
+        assertEquals(HttpStatusCode.BadRequest, notANumber.status, notANumber.bodyAsText())
+        assertTrue(notANumber.bodyAsText().contains("INVALID_REQUEST"), notANumber.bodyAsText())
         assertEquals(0, transactionCount())
         assertEquals(BigDecimal("30.00"), stockQuantity(fixture.product.id))
 
@@ -2129,6 +2132,35 @@ class IntegrationTest {
                 )
             )
         )
+    }
+
+    @Test
+    fun test_offline_item_audit_is_atomic_with_checkout() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("30.00")
+        val body = fixture.saleBody(listOf(fixture.dusLine()))
+        fun execute(sql: String) = dataSource.connection.use { it.createStatement().use { s -> s.execute(sql) } }
+        execute(
+            """
+            CREATE FUNCTION system.fn_test_fail_unit_audit() RETURNS TRIGGER AS ${'$'}${'$'}
+            BEGIN RAISE EXCEPTION 'audit gagal'; END; ${'$'}${'$'} LANGUAGE plpgsql;
+            CREATE TRIGGER trg_test_fail_unit_audit BEFORE INSERT ON system.audit_logs FOR EACH ROW
+            WHEN (NEW.new_data ->> 'event' = 'OFFLINE_ITEM_UNIT') EXECUTE FUNCTION system.fn_test_fail_unit_audit()
+            """.trimIndent()
+        )
+        try {
+            val failed = syncOfflineBody(fixture, body)
+            assertEquals(HttpStatusCode.InternalServerError, failed.status, failed.bodyAsText())
+        } finally {
+            execute("DROP TRIGGER trg_test_fail_unit_audit ON system.audit_logs; DROP FUNCTION system.fn_test_fail_unit_audit()")
+        }
+        assertEquals(0, transactionCount())
+        assertEquals(BigDecimal("30.00"), stockQuantity(fixture.product.id))
+
+        // Kegagalan tidak meninggalkan jejak, jadi retry dengan key yang sama diterima.
+        val retried = syncOfflineBody(fixture, body)
+        assertEquals(HttpStatusCode.Created, retried.status, retried.bodyAsText())
+        assertEquals(BigDecimal("6.00"), stockQuantity(fixture.product.id))
     }
 
     @Test
