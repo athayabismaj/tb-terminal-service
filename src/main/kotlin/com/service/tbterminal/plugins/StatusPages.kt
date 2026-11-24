@@ -83,6 +83,18 @@ fun Application.configureStatusPages() {
                 ErrorResponse("SESSION_NOT_FOUND", cause.message ?: "Sesi kasir tidak aktif")
             )
         }
+        exception<PayloadTooLargeException> { call, cause ->
+            call.respond(
+                HttpStatusCode.PayloadTooLarge,
+                ErrorResponse("PAYLOAD_TOO_LARGE", cause.message ?: "Ukuran file melebihi batas maksimum")
+            )
+        }
+        exception<ServiceUnavailableException> { call, cause ->
+            call.respond(
+                HttpStatusCode.ServiceUnavailable,
+                ErrorResponse("SERVICE_UNAVAILABLE", cause.message ?: "Layanan sementara tidak tersedia")
+            )
+        }
         exception<ManagerApprovalException> { call, cause ->
             val status = when (cause.reason) {
                 ManagerApprovalError.EXPIRED,
@@ -121,6 +133,24 @@ fun Application.configureStatusPages() {
                         )
                     )
                 }
+            }
+        }
+        exception<java.io.IOException> { call, cause ->
+            if (cause.message?.contains("exceeds limit", ignoreCase = true) == true) {
+                call.respond(
+                    HttpStatusCode.PayloadTooLarge,
+                    ErrorResponse("PAYLOAD_TOO_LARGE", "Ukuran file melebihi batas maksimum")
+                )
+            } else {
+                call.application.log.error("Unhandled exception", cause)
+                call.respond(
+                    HttpStatusCode.InternalServerError,
+                    ErrorResponse(
+                        code = "INTERNAL_SERVER_ERROR",
+                        message = "Terjadi kesalahan pada server",
+                        details = call.application.developmentErrorDetails(cause)
+                    )
+                )
             }
         }
         exception<Throwable> { call, cause ->

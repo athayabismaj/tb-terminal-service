@@ -63,6 +63,21 @@ object EnvironmentConfig {
     val pgRestoreExecutable: String by lazy { resolve("PG_RESTORE_EXECUTABLE", "pg_restore") }
     val restoreEnabled: Boolean by lazy { resolve("RESTORE_ENABLED", "false").toBooleanStrictOrNull() ?: false }
 
+    // Konfigurasi opsional Cloudinary untuk foto produk
+    val productPhotoEnabled: Boolean by lazy { resolve("PRODUCT_PHOTO_ENABLED", "false").toBooleanStrictOrNull() ?: false }
+    val cloudinaryCloudName: String? by lazy { resolveOptional("CLOUDINARY_CLOUD_NAME") }
+    val cloudinaryApiKey: String? by lazy { resolveOptional("CLOUDINARY_API_KEY") }
+    val cloudinaryApiSecret: String? by lazy { resolveOptional("CLOUDINARY_API_SECRET") }
+    val cloudinaryProductFolder: String by lazy { resolve("CLOUDINARY_PRODUCT_FOLDER", "tbterminal/products") }
+    val cloudinaryMaxImageBytes: Long by lazy {
+        resolve("CLOUDINARY_MAX_IMAGE_BYTES", DEFAULT_MAX_IMAGE_BYTES.toString())
+            .toLongOrNull()
+            ?.coerceIn(1024L, 20L * 1024 * 1024)
+            ?: DEFAULT_MAX_IMAGE_BYTES
+    }
+
+    private const val DEFAULT_MAX_IMAGE_BYTES = 5L * 1024 * 1024
+
     fun validateProductionConfiguration() {
         if (!isProduction) return
 
@@ -95,6 +110,11 @@ object EnvironmentConfig {
             val applicationPath = File(System.getProperty("user.dir")).absoluteFile.normalize()
             require(File(backupDirectory).isAbsolute && backupPath != applicationPath && !backupPath.path.startsWith(applicationPath.path + File.separator)) {
                 "BACKUP_DIRECTORY production wajib absolut dan berada di luar repository aplikasi"
+            }
+        }
+        if (productPhotoEnabled) {
+            require(!cloudinaryCloudName.isNullOrBlank() && !cloudinaryApiKey.isNullOrBlank() && !cloudinaryApiSecret.isNullOrBlank()) {
+                "CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, dan CLOUDINARY_API_SECRET wajib diisi ketika PRODUCT_PHOTO_ENABLED diaktifkan pada production"
             }
         }
     }

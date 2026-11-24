@@ -18,3 +18,10 @@ PG_DUMP_EXECUTABLE=pg_dump
 PG_RESTORE_EXECUTABLE=pg_restore
 # Aktifkan hanya selama maintenance restore yang diawasi.
 RESTORE_ENABLED=false
+# Foto produk Cloudinary (ubah PRODUCT_PHOTO_ENABLED=true setelah kredensial diisi).
+PRODUCT_PHOTO_ENABLED=false
+CLOUDINARY_CLOUD_NAME=
+CLOUDINARY_API_KEY=
+CLOUDINARY_API_SECRET=
+CLOUDINARY_PRODUCT_FOLDER=tbterminal/products
+CLOUDINARY_MAX_IMAGE_BYTES=5242880

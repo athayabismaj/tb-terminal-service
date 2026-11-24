@@ -33,6 +33,12 @@ class SkuDuplicateException(message: String = "SKU sudah digunakan") : RuntimeEx
 /** Cash session / shift kasir tidak ditemukan atau tidak aktif */
 class SessionNotFoundException(message: String = "Sesi kasir tidak aktif") : RuntimeException(message)
 
+/** Ukuran payload upload melebihi batas */
+class PayloadTooLargeException(message: String = "Ukuran file melebihi batas maksimum") : RuntimeException(message)
+
+/** Fitur atau layanan eksternal sedang nonaktif atau tidak tersedia */
+class ServiceUnavailableException(message: String = "Layanan sementara tidak tersedia") : RuntimeException(message)
+
 enum class ManagerApprovalError(val code: String) {
     REQUIRED("MANAGER_APPROVAL_REQUIRED"),
     INVALID("MANAGER_APPROVAL_INVALID"),
