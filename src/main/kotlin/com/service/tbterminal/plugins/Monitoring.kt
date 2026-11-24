@@ -12,7 +12,13 @@ import org.slf4j.event.Level
 import java.util.UUID
 
 fun Application.configureMonitoring() {
-    install(XForwardedHeaders)
+    // Backend hanya dapat dijangkau lewat nginx (lihat deploy/nginx.conf). nginx menimpa
+    // X-Forwarded-For dengan $remote_addr; useLastProxy() tetap aman walau suatu saat
+    // dikonfigurasi ulang menjadi append ($proxy_add_x_forwarded_for), karena entri
+    // terakhir selalu ditulis nginx, bukan klien.
+    install(XForwardedHeaders) {
+        useLastProxy()
+    }
     install(CallId) {
         retrieveFromHeader(HttpHeaders.XRequestId)
         generate { UUID.randomUUID().toString() }

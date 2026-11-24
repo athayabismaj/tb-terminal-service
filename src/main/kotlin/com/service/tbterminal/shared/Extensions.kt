@@ -3,6 +3,7 @@ package com.service.tbterminal.shared
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
+import io.ktor.server.plugins.origin
 import io.ktor.server.response.*
 import java.util.UUID
 
@@ -28,6 +29,16 @@ fun ApplicationCall.requirePermission(permission: Permission) {
         ?: throw UnauthorizedException("Role user tidak tersedia")
     AccessPolicy.require(principal.role, permission)
 }
+
+/**
+ * IP klien untuk audit dan rate limit.
+ *
+ * Diambil dari `request.origin`, yang sudah diproses plugin `XForwardedHeaders`
+ * (lihat Monitoring.kt) dengan aturan "proxy terakhir". Header `X-Forwarded-For`
+ * TIDAK dibaca langsung karena entri pertamanya bisa diisi bebas oleh klien.
+ */
+fun ApplicationCall.clientIpAddress(): String? =
+    request.origin.remoteAddress.takeIf(String::isNotBlank)
 
 /**
  * Helper extension untuk merespon error secara eksplisit tanpa melempar Exception.

@@ -103,6 +103,48 @@ class ManagerApprovalServiceTest {
     }
 
     @Test
+    fun `approver is locked after repeated wrong PINs even if the next PIN is correct`() = runBlocking {
+        val repository = FakeManagerApprovalRepository().apply {
+            approvers["admin"] = approver(adminId, Role.ADMIN)
+        }
+        val service = ManagerApprovalService(
+            repository = repository,
+            clock = Clock.fixed(fixedInstant, ZoneOffset.UTC),
+            ttl = Duration.ofMinutes(5),
+            attemptStore = ApprovalAttemptStore()
+        )
+        val wrong = request("admin").copy(approverPin = "654321")
+
+        repeat(2) {
+            val error = assertFailsWith<ManagerApprovalException> {
+                service.createApproval(requesterId, Role.KASIR, wrong, null)
+            }
+            assertEquals(ManagerApprovalError.INVALID, error.reason)
+        }
+        val locked = assertFailsWith<ManagerApprovalException> {
+            service.createApproval(requesterId, Role.KASIR, wrong, null)
+        }
+        assertEquals(ManagerApprovalError.APPROVER_LOCKED, locked.reason)
+
+        val stillLocked = assertFailsWith<ManagerApprovalException> {
+            service.createApproval(requesterId, Role.KASIR, request("admin"), null)
+        }
+        assertEquals(ManagerApprovalError.APPROVER_LOCKED, stillLocked.reason)
+        assertTrue(repository.records.isEmpty())
+    }
+
+    @Test
+    fun `cashier role is not revealed without the correct PIN`() = runBlocking {
+        val repository = FakeManagerApprovalRepository().apply {
+            approvers["cashier"] = approver(adminId, Role.KASIR)
+        }
+        val error = assertFailsWith<ManagerApprovalException> {
+            service(repository).createApproval(requesterId, Role.KASIR, request("cashier").copy(approverPin = "654321"), null)
+        }
+        assertEquals(ManagerApprovalError.INVALID, error.reason)
+    }
+
+    @Test
     fun `requester cannot approve itself`() = runBlocking {
         val repository = FakeManagerApprovalRepository().apply {
             approvers["self"] = approver(requesterId, Role.ADMIN)
@@ -326,4 +368,23 @@ private class FakeManagerApprovalRepository : ManagerApprovalRepository {
         now: OffsetDateTime,
         ipAddress: String?
     ): ManagerApprovalConsumeResult = consumeApproval(scope, now, ipAddress)
+}
+
+private class ApprovalAttemptStore : PinAttemptStore {
+    private val states = mutableMapOf<Pair<UUID, String>, PinAttemptState>()
+    override suspend fun getPinAttemptState(userId: UUID, scopeKey: String) = states[userId to scopeKey]
+    override suspend fun savePinAttemptState(userId: UUID, scopeKey: String, failedAttempts: Int, lockedUntil: OffsetDateTime?) {
+        states[userId to scopeKey] = PinAttemptState(failedAttempts, lockedUntil)
+    }
+    override suspend fun resetPinAttemptState(userId: UUID, scopeKey: String) {
+        states.remove(userId to scopeKey)
+    }
+    override suspend fun resetAllPinAttemptStatesForUser(userId: UUID) {
+        states.keys.filter { it.first == userId }.forEach { states.remove(it) }
+    }
+    override suspend fun incrementPinFailure(userId: UUID, scopeKey: String): Int {
+        val next = (states[userId to scopeKey] ?: PinAttemptState()).let { it.copy(failedAttempts = it.failedAttempts + 1) }
+        states[userId to scopeKey] = next
+        return next.failedAttempts
+    }
 }

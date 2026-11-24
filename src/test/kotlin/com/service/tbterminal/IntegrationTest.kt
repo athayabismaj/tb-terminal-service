@@ -1480,6 +1480,38 @@ class IntegrationTest {
     }
 
     @Test
+    fun test_refresh_token_is_single_use_and_reuse_revokes_family() = testApplication {
+        application { configureIntegrationApplication() }
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"username":"owner","password":"owner123"}""")
+        }
+        val firstRefresh = Json.parseToJsonElement(loginResponse.bodyAsText())
+            .jsonObject.getValue("data").jsonObject.getValue("refreshToken").jsonPrimitive.content
+
+        val rotated = client.post("/api/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"refreshToken":"$firstRefresh"}""")
+        }
+        assertEquals(HttpStatusCode.OK, rotated.status, rotated.bodyAsText())
+        val secondRefresh = Json.parseToJsonElement(rotated.bodyAsText())
+            .jsonObject.getValue("data").jsonObject.getValue("refreshToken").jsonPrimitive.content
+
+        // Token pertama dipakai ulang (mis. dicuri): ditolak dan seluruh keluarga dicabut.
+        val reused = client.post("/api/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"refreshToken":"$firstRefresh"}""")
+        }
+        assertEquals(HttpStatusCode.Unauthorized, reused.status, reused.bodyAsText())
+
+        val afterReuse = client.post("/api/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"refreshToken":"$secondRefresh"}""")
+        }
+        assertEquals(HttpStatusCode.Unauthorized, afterReuse.status, afterReuse.bodyAsText())
+    }
+
+    @Test
     fun test_login_should_be_rate_limited_after_five_attempts() = testApplication {
         application { configureIntegrationApplication() }
 
@@ -1626,6 +1658,49 @@ class IntegrationTest {
         } finally {
             DatabaseHealth.attach(dataSource)
         }
+    }
+
+    @Test
+    fun test_offline_sync_rejects_price_not_in_server_price_list() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val userId = ownerId()
+        val product = createProductFixture()
+        val deviceId = "integration-device-${UUID.randomUUID()}"
+        val opened = client.post("/api/sales/sessions/sync/open") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody(
+                """{"clientGeneratedId":"offline-open-${UUID.randomUUID()}","deviceId":"$deviceId","cashierUserId":"$userId","openedAt":"2026-07-01T08:00:00+07:00","startingCash":"100.00","openingNote":"Offline price guard"}"""
+            )
+        }
+        assertEquals(HttpStatusCode.Created, opened.status, opened.bodyAsText())
+        val sessionId = Json.parseToJsonElement(opened.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue("serverCashSessionId").jsonPrimitive.content
+
+        // Harga eceran fixture 100.00; kasir mencoba mencatat 1.00.
+        val tampered = client.post("/api/sales/checkout/sync") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody(
+                """{"clientGeneratedId":"offline-checkout-${UUID.randomUUID()}","deviceId":"$deviceId","localTransactionCode":"LOCAL-TAMPER","cashierUserId":"$userId","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"5.00","discount":"0.00","total":"5.00","paidAmount":"5.00","remainingAmount":"0.00","occurredAt":"2026-07-01T09:00:00+07:00","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"5.00","priceAtTransaction":"1.00","cogsAtTransaction":"0.00","discount":"0.00","subtotal":"5.00"}]}"""
+            )
+        }
+        assertEquals(HttpStatusCode.Conflict, tampered.status, tampered.bodyAsText())
+        assertTrue(tampered.bodyAsText().contains("OFFLINE_PRICE_CONFLICT"), tampered.bodyAsText())
+        assertEquals(0, transactionCount())
+        assertEquals(BigDecimal("10.00"), stockQuantity(product.id))
+
+        // Pembulatan negatif yang memangkas hampir seluruh total juga ditolak.
+        val zeroTotal = client.post("/api/sales/checkout/sync") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody(
+                """{"clientGeneratedId":"offline-checkout-${UUID.randomUUID()}","deviceId":"$deviceId","localTransactionCode":"LOCAL-ROUND","cashierUserId":"$userId","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"500.00","discount":"0.00","total":"1.00","paidAmount":"1.00","remainingAmount":"0.00","occurredAt":"2026-07-01T09:00:00+07:00","roundingAmount":"-499.00","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"5.00","priceAtTransaction":"100.00","cogsAtTransaction":"50.00","discount":"0.00","subtotal":"500.00"}]}"""
+            )
+        }
+        assertEquals(HttpStatusCode.Conflict, zeroTotal.status, zeroTotal.bodyAsText())
+        assertEquals(0, transactionCount())
     }
 
     @Test

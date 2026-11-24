@@ -6,7 +6,9 @@ import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
+import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -224,12 +226,88 @@ class SystemRepository : PinVerificationGateway {
         } > 0
     }
 
-    override suspend fun getPinAttemptState(userId: UUID, deviceId: String): PinAttemptState? =
+    suspend fun insertRefreshToken(
+        tokenId: UUID,
+        userId: UUID,
+        familyId: UUID,
+        tokenVersion: Int,
+        expiresAt: OffsetDateTime
+    ) {
+        newSuspendedTransaction(Dispatchers.IO) {
+            // Bersihkan token kedaluwarsa milik user ini agar tabel tidak tumbuh tanpa batas.
+            RefreshTokensTable.deleteWhere {
+                (RefreshTokensTable.userId eq userId) and (RefreshTokensTable.expiresAt less OffsetDateTime.now())
+            }
+            RefreshTokensTable.insert {
+                it[id] = tokenId
+                it[this.userId] = userId
+                it[this.familyId] = familyId
+                it[this.tokenVersion] = tokenVersion
+                it[this.expiresAt] = expiresAt
+            }
+        }
+    }
+
+    /**
+     * Mengonsumsi refresh token secara atomik (row lock). Bila sah, token lama
+     * ditandai terpakai dan token pengganti dicatat pada keluarga yang sama.
+     */
+    suspend fun consumeRefreshToken(
+        tokenId: UUID,
+        expectedUserId: UUID,
+        expectedTokenVersion: Int,
+        newTokenId: UUID,
+        newExpiresAt: OffsetDateTime,
+        now: OffsetDateTime
+    ): RefreshConsumeResult = newSuspendedTransaction(Dispatchers.IO) {
+        val row = RefreshTokensTable.select { RefreshTokensTable.id eq tokenId }
+            .forUpdate()
+            .singleOrNull()
+            ?: return@newSuspendedTransaction RefreshConsumeResult.Rejected("unknown_token")
+        val record = RefreshTokenRecord(
+            id = row[RefreshTokensTable.id],
+            userId = row[RefreshTokensTable.userId],
+            familyId = row[RefreshTokensTable.familyId],
+            tokenVersion = row[RefreshTokensTable.tokenVersion],
+            expiresAt = row[RefreshTokensTable.expiresAt],
+            usedAt = row[RefreshTokensTable.usedAt],
+            revokedAt = row[RefreshTokensTable.revokedAt]
+        )
+        when (val decision = RefreshTokenRotationPolicy.evaluate(record, expectedUserId, expectedTokenVersion, now)) {
+            RefreshDecision.Rotate -> {
+                RefreshTokensTable.update({ RefreshTokensTable.id eq tokenId }) {
+                    it[usedAt] = now
+                    it[replacedBy] = newTokenId
+                }
+                RefreshTokensTable.insert {
+                    it[id] = newTokenId
+                    it[userId] = record.userId
+                    it[familyId] = record.familyId
+                    it[tokenVersion] = record.tokenVersion
+                    it[expiresAt] = newExpiresAt
+                }
+                RefreshConsumeResult.Rotated(record.familyId)
+            }
+
+            RefreshDecision.ReuseDetected -> {
+                RefreshTokensTable.update({
+                    (RefreshTokensTable.familyId eq record.familyId) and RefreshTokensTable.revokedAt.isNull()
+                }) {
+                    it[revokedAt] = now
+                }
+                RefreshConsumeResult.ReuseDetected(record.familyId)
+            }
+
+            is RefreshDecision.Reject -> RefreshConsumeResult.Rejected(decision.reason)
+        }
+    }
+
+    override suspend fun getPinAttemptState(userId: UUID, scopeKey: String): PinAttemptState? =
         newSuspendedTransaction(Dispatchers.IO) {
             PinVerificationAttemptsTable
                 .select {
                     (PinVerificationAttemptsTable.userId eq userId) and
-                        (PinVerificationAttemptsTable.deviceId eq deviceId)
+                        (PinVerificationAttemptsTable.deviceId eq scopeKey)
                 }
                 .firstOrNull()
                 ?.let { row ->
@@ -240,9 +318,30 @@ class SystemRepository : PinVerificationGateway {
                 }
         }
 
+    override suspend fun incrementPinFailure(userId: UUID, scopeKey: String): Int =
+        newSuspendedTransaction(Dispatchers.IO) {
+            // Upsert atomik: request paralel tidak bisa "melewati" penghitung.
+            exec(
+                """
+                INSERT INTO system.pin_verification_attempts (user_id, device_id, failed_attempts, locked_until, updated_at)
+                VALUES (?, ?, 1, NULL, NOW())
+                ON CONFLICT (user_id, device_id) DO UPDATE
+                    SET failed_attempts = system.pin_verification_attempts.failed_attempts + 1,
+                        updated_at = NOW()
+                RETURNING failed_attempts
+                """.trimIndent(),
+                args = listOf(
+                    UUIDColumnType() to userId,
+                    VarCharColumnType(128) to scopeKey
+                ),
+                explicitStatementType = StatementType.SELECT
+            ) { rs -> if (rs.next()) rs.getInt("failed_attempts") else null }
+                ?: error("Gagal mencatat percobaan kredensial")
+        }
+
     override suspend fun savePinAttemptState(
         userId: UUID,
-        deviceId: String,
+        scopeKey: String,
         failedAttempts: Int,
         lockedUntil: OffsetDateTime?
     ) {
@@ -250,16 +349,16 @@ class SystemRepository : PinVerificationGateway {
             val now = OffsetDateTime.now()
             val updated = PinVerificationAttemptsTable.update({
                 (PinVerificationAttemptsTable.userId eq userId) and
-                    (PinVerificationAttemptsTable.deviceId eq deviceId)
+                    (PinVerificationAttemptsTable.deviceId eq scopeKey)
             }) {
                 it[this.failedAttempts] = failedAttempts
                 it[this.lockedUntil] = lockedUntil
                 it[this.updatedAt] = now
             }
             if (updated == 0) {
-                PinVerificationAttemptsTable.insert {
+                PinVerificationAttemptsTable.insertIgnore {
                     it[this.userId] = userId
-                    it[this.deviceId] = deviceId
+                    it[this.deviceId] = scopeKey
                     it[this.failedAttempts] = failedAttempts
                     it[this.lockedUntil] = lockedUntil
                     it[this.updatedAt] = now
@@ -268,11 +367,11 @@ class SystemRepository : PinVerificationGateway {
         }
     }
 
-    override suspend fun resetPinAttemptState(userId: UUID, deviceId: String) {
+    override suspend fun resetPinAttemptState(userId: UUID, scopeKey: String) {
         newSuspendedTransaction(Dispatchers.IO) {
             PinVerificationAttemptsTable.deleteWhere {
                 (PinVerificationAttemptsTable.userId eq userId) and
-                    (PinVerificationAttemptsTable.deviceId eq deviceId)
+                    (PinVerificationAttemptsTable.deviceId eq scopeKey)
             }
         }
     }

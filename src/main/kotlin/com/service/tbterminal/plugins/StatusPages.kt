@@ -95,10 +95,27 @@ fun Application.configureStatusPages() {
                 ErrorResponse("SERVICE_UNAVAILABLE", cause.message ?: "Layanan sementara tidak tersedia")
             )
         }
+        exception<BusinessConflictException> { call, cause ->
+            call.respond(
+                HttpStatusCode.Conflict,
+                ErrorResponse(cause.code, cause.message ?: "Data bertentangan dengan aturan bisnis server")
+            )
+        }
+        exception<TooManyAttemptsException> { call, cause ->
+            cause.retryAfterSeconds?.takeIf { it > 0 }?.let {
+                call.response.headers.append(HttpHeaders.RetryAfter, it.toString())
+            }
+            call.respond(
+                HttpStatusCode.TooManyRequests,
+                ErrorResponse("TOO_MANY_ATTEMPTS", cause.message ?: "Terlalu banyak percobaan gagal")
+            )
+        }
         exception<ManagerApprovalException> { call, cause ->
             val status = when (cause.reason) {
                 ManagerApprovalError.EXPIRED,
                 ManagerApprovalError.ALREADY_USED -> HttpStatusCode.Conflict
+
+                ManagerApprovalError.APPROVER_LOCKED -> HttpStatusCode.TooManyRequests
 
                 else -> HttpStatusCode.Forbidden
             }

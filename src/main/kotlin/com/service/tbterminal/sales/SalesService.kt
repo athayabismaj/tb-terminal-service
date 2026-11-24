@@ -648,7 +648,7 @@ class SalesService(private val repository: SalesRepository) {
     }
 
     suspend fun payTransactionDebt(userId: UUID, transactionId: String, request: PayDebtRequest): TransactionResponse {
-        return repository.payTransactionDebt(userId, UUID.fromString(transactionId), request)
+        return repository.payTransactionDebt(userId, parseUuid(transactionId, "Transaction ID"), request)
     }
 
     private fun validateSyncKey(value: String, fieldName: String): String {

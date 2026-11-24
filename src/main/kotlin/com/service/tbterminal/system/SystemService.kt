@@ -10,6 +10,8 @@ import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.ValidationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.mindrot.jbcrypt.BCrypt
 import java.time.Duration
 import java.time.LocalDate
@@ -33,27 +35,24 @@ class SystemService(
         }
 
         val user = repo.findUserByUsername(username)
-        if (user == null) {
-            return ApiResponse.error("Username atau Password salah", "UNAUTHORIZED")
+        // Selalu jalankan bcrypt (dengan hash dummy bila user tidak ada) agar waktu
+        // respons tidak membocorkan username mana yang terdaftar.
+        val isValid = withContext(Dispatchers.IO) {
+            BCrypt.checkpw(req.password, user?.passwordHash ?: DUMMY_PASSWORD_HASH)
         }
 
+        // Status akun baru diungkap setelah password terbukti benar.
+        if (user == null || !isValid) {
+            return ApiResponse.error("Username atau Password salah", "UNAUTHORIZED")
+        }
         if (!user.isActive) {
             return ApiResponse.error("Akun tidak aktif", "UNAUTHORIZED")
-        }
-
-        // WAJIB: BCrypt di Dispatchers.IO
-        val isValid = withContext(Dispatchers.IO) {
-            BCrypt.checkpw(req.password, user.passwordHash)
-        }
-
-        if (!isValid) {
-            return ApiResponse.error("Username atau Password salah", "UNAUTHORIZED")
         }
 
         repo.updateLastLogin(user.id)
 
         val token = JwtHelper.generateAccessToken(user)
-        val refreshToken = JwtHelper.generateRefreshToken(user)
+        val refreshToken = issueRefreshToken(user, familyId = UUID.randomUUID())
         return ApiResponse.success(
             LoginResponse(token = token, refreshToken = refreshToken, user = UserDto.from(user)),
             "Login berhasil"
@@ -72,6 +71,10 @@ class SystemService(
             ?: return ApiResponse.error("Refresh token tidak valid", "UNAUTHORIZED")
         val tokenVersion = decoded.getClaim(JwtHelper.TOKEN_VERSION_CLAIM).asInt()
             ?: return ApiResponse.error("Refresh token tidak valid", "UNAUTHORIZED")
+        // Refresh token lama (tanpa jti) tidak lagi diterima: user cukup login ulang sekali.
+        val tokenId = decoded.id
+            ?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            ?: return ApiResponse.error("Sesi telah berakhir. Silakan login kembali.", "UNAUTHORIZED")
         val user = repo.findUserById(userId)
             ?: return ApiResponse.error("Refresh token tidak valid", "UNAUTHORIZED")
 
@@ -79,13 +82,61 @@ class SystemService(
             return ApiResponse.error("Sesi telah berakhir", "UNAUTHORIZED")
         }
 
-        return ApiResponse.success(
-            RefreshTokenResponse(
-                token = JwtHelper.generateAccessToken(user),
-                refreshToken = JwtHelper.generateRefreshToken(user)
-            ),
-            "Token berhasil diperbarui"
+        val newTokenId = UUID.randomUUID()
+        val now = OffsetDateTime.now()
+        val validity = JwtHelper.refreshTokenValidity()
+        return when (
+            val result = repo.consumeRefreshToken(
+                tokenId = tokenId,
+                expectedUserId = user.id,
+                expectedTokenVersion = user.tokenVersion,
+                newTokenId = newTokenId,
+                newExpiresAt = now.plus(validity),
+                now = now
+            )
+        ) {
+            is RefreshConsumeResult.Rotated -> ApiResponse.success(
+                RefreshTokenResponse(
+                    token = JwtHelper.generateAccessToken(user),
+                    refreshToken = JwtHelper.generateRefreshToken(
+                        user = user,
+                        tokenId = newTokenId,
+                        familyId = result.familyId,
+                        validity = validity
+                    )
+                ),
+                "Token berhasil diperbarui"
+            )
+
+            is RefreshConsumeResult.ReuseDetected -> {
+                repo.insertAuditLog(
+                    actorUserId = user.id,
+                    action = AuditAction.UPDATE,
+                    schemaName = "system",
+                    tableName = "refresh_token_reuse",
+                    recordId = user.id,
+                    ipAddress = null,
+                    newData = buildJsonObject { put("familyId", result.familyId.toString()) }.toString()
+                )
+                ApiResponse.error("Sesi telah berakhir. Silakan login kembali.", "UNAUTHORIZED")
+            }
+
+            is RefreshConsumeResult.Rejected ->
+                ApiResponse.error("Sesi telah berakhir. Silakan login kembali.", "UNAUTHORIZED")
+        }
+    }
+
+    private suspend fun issueRefreshToken(user: UserRow, familyId: UUID): String {
+        val tokenId = UUID.randomUUID()
+        val validity = JwtHelper.refreshTokenValidity()
+        repo.insertRefreshToken(
+            tokenId = tokenId,
+            userId = user.id,
+            familyId = familyId,
+            tokenVersion = user.tokenVersion,
+            expiresAt = OffsetDateTime.now().plus(validity)
         )
+        return JwtHelper.generateRefreshToken(user, tokenId = tokenId, familyId = familyId, validity = validity)
     }
 
     suspend fun logout(userId: UUID) {
@@ -117,9 +168,7 @@ class SystemService(
         if (request.currentPassword.isBlank()) {
             throw ValidationException("Password wajib diisi")
         }
-        if (!request.newPin.matches(Regex("^\\d{4,6}$"))) {
-            throw ValidationException("PIN baru harus terdiri dari 4 sampai 6 digit")
-        }
+        PinVerificationPolicy.validatePinFormat(request.newPin, "PIN baru")
         validateProductionCredentials(null, request.newPin)
 
         val userRow = repo.findUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
@@ -127,19 +176,20 @@ class SystemService(
             throw ValidationException("Akun tidak aktif")
         }
 
-        val isPasswordValid = withContext(Dispatchers.IO) {
-            BCrypt.checkpw(request.currentPassword, userRow.passwordHash)
-        }
-        if (!isPasswordValid) {
-            throw ValidationException("Password tidak valid")
-        }
+        val deviceId = PinVerificationPolicy.normalizeDeviceId(request.deviceId ?: headerDeviceId)
+        pinVerificationService.verifyCredentialForSensitiveChange(
+            userRow = userRow,
+            scope = CredentialScope.PASSWORD,
+            candidate = request.currentPassword,
+            deviceId = deviceId,
+            ipAddress = ipAddress,
+            invalidMessage = "Password tidak valid"
+        )
 
         val newHashedPin = withContext(Dispatchers.IO) {
             BCrypt.hashpw(request.newPin, BCrypt.gensalt())
         }
         repo.updatePin(userId, newHashedPin)
-        val deviceId = PinVerificationPolicy.normalizeDeviceId(request.deviceId ?: headerDeviceId)
-        repo.resetPinAttemptState(userId, deviceId)
         repo.resetAllPinAttemptStatesForUser(userId)
         repo.insertAuditLog(
             actorUserId = userId,
@@ -148,7 +198,7 @@ class SystemService(
             tableName = "pin_reset",
             recordId = userId,
             ipAddress = ipAddress,
-            newData = """{"deviceId":"${deviceId.replace("\"", "\\\"")}"}"""
+            newData = buildJsonObject { put("deviceId", deviceId) }.toString()
         )
     }
 
@@ -223,9 +273,8 @@ class SystemService(
         AccessPolicy.require(actorRole, Permission.MANAGE_USERS)
         validateUserIdentity(request.name, request.username, request.email)
         if (request.password.isBlank()) throw ValidationException("Password tidak boleh kosong")
-        if (request.password.length < 6) throw ValidationException("Password minimal 6 karakter")
-        if (request.pin.isBlank()) throw ValidationException("PIN tidak boleh kosong")
-        if (request.pin.length < 4) throw ValidationException("PIN minimal 4 karakter")
+        validatePasswordStrength(request.password)
+        PinVerificationPolicy.validatePinFormat(request.pin)
         validateProductionCredentials(request.password, request.pin)
 
         val existingUser = repo.findUserByUsername(request.username.trim())
@@ -266,7 +315,7 @@ class SystemService(
 
         var newHashedPassword: String? = null
         if (!request.newPassword.isNullOrBlank()) {
-            if (request.newPassword.length < 6) throw ValidationException("Password minimal 6 karakter")
+            validatePasswordStrength(request.newPassword)
             validateProductionCredentials(request.newPassword, null)
             newHashedPassword = withContext(Dispatchers.IO) {
                 BCrypt.hashpw(request.newPassword, BCrypt.gensalt())
@@ -275,7 +324,7 @@ class SystemService(
 
         var newHashedPin: String? = null
         if (!request.newPin.isNullOrBlank()) {
-            if (request.newPin.length < 4) throw ValidationException("PIN minimal 4 karakter")
+            PinVerificationPolicy.validatePinFormat(request.newPin)
             validateProductionCredentials(null, request.newPin)
             newHashedPin = withContext(Dispatchers.IO) {
                 BCrypt.hashpw(request.newPin, BCrypt.gensalt())
@@ -283,6 +332,14 @@ class SystemService(
         }
 
         repo.updateUser(uuid, request.name.trim(), request.username.trim(), roleId, request.isActive, request.email?.trim(), newHashedPassword, newHashedPin)
+        if (newHashedPin != null) {
+            repo.resetAllPinAttemptStatesForUser(uuid)
+        }
+        // Password baru atau perubahan role wajib mengakhiri semua sesi lama user tersebut
+        // (token curian tidak boleh tetap berlaku setelah owner mereset kredensial).
+        if (newHashedPassword != null || existingUser.roleId != roleId.toString()) {
+            repo.incrementTokenVersion(uuid)
+        }
         return repo.getUserById(uuid)!!
     }
 
@@ -293,46 +350,55 @@ class SystemService(
         repo.softDeleteUser(uuid)
     }
 
-    suspend fun changeMyPassword(userId: UUID, request: ChangePasswordRequest) {
-        if (request.newPassword.isBlank() || request.newPassword.length < 6) {
-            throw ValidationException("Password baru minimal 6 karakter")
+    suspend fun changeMyPassword(
+        userId: UUID,
+        request: ChangePasswordRequest,
+        deviceId: String? = null,
+        ipAddress: String? = null
+    ) {
+        if (request.newPassword.isBlank()) {
+            throw ValidationException("Password baru wajib diisi")
         }
+        validatePasswordStrength(request.newPassword)
         validateProductionCredentials(request.newPassword, null)
 
-        val userResponse = repo.getUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
-        val userRow = repo.findUserByUsername(userResponse.username) ?: throw NotFoundException("User tidak ditemukan")
-
-        val isOldPasswordValid = withContext(Dispatchers.IO) {
-            BCrypt.checkpw(request.oldPassword, userRow.passwordHash)
-        }
-
-        if (!isOldPasswordValid) {
-            throw ValidationException("Password lama tidak valid")
-        }
+        val userRow = repo.findUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
+        pinVerificationService.verifyCredentialForSensitiveChange(
+            userRow = userRow,
+            scope = CredentialScope.PASSWORD,
+            candidate = request.oldPassword,
+            deviceId = deviceId,
+            ipAddress = ipAddress,
+            invalidMessage = "Password lama tidak valid"
+        )
 
         val newHashedPassword = withContext(Dispatchers.IO) {
             BCrypt.hashpw(request.newPassword, BCrypt.gensalt())
         }
 
         repo.updatePassword(userId, newHashedPassword)
+        // Semua sesi (termasuk yang mungkin dicuri) berakhir; user login ulang dengan password baru.
+        repo.incrementTokenVersion(userId)
     }
 
-    suspend fun changeMyPin(userId: UUID, request: ChangePinRequest) {
-        if (request.newPin.isBlank() || request.newPin.length < 4) {
-            throw ValidationException("PIN baru minimal 4 karakter")
-        }
+    suspend fun changeMyPin(
+        userId: UUID,
+        request: ChangePinRequest,
+        deviceId: String? = null,
+        ipAddress: String? = null
+    ) {
+        PinVerificationPolicy.validatePinFormat(request.newPin, "PIN baru")
         validateProductionCredentials(null, request.newPin)
 
-        val userResponse = repo.getUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
-        val userRow = repo.findUserByUsername(userResponse.username) ?: throw NotFoundException("User tidak ditemukan")
-
-        val isOldPinValid = withContext(Dispatchers.IO) {
-            BCrypt.checkpw(request.oldPin, userRow.pinHash)
-        }
-
-        if (!isOldPinValid) {
-            throw ValidationException("PIN lama tidak valid")
-        }
+        val userRow = repo.findUserById(userId) ?: throw NotFoundException("User tidak ditemukan")
+        pinVerificationService.verifyCredentialForSensitiveChange(
+            userRow = userRow,
+            scope = CredentialScope.PIN,
+            candidate = request.oldPin,
+            deviceId = deviceId,
+            ipAddress = ipAddress,
+            invalidMessage = "PIN lama tidak valid"
+        )
 
         val newHashedPin = withContext(Dispatchers.IO) {
             BCrypt.hashpw(request.newPin, BCrypt.gensalt())
@@ -506,6 +572,16 @@ class SystemService(
         }
     }
 
+    private fun validatePasswordStrength(password: String) {
+        if (password.length < MIN_PASSWORD_LENGTH) {
+            throw ValidationException("Password minimal $MIN_PASSWORD_LENGTH karakter")
+        }
+        if (password.length > MAX_PASSWORD_LENGTH) {
+            // bcrypt hanya memakai 72 byte pertama; batasi agar tidak menyesatkan.
+            throw ValidationException("Password maksimal $MAX_PASSWORD_LENGTH karakter")
+        }
+    }
+
     private fun validateUserIdentity(name: String, username: String, email: String?) {
         val normalizedName = name.trim()
         val normalizedUsername = username.trim()
@@ -528,6 +604,9 @@ class SystemService(
     }
 
     private companion object {
+        const val MIN_PASSWORD_LENGTH = 8
+        const val MAX_PASSWORD_LENGTH = 72
+        val DUMMY_PASSWORD_HASH: String by lazy { BCrypt.hashpw("dummy-password-for-timing", BCrypt.gensalt()) }
         val DEFAULT_PASSWORDS = setOf("owner123", "admin123", "password")
         val DEFAULT_PINS = setOf("1234", "123456", "0000", "000000")
     }

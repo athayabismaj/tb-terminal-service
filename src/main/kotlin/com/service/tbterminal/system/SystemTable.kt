@@ -38,6 +38,21 @@ object PinVerificationAttemptsTable : Table("system.pin_verification_attempts") 
     override val primaryKey = PrimaryKey(userId, deviceId)
 }
 
+/** Satu baris per refresh token yang pernah diterbitkan (rotasi sekali pakai). */
+object RefreshTokensTable : Table("system.refresh_tokens") {
+    val id = uuid("id")
+    val userId = uuid("user_id").references(UsersTable.id)
+    val familyId = uuid("family_id")
+    val tokenVersion = integer("token_version")
+    val expiresAt = timestampWithTimeZone("expires_at")
+    val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+    val usedAt = timestampWithTimeZone("used_at").nullable()
+    val replacedBy = uuid("replaced_by").nullable()
+    val revokedAt = timestampWithTimeZone("revoked_at").nullable()
+
+    override val primaryKey = PrimaryKey(id)
+}
+
 enum class AuditAction {
     INSERT,
     UPDATE,

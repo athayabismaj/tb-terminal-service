@@ -5,6 +5,9 @@ import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.AuthenticatedUserPrincipal
 import com.service.tbterminal.shared.JwtHelper
 import com.service.tbterminal.shared.Role
+import com.service.tbterminal.shared.TooManyAttemptsException
+import com.service.tbterminal.shared.UnauthorizedException
+import com.service.tbterminal.shared.ValidationException
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -36,6 +39,7 @@ import java.time.ZoneOffset
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -106,7 +110,7 @@ class PinVerificationServiceTest {
         val stillLocked = service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "pos-1"))
         assertEquals("PIN_LOCKED", stillLocked.code)
         assertEquals(lock30.data?.lockedUntil, stillLocked.data?.lockedUntil)
-        assertEquals(5, gateway.attempts[cashierId to "pos-1"]?.failedAttempts)
+        assertEquals(5, gateway.attempts[cashierId to PIN_SCOPE]?.failedAttempts)
 
         // Advance past 30s -> Attempt 6 -> 1m (60s) lockout
         clock.advanceSeconds(21)
@@ -160,18 +164,18 @@ class PinVerificationServiceTest {
         val service = PinVerificationService(gateway, clock)
 
         repeat(5) { service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "pos-1")) }
-        assertEquals(5, gateway.attempts[cashierId to "pos-1"]?.failedAttempts)
+        assertEquals(5, gateway.attempts[cashierId to PIN_SCOPE]?.failedAttempts)
 
         // Lockout expires -> failure counter remains 5 until valid PIN is entered
         clock.advanceSeconds(31)
-        assertEquals(5, gateway.attempts[cashierId to "pos-1"]?.failedAttempts)
+        assertEquals(5, gateway.attempts[cashierId to PIN_SCOPE]?.failedAttempts)
 
         val unlocked = service.verifyUnlock(cashierId, UnlockRequest(VALID_PIN, "pos-1"))
         assertTrue(unlocked.success)
         assertTrue(unlocked.data?.valid == true)
         assertEquals(5, unlocked.data?.attemptsLeft)
         assertNull(unlocked.data?.lockedUntil)
-        assertNull(gateway.attempts[cashierId to "pos-1"])
+        assertNull(gateway.attempts[cashierId to PIN_SCOPE])
 
         // Next wrong PIN starts cleanly from 4 attempts left again
         val nextWrong = service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "pos-1"))
@@ -215,20 +219,91 @@ class PinVerificationServiceTest {
     }
 
     @Test
-    fun `attempts are tracked separately per deviceId`() = runBlocking {
+    fun `changing deviceId does not reset the lockout counter`() = runBlocking {
         val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
         val gateway = FakePinVerificationGateway().apply {
             users[cashierId] = testUser(cashierId, "kasir1", Role.KASIR, VALID_PIN)
         }
         val service = PinVerificationService(gateway, clock)
 
-        repeat(5) { service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "device-a")) }
-        val deviceAResult = service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "device-a"))
-        val deviceBResult = service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "device-b"))
+        // Penyerang mengganti deviceId di setiap percobaan.
+        val results = (1..5).map { attempt ->
+            service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "rotating-device-$attempt"))
+        }
+        assertEquals(listOf(4, 3, 2, 1), results.take(4).map { it.data?.attemptsLeft })
+        assertEquals("PIN_LOCKED", results.last().code)
 
-        assertEquals("PIN_LOCKED", deviceAResult.code)
-        assertEquals("INVALID_PIN", deviceBResult.code)
-        assertEquals(4, deviceBResult.data?.attemptsLeft)
+        val otherDevice = service.verifyUnlock(cashierId, UnlockRequest(VALID_PIN, "fresh-device"))
+        assertEquals("PIN_LOCKED", otherDevice.code)
+        assertEquals(5, gateway.attempts[cashierId to PIN_SCOPE]?.failedAttempts)
+    }
+
+    @Test
+    fun `audit metadata stays valid JSON for hostile deviceId`() = runBlocking {
+        val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
+        val gateway = FakePinVerificationGateway().apply {
+            users[cashierId] = testUser(cashierId, "kasir1", Role.KASIR, VALID_PIN)
+        }
+        val service = PinVerificationService(gateway, clock)
+
+        service.verifyUnlock(cashierId, UnlockRequest(WRONG_PIN, "dev\\\"\n{evil}"))
+
+        val metadata = Json.parseToJsonElement(gateway.audits.single().metadataJson).jsonObject
+        val storedDeviceId = metadata.getValue("deviceId").jsonPrimitive.content
+        assertTrue(storedDeviceId.all { it.isLetterOrDigit() || it in "._:-" }, storedDeviceId)
+    }
+
+    @Test
+    fun `old PIN check on change PIN shares the unlock lockout counter`() = runBlocking {
+        val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
+        val user = testUser(cashierId, "kasir1", Role.KASIR, VALID_PIN)
+        val gateway = FakePinVerificationGateway().apply { users[cashierId] = user }
+        val service = PinVerificationService(gateway, clock)
+
+        repeat(4) {
+            assertFailsWith<ValidationException> {
+                service.verifyCredentialForSensitiveChange(
+                    user, CredentialScope.PIN, WRONG_PIN, "pos-1", null, "PIN lama tidak valid"
+                )
+            }
+        }
+        assertFailsWith<TooManyAttemptsException> {
+            service.verifyCredentialForSensitiveChange(
+                user, CredentialScope.PIN, WRONG_PIN, "pos-1", null, "PIN lama tidak valid"
+            )
+        }
+        // Unlock pun ikut terkunci karena memakai penghitung yang sama.
+        val unlock = service.verifyUnlock(cashierId, UnlockRequest(VALID_PIN, "pos-1"))
+        assertEquals("PIN_LOCKED", unlock.code)
+    }
+
+    @Test
+    fun `password check revokes sessions after max failures`() = runBlocking {
+        val clock = MutableTestClock(Instant.parse("2026-11-19T10:00:00Z"))
+        val user = testUser(adminId, "admin1", Role.ADMIN, VALID_PIN)
+        val gateway = FakePinVerificationGateway().apply { users[adminId] = user }
+        val service = PinVerificationService(gateway, clock)
+
+        var revokedError: UnauthorizedException? = null
+        for (attempt in 1..10) {
+            try {
+                service.verifyCredentialForSensitiveChange(
+                    user, CredentialScope.PASSWORD, "wrong-password", null, null, "Password tidak valid"
+                )
+            } catch (_: ValidationException) {
+            } catch (_: TooManyAttemptsException) {
+                clock.advanceSeconds(1801)
+            } catch (error: UnauthorizedException) {
+                revokedError = error
+            }
+        }
+        assertNotNull(revokedError)
+        assertEquals(listOf(adminId), gateway.revokedUsers)
+
+        // Password benar setelah reset counter diterima tanpa exception.
+        service.verifyCredentialForSensitiveChange(
+            user, CredentialScope.PASSWORD, "secret123", null, null, "Password tidak valid"
+        )
     }
 
     @Test
@@ -301,6 +376,7 @@ class PinVerificationServiceTest {
     private companion object {
         const val VALID_PIN = "654321"
         const val WRONG_PIN = "999999"
+        val PIN_SCOPE = CredentialScope.PIN.key
     }
 }
 
@@ -365,5 +441,12 @@ private class FakePinVerificationGateway : PinVerificationGateway {
 
     override suspend fun resetAllPinAttemptStatesForUser(userId: UUID) {
         attempts.keys.filter { it.first == userId }.forEach { attempts.remove(it) }
+    }
+
+    override suspend fun incrementPinFailure(userId: UUID, scopeKey: String): Int {
+        val current = attempts[userId to scopeKey] ?: PinAttemptState()
+        val next = current.copy(failedAttempts = current.failedAttempts + 1)
+        attempts[userId to scopeKey] = next
+        return next.failedAttempts
     }
 }

@@ -40,12 +40,21 @@ object ProductionDataGuard {
     private fun applyStoreBootstrap(connection: java.sql.Connection) {
         val name = EnvironmentConfig.productionStoreName ?: return
         require(name.length in 2..150 && !name.contains("placeholder", true)) { "STORE_NAME production tidak valid" }
+        // Hanya update bila nilainya benar-benar berubah. updated_at dipakai validasi
+        // sync offline untuk mendeteksi perubahan pengaturan selama sesi kas berjalan,
+        // jadi restart server tidak boleh "menyentuh" baris ini tanpa alasan.
         connection.prepareStatement(
-            "UPDATE system.store_settings SET store_name=?, address=?, phone=?, updated_at=NOW()"
+            """
+            UPDATE system.store_settings SET store_name=?, address=?, phone=?, updated_at=NOW()
+            WHERE store_name IS DISTINCT FROM ? OR address IS DISTINCT FROM ? OR phone IS DISTINCT FROM ?
+            """.trimIndent()
         ).use { statement ->
             statement.setString(1, name)
             statement.setString(2, EnvironmentConfig.productionStoreAddress)
             statement.setString(3, EnvironmentConfig.productionStorePhone)
+            statement.setString(4, name)
+            statement.setString(5, EnvironmentConfig.productionStoreAddress)
+            statement.setString(6, EnvironmentConfig.productionStorePhone)
             statement.executeUpdate()
         }
     }

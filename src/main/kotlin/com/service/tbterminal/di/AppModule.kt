@@ -39,7 +39,7 @@ val appModule = module {
     single { SystemService(get()) }
     single { UserSessionService(get()) }
     single<ManagerApprovalRepository> { ManagerApprovalRepositoryImpl() }
-    single { ManagerApprovalService(get()) }
+    single { ManagerApprovalService(repository = get(), attemptStore = get<SystemRepository>()) }
 
     // Inventory Module
     single<ProductMediaStorage> { CloudinaryMediaStorage.fromEnvironment() }

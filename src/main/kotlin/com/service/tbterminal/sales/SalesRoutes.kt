@@ -5,6 +5,7 @@ import com.service.tbterminal.shared.ForbiddenException
 import com.service.tbterminal.shared.Role
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.getUserRole
+import com.service.tbterminal.shared.clientIpAddress
 import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.requirePermission
 import com.service.tbterminal.system.AuditAction
@@ -291,7 +292,7 @@ fun Application.salesRoutes() {
                         actorRole = call.getUserRole(),
                         id = id,
                         request = call.receive(),
-                        ipAddress = call.salesClientIpAddress()
+                        ipAddress = call.clientIpAddress()
                     )
                     call.respond(HttpStatusCode.OK, ApiResponse.success(result, if (result.idempotentReplay) {
                         "Void sebelumnya sudah berhasil; hasil yang sama dikembalikan"
@@ -306,7 +307,7 @@ fun Application.salesRoutes() {
                         actorRole = call.getUserRole(),
                         transactionIdRaw = id,
                         request = call.receive(),
-                        ipAddress = call.salesClientIpAddress()
+                        ipAddress = call.clientIpAddress()
                     )
                     val responseStatus = if (result.idempotentReplay) HttpStatusCode.OK else HttpStatusCode.Created
                     call.respond(responseStatus, ApiResponse.success(result, if (result.idempotentReplay) {
@@ -332,12 +333,6 @@ fun Application.salesRoutes() {
     }
 }
 
-private fun ApplicationCall.salesClientIpAddress(): String? =
-    request.headers["X-Forwarded-For"]
-        ?.substringBefore(",")
-        ?.trim()
-        ?.takeIf(String::isNotBlank)
-        ?: request.headers["X-Real-IP"]?.trim()?.takeIf(String::isNotBlank)
 
 private suspend fun recordCheckoutReceivableAudit(
     call: ApplicationCall,

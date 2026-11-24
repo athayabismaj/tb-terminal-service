@@ -4,6 +4,7 @@ import com.service.tbterminal.shared.ApiResponse
 import com.service.tbterminal.shared.Permission
 import com.service.tbterminal.shared.getUserId
 import com.service.tbterminal.shared.getUserRole
+import com.service.tbterminal.shared.clientIpAddress
 import com.service.tbterminal.shared.requirePermission
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
@@ -31,7 +32,7 @@ fun Application.managerApprovalRoutes() {
                             requesterUserId = call.getUserId(),
                             requesterRole = call.getUserRole(),
                             request = call.receive(),
-                            ipAddress = call.managerApprovalClientIpAddress()
+                            ipAddress = call.clientIpAddress()
                         )
                         call.respond(
                             HttpStatusCode.Created,
@@ -42,12 +43,4 @@ fun Application.managerApprovalRoutes() {
             }
         }
     }
-}
-
-private fun ApplicationCall.managerApprovalClientIpAddress(): String? {
-    return request.headers["X-Forwarded-For"]
-        ?.substringBefore(",")
-        ?.trim()
-        ?.takeIf(String::isNotBlank)
-        ?: request.headers["X-Real-IP"]?.trim()?.takeIf(String::isNotBlank)
 }
