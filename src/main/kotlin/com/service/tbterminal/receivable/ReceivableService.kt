@@ -15,15 +15,29 @@ class ReceivableService(private val repository: ReceivableRepository) {
     // CUSTOMERS
     // ==========================================
 
-    suspend fun getCustomers(page: Int, limit: Int, search: String?): PaginatedResponse<CustomerResponse> {
+    suspend fun getCustomers(
+        page: Int,
+        limit: Int,
+        search: String?,
+        status: String? = null
+    ): PaginatedResponse<CustomerResponse> {
         val safePage = if (page < 1) 1 else page
         val safeLimit = if (limit < 1) 20 else limit
-        return repository.getPaginatedCustomers(safePage, safeLimit, search)
+        val normalizedStatus = status?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        if (normalizedStatus != null && normalizedStatus !in setOf("all", "active", "inactive")) {
+            throw ValidationException("Status pelanggan tidak valid. Gunakan: all, active, atau inactive")
+        }
+        return repository.getPaginatedCustomers(safePage, safeLimit, search, normalizedStatus)
     }
 
-    suspend fun getCustomerById(id: String): CustomerResponse {
+    suspend fun getCustomerById(id: String, includeInactive: Boolean = false): CustomerResponse {
         val uuid = parseUUID(id)
-        return repository.getCustomerById(uuid)
+        val customer = if (includeInactive) {
+            repository.getCustomerByIdIncludingInactive(uuid)
+        } else {
+            repository.getCustomerById(uuid)
+        }
+        return customer
             ?: throw NotFoundException("Pelanggan tidak ditemukan atau sudah dinonaktifkan")
     }
 
@@ -89,6 +103,24 @@ class ReceivableService(private val repository: ReceivableRepository) {
             }
             throw e
         }
+    }
+
+    suspend fun activateCustomer(id: String): CustomerResponse {
+        val uuid = parseUUID(id)
+        val customer = repository.getCustomerByIdIncludingInactive(uuid)
+            ?: throw NotFoundException("Pelanggan tidak ditemukan")
+
+        if (!customer.isActive) {
+            val conflict = repository.getCustomerByName(customer.name)
+            if (conflict != null && conflict.id != customer.id) {
+                throw ValidationException("Pelanggan aktif dengan nama '${customer.name}' sudah ada")
+            }
+            repository.activateCustomer(uuid)
+            return repository.getCustomerByIdIncludingInactive(uuid)
+                ?: throw NotFoundException("Pelanggan tidak ditemukan")
+        }
+
+        return customer
     }
 
     // ==========================================

@@ -23,8 +23,14 @@ import java.util.UUID
 
 interface ReceivableRepository {
     // Customers
-    suspend fun getPaginatedCustomers(page: Int, limit: Int, search: String?): PaginatedResponse<CustomerResponse>
+    suspend fun getPaginatedCustomers(
+        page: Int,
+        limit: Int,
+        search: String?,
+        status: String? = null
+    ): PaginatedResponse<CustomerResponse>
     suspend fun getCustomerById(id: UUID): CustomerResponse?
+    suspend fun getCustomerByIdIncludingInactive(id: UUID): CustomerResponse?
     suspend fun getCustomerByName(name: String): CustomerResponse?
     suspend fun createCustomer(
         name: String, phone: String?, address: String?,
@@ -35,6 +41,7 @@ interface ReceivableRepository {
         isContractor: Boolean, creditLimit: java.math.BigDecimal, paymentTermDays: Int
     ): Boolean
     suspend fun softDeleteCustomer(id: UUID): Boolean
+    suspend fun activateCustomer(id: UUID): Boolean
 
     // Receivables
     suspend fun getPaginatedReceivables(
@@ -102,13 +109,18 @@ class ReceivableRepositoryImpl : ReceivableRepository {
     // CUSTOMERS
     // ==========================================
 
-    override suspend fun getPaginatedCustomers(page: Int, limit: Int, search: String?): PaginatedResponse<CustomerResponse> = newSuspendedTransaction(Dispatchers.IO) {
+    override suspend fun getPaginatedCustomers(
+        page: Int,
+        limit: Int,
+        search: String?,
+        status: String?
+    ): PaginatedResponse<CustomerResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val offset = ((page - 1) * limit).toLong()
 
-        val totalCount = customerQuery(search).count()
+        val totalCount = customerQuery(search, status).count()
         val totalPages = kotlin.math.ceil(totalCount.toDouble() / limit).toInt()
 
-        val data = customerQuery(search)
+        val data = customerQuery(search, status)
             .orderBy(CustomersTable.name, SortOrder.ASC)
             .limit(limit, offset)
             .map { rowToCustomerResponse(it) }
@@ -124,6 +136,11 @@ class ReceivableRepositoryImpl : ReceivableRepository {
 
     override suspend fun getCustomerById(id: UUID): CustomerResponse? = newSuspendedTransaction(Dispatchers.IO) {
         CustomersTable.select { (CustomersTable.id eq id) and (CustomersTable.isActive eq true) }
+            .singleOrNull()?.let { rowToCustomerResponse(it) }
+    }
+
+    override suspend fun getCustomerByIdIncludingInactive(id: UUID): CustomerResponse? = newSuspendedTransaction(Dispatchers.IO) {
+        CustomersTable.select { CustomersTable.id eq id }
             .singleOrNull()?.let { rowToCustomerResponse(it) }
     }
 
@@ -169,6 +186,14 @@ class ReceivableRepositoryImpl : ReceivableRepository {
     override suspend fun softDeleteCustomer(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updatedRows = CustomersTable.update({ CustomersTable.id eq id }) {
             it[isActive] = false
+            it[updatedAt] = OffsetDateTime.now()
+        }
+        updatedRows > 0
+    }
+
+    override suspend fun activateCustomer(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
+        val updatedRows = CustomersTable.update({ CustomersTable.id eq id }) {
+            it[isActive] = true
             it[updatedAt] = OffsetDateTime.now()
         }
         updatedRows > 0
@@ -569,8 +594,13 @@ class ReceivableRepositoryImpl : ReceivableRepository {
         insertAudit(auditUserId, AuditAction.UPDATE, "cash_sessions", sessionId, schema = "sales")
     }
 
-    private fun customerQuery(search: String?): Query {
-        var query = CustomersTable.select { CustomersTable.isActive eq true }
+    private fun customerQuery(search: String?, status: String? = null): Query {
+        var query = when (status?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }) {
+            null, "active" -> CustomersTable.select { CustomersTable.isActive eq true }
+            "inactive" -> CustomersTable.select { CustomersTable.isActive eq false }
+            "all" -> CustomersTable.selectAll()
+            else -> throw ValidationException("Status pelanggan tidak valid. Gunakan: all, active, atau inactive")
+        }
 
         if (!search.isNullOrBlank()) {
             val searchTerm = "%${search.lowercase()}%"

@@ -53,8 +53,9 @@ fun Application.receivableRoutes() {
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val search = call.request.queryParameters["search"]
+                        val status = call.request.queryParameters["status"]
 
-                        val customers = service.getCustomers(page, limit, search)
+                        val customers = service.getCustomers(page, limit, search, status)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(customers))
                     }
 
@@ -66,7 +67,8 @@ fun Application.receivableRoutes() {
                                 HttpStatusCode.BadRequest,
                                 ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
                             )
-                        val customer = service.getCustomerById(id)
+                        val includeInactive = call.request.queryParameters["includeInactive"]?.toBooleanStrictOrNull() ?: false
+                        val customer = service.getCustomerById(id, includeInactive)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(customer))
                     }
 
@@ -128,6 +130,27 @@ fun Application.receivableRoutes() {
                             recordId = id
                         )
                         call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Pelanggan berhasil dihapus"))
+                    }
+
+                    // PATCH aktifkan kembali pelanggan — hanya ADMIN/OWNER
+                    patch("/{id}/activate") {
+                        call.requirePermission(Permission.MANAGE_RECEIVABLES)
+                        val actorUserId = call.getUserId()
+                        val id = call.parameters["id"]
+                            ?: return@patch call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
+                            )
+                        val customer = service.activateCustomer(id)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = actorUserId,
+                            action = AuditAction.UPDATE,
+                            schemaName = "receivable",
+                            tableName = "customers",
+                            recordId = customer.id
+                        )
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(customer, "Pelanggan berhasil diaktifkan kembali"))
                     }
                 }
 
