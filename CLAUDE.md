@@ -104,3 +104,5 @@ Bila keduanya bertentangan, **kode adalah acuan**:
 5. File yang sudah besar (`sales/SalesRepository.kt` > 2.000 baris) jangan ditambah lagi:
    ekstrak ke file baru per tanggung jawab.
 6. Rencana refactor bertahap: `docs/AGENT_PROMPT_REFACTOR.md` (kalau sudah ditambahkan).
+7. JANGAN commit, push, tag, merge, atau rebase. Cukup ubah file dan laporkan.
+   Commit dilakukan oleh pemilik repo atau Antigravity.
