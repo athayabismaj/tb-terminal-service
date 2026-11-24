@@ -5,6 +5,8 @@ import com.service.tbterminal.inventory.StockTable
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.StockInsufficientException
 import com.service.tbterminal.shared.ValidationException
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.select
@@ -15,7 +17,7 @@ import java.util.UUID
 internal fun resolveItemForOfflineSync(
     item: OfflineCheckoutSyncItemCommand,
     pricingContext: OfflinePricingContext
-): ResolvedItem {
+): ResolvedOfflineItem {
     if (item.quantity <= BigDecimal.ZERO) {
         throw ValidationException("Quantity untuk produk ${item.productId} harus lebih dari 0")
     }
@@ -61,50 +63,100 @@ internal fun resolveItemForOfflineSync(
 
     // Harga offline wajib dikenali dari daftar harga server (harga eceran/kontraktor/grosir
     // saat ini, atau harga lama yang masih berlaku ketika sesi kas dibuka).
-    val matchedUnitFactor = OfflineCheckoutGuard.matchUnitFactor(
-        priceAtTransaction = item.priceAtTransaction,
+    val baseUnitId = product[ProductsTable.baseUnitId]
+    val resolution = OfflineUnitResolver.resolve(
         quantity = item.quantity,
-        unitFactors = pricingContext.unitFactorsByProduct[item.productId].orEmpty(),
+        priceAtTransaction = item.priceAtTransaction,
+        clientUnit = item.unit,
+        baseUnitId = baseUnitId,
+        secondaryUnits = pricingContext.secondaryUnits(item.productId, baseUnitId),
         expectedBaseUnitPrice = { baseQuantity ->
             pricingContext.tierPricing.resolveUnitPrice(product, baseQuantity)
         },
         historicalBaseUnitPrices = pricingContext.historicalPricesByProduct[item.productId].orEmpty()
-    ) ?: throw offlineConflict(
-        OfflineConflictCode.OFFLINE_PRICE_CONFLICT,
-        "Pelanggaran business rule harga: harga ${product[ProductsTable.name]} " +
-            "(Rp ${item.priceAtTransaction.normalizeMoney().toPlainString()}) tidak sesuai daftar harga server"
     )
+    val resolved = when (resolution) {
+        is OfflineUnitResolution.Resolved -> resolution
+        is OfflineUnitResolution.PriceUnknown -> throw offlineConflict(
+            OfflineConflictCode.OFFLINE_PRICE_CONFLICT,
+            "Pelanggaran business rule harga: harga ${product[ProductsTable.name]} " +
+                "(Rp ${item.priceAtTransaction.normalizeMoney().toPlainString()}) tidak sesuai daftar harga server"
+        )
+        is OfflineUnitResolution.UnitConflict -> throw offlineConflict(
+            OfflineConflictCode.OFFLINE_UNIT_CONFLICT,
+            "Pelanggaran business rule satuan: ${product[ProductsTable.name]}: ${resolution.reason}"
+        )
+    }
 
-    return ResolvedItem(
-        productId = item.productId,
-        unitId = product[ProductsTable.baseUnitId],
-        productName = product[ProductsTable.name],
-        qty = item.quantity,
-        priceAtTransaction = item.priceAtTransaction.normalizeMoney(),
-        // HPP dihitung server; nilai HPP dari perangkat tidak dipercaya.
-        cogsAtTransaction = product[ProductsTable.priceBuy].multiply(matchedUnitFactor).normalizeMoney(),
-        grossLineTotal = item.grossLineTotal.normalizeMoney(),
-        discountType = item.discountType,
-        discountValue = item.discountValue.normalizeMoney(),
-        discount = item.discount.normalizeMoney(),
-        subtotal = requestedSubtotal,
-        note = item.note
+    return ResolvedOfflineItem(
+        item = ResolvedItem(
+            productId = item.productId,
+            unitId = baseUnitId,
+            productName = product[ProductsTable.name],
+            qty = resolved.baseQuantity,
+            priceAtTransaction = resolved.baseUnitPrice,
+            // HPP dihitung server; nilai HPP dari perangkat tidak dipercaya.
+            cogsAtTransaction = product[ProductsTable.priceBuy],
+            grossLineTotal = item.grossLineTotal.normalizeMoney(),
+            discountType = item.discountType,
+            discountValue = item.discountValue.normalizeMoney(),
+            discount = item.discount.normalizeMoney(),
+            subtotal = requestedSubtotal,
+            note = item.note
+        ),
+        sold = item,
+        unit = resolved
     )
 }
 
-internal fun lockAndValidateOfflineStocks(items: List<OfflineCheckoutSyncItemCommand>): Map<UUID, UUID> {
-    val requested = items.groupBy(OfflineCheckoutSyncItemCommand::productId)
-        .mapValues { (_, rows) -> rows.fold(BigDecimal.ZERO) { total, row -> total.add(row.quantity) } }
-    val productIds = requested.keys.sortedBy(UUID::toString)
-    val lockedStocks = StockTable.select { StockTable.productId inList productIds }
+/** Item siap simpan (satuan dasar) beserta bentuk aslinya dari perangkat untuk jejak audit. */
+internal data class ResolvedOfflineItem(
+    val item: ResolvedItem,
+    val sold: OfflineCheckoutSyncItemCommand,
+    val unit: OfflineUnitResolution.Resolved
+) {
+    /** Transaksi hanya menyimpan satuan dasar, jadi "2 dus" hanya bisa ditelusuri dari sini. */
+    fun auditMetadata(): String = buildJsonObject {
+        put("event", "OFFLINE_ITEM_UNIT")
+        put("source", unit.source.name)
+        put("productId", item.productId.toString())
+        put("soldUnitId", unit.soldUnitId?.toString())
+        put("soldQuantity", sold.quantity.toPlainString())
+        put("soldUnitPrice", sold.priceAtTransaction.normalizeMoney().toPlainString())
+        put("unitFactor", unit.factor.stripTrailingZeros().toPlainString())
+        put("baseUnitId", item.unitId.toString())
+        put("baseQuantity", item.qty.toPlainString())
+        put("baseUnitPrice", item.priceAtTransaction.toPlainString())
+        put("subtotal", item.subtotal.toPlainString())
+    }.toString()
+}
+
+internal data class LockedStock(val id: UUID, val quantity: BigDecimal)
+
+/** Dipanggil sebelum produk dikunci: urutan lock checkout adalah stok lalu produk. */
+internal fun lockOfflineStocks(productIds: List<UUID>): Map<UUID, LockedStock> {
+    val sortedIds = productIds.distinct().sortedBy(UUID::toString)
+    val lockedStocks = StockTable.select { StockTable.productId inList sortedIds }
         .orderBy(StockTable.productId to SortOrder.ASC)
         .forUpdate()
         .associate { row ->
-            row[StockTable.productId] to (row[StockTable.id] to row[StockTable.quantity])
+            row[StockTable.productId] to LockedStock(row[StockTable.id], row[StockTable.quantity])
         }
-    productIds.forEach { productId ->
-        val available = lockedStocks[productId]?.second
-            ?: throw NotFoundException("Data stok untuk produk $productId tidak ditemukan")
+    sortedIds.forEach { productId ->
+        if (productId !in lockedStocks) throw NotFoundException("Data stok untuk produk $productId tidak ditemukan")
+    }
+    return lockedStocks
+}
+
+/** Kecukupan stok hanya bermakna setelah semua item diubah ke satuan dasar. */
+internal fun requireSufficientOfflineStocks(
+    lockedStocks: Map<UUID, LockedStock>,
+    items: List<ResolvedOfflineItem>
+) {
+    val requested = items.groupBy { it.item.productId }
+        .mapValues { (_, rows) -> rows.fold(BigDecimal.ZERO) { total, row -> total.add(row.item.qty) } }
+    requested.keys.sortedBy(UUID::toString).forEach { productId ->
+        val available = requireNotNull(lockedStocks[productId]).quantity
         val quantity = requireNotNull(requested[productId])
         if (quantity > available) {
             throw StockInsufficientException(
@@ -112,7 +164,20 @@ internal fun lockAndValidateOfflineStocks(items: List<OfflineCheckoutSyncItemCom
             )
         }
     }
-    return lockedStocks.mapValues { (_, stock) -> stock.first }
+}
+
+/**
+ * Membaca `unitId` dan `baseQuantity`. Keduanya opsional demi klien lama, tetapi wajib berpasangan:
+ * salah satunya saja tidak cukup untuk memastikan jumlah satuan dasar.
+ */
+internal fun parseOfflineItemUnit(item: OfflineCheckoutItemRequest): OfflineItemUnit? {
+    if (item.unitId == null && item.baseQuantity == null) return null
+    if (item.unitId == null || item.baseQuantity == null) {
+        throw ValidationException("unitId dan baseQuantity wajib dikirim bersamaan")
+    }
+    val unitId = runCatching { UUID.fromString(item.unitId.trim()) }.getOrNull()
+        ?: throw ValidationException("Format Unit ID tidak valid")
+    return OfflineItemUnit(unitId, item.baseQuantity)
 }
 
 private fun BigDecimal.normalizeMoney(): BigDecimal = setScale(2, RoundingMode.HALF_UP)

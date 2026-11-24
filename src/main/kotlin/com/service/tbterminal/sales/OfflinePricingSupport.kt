@@ -26,9 +26,17 @@ internal object PriceHistoryTable : Table("inventory.price_history") {
  */
 internal data class OfflinePricingContext(
     val tierPricing: SalesTierPricingContext,
-    val unitFactorsByProduct: Map<UUID, List<BigDecimal>>,
+    private val unitsByProduct: Map<UUID, List<ProductUnitRow>>,
     val historicalPricesByProduct: Map<UUID, Set<BigDecimal>>
-)
+) {
+    /** Hanya konversi yang bermuara ke satuan dasar produk yang boleh menentukan stok. */
+    fun secondaryUnits(productId: UUID, baseUnitId: UUID): List<OfflineProductUnit> =
+        unitsByProduct[productId].orEmpty()
+            .filter { it.toUnitId == baseUnitId }
+            .map(ProductUnitRow::unit)
+}
+
+internal data class ProductUnitRow(val unit: OfflineProductUnit, val toUnitId: UUID)
 
 internal fun loadOfflinePricingContext(
     customerId: UUID?,
@@ -41,11 +49,16 @@ internal fun loadOfflinePricingContext(
         return OfflinePricingContext(tierPricing, emptyMap(), emptyMap())
     }
 
-    val unitFactors = UnitConversionsTable
+    val units = UnitConversionsTable
         .select { UnitConversionsTable.productId inList distinctIds }
         .groupBy(
             keySelector = { it[UnitConversionsTable.productId] },
-            valueTransform = { it[UnitConversionsTable.factor] }
+            valueTransform = {
+                ProductUnitRow(
+                    unit = OfflineProductUnit(it[UnitConversionsTable.fromUnitId], it[UnitConversionsTable.factor]),
+                    toUnitId = it[UnitConversionsTable.toUnitId]
+                )
+            }
         )
 
     // Harga lama yang masih berlaku di awal jendela tepercaya: perangkat offline mungkin
@@ -70,7 +83,7 @@ internal fun loadOfflinePricingContext(
 
     return OfflinePricingContext(
         tierPricing = tierPricing,
-        unitFactorsByProduct = unitFactors,
+        unitsByProduct = units,
         historicalPricesByProduct = historicalPrices
     )
 }

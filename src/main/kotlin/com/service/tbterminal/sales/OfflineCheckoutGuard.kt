@@ -24,38 +24,27 @@ internal object OfflineCheckoutGuard {
     val CLOCK_SKEW: Duration = Duration.ofMinutes(5)
 
     /**
-     * Mencari faktor satuan yang menjelaskan harga offline.
+     * Harga satuan dasar versi server yang menjelaskan harga offline untuk satu faktor satuan.
      *
-     * @param unitFactors faktor satuan sekunder produk (jumlah satuan dasar per satu satuan sekunder).
+     * @param factor jumlah satuan dasar per satu satuan yang dijual (1 untuk satuan dasar).
      * @param expectedBaseUnitPrice harga satuan dasar menurut server untuk kuantitas dasar tertentu
      *   (sudah memperhitungkan harga kontraktor dan harga grosir).
      * @param historicalBaseUnitPrices harga satuan dasar lama yang masih berlaku ketika sesi kas dibuka.
-     * @return faktor yang cocok (1 untuk satuan dasar) atau `null` bila harga tidak dikenali server.
+     * @return kandidat yang cocok, harga server saat ini lebih dulu; kosong bila harga tidak dikenali.
      */
-    fun matchUnitFactor(
+    fun matchingBaseUnitPrices(
         priceAtTransaction: BigDecimal,
         quantity: BigDecimal,
-        unitFactors: List<BigDecimal>,
+        factor: BigDecimal,
         expectedBaseUnitPrice: (baseQuantity: BigDecimal) -> BigDecimal,
         historicalBaseUnitPrices: Collection<BigDecimal>
-    ): BigDecimal? {
-        if (priceAtTransaction < BigDecimal.ZERO || quantity <= BigDecimal.ZERO) return null
-        val price = priceAtTransaction.money()
-        val factors = (listOf(BigDecimal.ONE) + unitFactors.filter { it > BigDecimal.ZERO })
-            .distinctBy { it.stripTrailingZeros() }
-
-        for (factor in factors) {
-            val baseQuantity = quantity.multiply(factor)
-            val candidates = buildList {
-                add(expectedBaseUnitPrice(baseQuantity))
-                addAll(historicalBaseUnitPrices)
-            }
-            val matched = candidates.any { candidate ->
-                candidate >= BigDecimal.ZERO && candidate.multiply(factor).money().compareTo(price) == 0
-            }
-            if (matched) return factor
+    ): List<BigDecimal> {
+        if (priceAtTransaction < BigDecimal.ZERO || quantity <= BigDecimal.ZERO || factor <= BigDecimal.ZERO) {
+            return emptyList()
         }
-        return null
+        val price = priceAtTransaction.money()
+        return (listOf(expectedBaseUnitPrice(quantity.multiply(factor))) + historicalBaseUnitPrices)
+            .filter { it >= BigDecimal.ZERO && it.multiply(factor).money().compareTo(price) == 0 }
     }
 
     /**

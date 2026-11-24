@@ -10,7 +10,8 @@ internal enum class OfflineConflictCode {
     OFFLINE_OCCURRED_AT_INVALID,
     OFFLINE_ROUNDING_CONFLICT,
     OFFLINE_TAX_CONFLICT,
-    OFFLINE_PRICE_CONFLICT
+    OFFLINE_PRICE_CONFLICT,
+    OFFLINE_UNIT_CONFLICT
 }
 
 /** Kejadian di dalam sesi kas yang waktunya berasal dari jam perangkat. */

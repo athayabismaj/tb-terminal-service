@@ -2000,6 +2000,226 @@ class IntegrationTest {
     }
 
     @Test
+    fun test_offline_secondary_unit_from_new_client_deducts_base_stock() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("30.00")
+        val key = "offline-unit-${UUID.randomUUID()}"
+        val body = fixture.saleBody(listOf(fixture.dusLine()), key)
+
+        val synced = syncOfflineBody(fixture, body)
+        assertEquals(HttpStatusCode.Created, synced.status, synced.bodyAsText())
+        val transactionId = offlineTransactionId(synced)
+
+        assertEquals(BigDecimal("6.00"), stockQuantity(fixture.product.id))
+        assertEquals(BigDecimal("6.00"), latestLedgerBalance(fixture.product.id))
+        // Nilai uang persis seperti yang dibayar pelanggan; HPP per satuan dasar.
+        assertEquals(
+            "24.00|100.00|50.00|2400.00|2400.00|${fixture.product.unitId}",
+            storedOfflineItem(transactionId)
+        )
+        assertEquals("2400.00|2400.00", firstString("SELECT gross_subtotal || '|' || total FROM sales.transactions WHERE id = '$transactionId'"))
+
+        // Retry tetap idempoten dan tidak memotong stok dua kali.
+        val replay = syncOfflineBody(fixture, body)
+        assertEquals(HttpStatusCode.OK, replay.status, replay.bodyAsText())
+        assertTrue(replay.bodyAsText().contains("\"syncStatus\":\"DUPLICATE\""), replay.bodyAsText())
+        assertEquals(BigDecimal("6.00"), stockQuantity(fixture.product.id))
+
+        val audit = offlineItemAudit(transactionId)
+        assertEquals("CLIENT_UNIT", audit.getValue("source").jsonPrimitive.content)
+        assertEquals(fixture.dusId.toString(), audit.getValue("soldUnitId").jsonPrimitive.content)
+        assertEquals("2.00", audit.getValue("soldQuantity").jsonPrimitive.content)
+        assertEquals("1200.00", audit.getValue("soldUnitPrice").jsonPrimitive.content)
+        assertEquals("12", audit.getValue("unitFactor").jsonPrimitive.content)
+        assertEquals("24.00", audit.getValue("baseQuantity").jsonPrimitive.content)
+    }
+
+    @Test
+    fun test_offline_secondary_unit_from_legacy_client_is_converted() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("30.00")
+
+        val synced = syncOfflineBody(fixture, fixture.saleBody(listOf(fixture.dusLine(unitId = null, baseQuantity = null))))
+        assertEquals(HttpStatusCode.Created, synced.status, synced.bodyAsText())
+        val transactionId = offlineTransactionId(synced)
+
+        assertEquals(BigDecimal("6.00"), stockQuantity(fixture.product.id))
+        assertEquals(
+            "24.00|100.00|50.00|2400.00|2400.00|${fixture.product.unitId}",
+            storedOfflineItem(transactionId)
+        )
+        val audit = offlineItemAudit(transactionId)
+        assertEquals("LEGACY_AUTO", audit.getValue("source").jsonPrimitive.content)
+        assertEquals(fixture.dusId.toString(), audit.getValue("soldUnitId").jsonPrimitive.content)
+        // Jejak audit tidak bisa diubah atau dihapus.
+        dataSource.connection.use { connection ->
+            connection.createStatement().use { statement ->
+                assertEquals(0, statement.executeUpdate("DELETE FROM system.audit_logs WHERE record_id IN (SELECT id FROM sales.transaction_items WHERE transaction_id = '$transactionId')"))
+            }
+        }
+        assertEquals(audit, offlineItemAudit(transactionId))
+    }
+
+    @Test
+    fun test_offline_legacy_client_ambiguous_or_inexact_unit_is_rejected() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("30.00")
+        val legacyDus = fixture.dusLine(unitId = null, baseQuantity = null)
+
+        // Ambigu: 1.200 = 12 x harga eceran, dan juga harga lama per pcs.
+        insertPriceHistory(fixture.product, "1200.00", OffsetDateTime.now(ZoneOffset.UTC).minusHours(1))
+        assertUnitConflict(syncOfflineBody(fixture, fixture.saleBody(listOf(legacyDus))))
+        // Klien baru dengan harga yang sama tidak ambigu.
+        val explicit = syncOfflineBody(fixture, fixture.saleBody(listOf(fixture.dusLine())))
+        assertEquals(HttpStatusCode.Created, explicit.status, explicit.bodyAsText())
+        assertEquals(BigDecimal("6.00"), stockQuantity(fixture.product.id))
+
+        // Tidak eksak: 100 x 0,3333 = 33,33 tetapi 2 x 0,3333 bukan kuantitas 2 desimal.
+        val inexact = offlineUnitFixture("30.00", factor = "0.3333")
+        assertUnitConflict(
+            syncOfflineBody(
+                inexact,
+                inexact.saleBody(listOf(inexact.dusLine(price = "33.33", unitId = null, baseQuantity = null)))
+            )
+        )
+        assertEquals(BigDecimal("30.00"), stockQuantity(inexact.product.id))
+        assertEquals(1, transactionCount())
+    }
+
+    @Test
+    fun test_offline_unit_payload_is_validated() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("30.00")
+        val otherUnit = unitOtherThan(fixture.product.unitId, fixture.dusId)
+
+        listOf(
+            fixture.dusLine(unitId = otherUnit.toString()),
+            fixture.dusLine(baseQuantity = "2.00"),
+            fixture.dusLine(baseQuantity = "23.99"),
+            fixture.pcsLine("2.00", baseQuantity = "24.00")
+        ).forEach { line -> assertUnitConflict(syncOfflineBody(fixture, fixture.saleBody(listOf(line)))) }
+
+        // Harga dus diakui sebagai harga pcs: tetap konflik harga.
+        val wrongPrice = syncOfflineBody(
+            fixture,
+            fixture.saleBody(listOf(fixture.dusLine(unitId = fixture.product.unitId.toString(), baseQuantity = "2.00")))
+        )
+        assertEquals(HttpStatusCode.Conflict, wrongPrice.status, wrongPrice.bodyAsText())
+        assertTrue(wrongPrice.bodyAsText().contains("OFFLINE_PRICE_CONFLICT"), wrongPrice.bodyAsText())
+
+        listOf(
+            fixture.dusLine(baseQuantity = null),
+            fixture.dusLine(unitId = null),
+            fixture.dusLine(unitId = "bukan-uuid")
+        ).forEach { line ->
+            val invalid = syncOfflineBody(fixture, fixture.saleBody(listOf(line)))
+            assertEquals(HttpStatusCode.BadRequest, invalid.status, invalid.bodyAsText())
+            assertTrue(invalid.bodyAsText().contains("VALIDATION_ERROR"), invalid.bodyAsText())
+        }
+        assertEquals(0, transactionCount())
+        assertEquals(BigDecimal("30.00"), stockQuantity(fixture.product.id))
+
+        // Konversi yang tidak bermuara ke satuan dasar tidak boleh menentukan stok.
+        insertUnitConversion(fixture.product.id, otherUnit, fixture.dusId, "6.0000")
+        assertUnitConflict(
+            syncOfflineBody(
+                fixture,
+                fixture.saleBody(
+                    listOf(fixture.dusLine(price = "600.00", unitId = otherUnit.toString(), baseQuantity = "12.00"))
+                )
+            )
+        )
+    }
+
+    @Test
+    fun test_offline_mixed_units_and_stock_check_use_base_quantity() = testApplication {
+        application { configureIntegrationApplication() }
+        // 2 dus + 3 pcs = 27: ditolak pada stok 26, diterima pada 27.
+        val short = offlineUnitFixture("26.00")
+        val rejected = syncOfflineBody(short, short.saleBody(listOf(short.dusLine(), short.pcsLine("3.00"))))
+        assertFalse(rejected.status == HttpStatusCode.Created, rejected.bodyAsText())
+        assertTrue(rejected.bodyAsText().contains("diminta 27.00"), rejected.bodyAsText())
+        assertEquals(BigDecimal("26.00"), stockQuantity(short.product.id))
+
+        // Konflik satuan dan harga dilaporkan lebih dulu daripada stok kurang.
+        assertUnitConflict(syncOfflineBody(short, short.saleBody(listOf(short.dusLine("5.00", baseQuantity = "5.00")))))
+        val priceFirst = syncOfflineBody(short, short.saleBody(listOf(short.pcsLine("50.00", price = "99.00"))))
+        assertTrue(priceFirst.bodyAsText().contains("OFFLINE_PRICE_CONFLICT"), priceFirst.bodyAsText())
+
+        val exact = offlineUnitFixture("27.00")
+        val accepted = syncOfflineBody(exact, exact.saleBody(listOf(exact.dusLine(), exact.pcsLine("3.00"))))
+        assertEquals(HttpStatusCode.Created, accepted.status, accepted.bodyAsText())
+        assertEquals(BigDecimal("0.00"), stockQuantity(exact.product.id))
+    }
+
+    @Test
+    fun test_offline_secondary_unit_uses_tier_price_of_base_quantity() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("30.00")
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "INSERT INTO inventory.product_price_tiers (product_id, min_qty, unit_price) VALUES (?, 24, 90)"
+            ).use { it.setObject(1, fixture.product.id); it.executeUpdate() }
+        }
+        val synced = syncOfflineBody(fixture, fixture.saleBody(listOf(fixture.dusLine(price = "1080.00"))))
+        assertEquals(HttpStatusCode.Created, synced.status, synced.bodyAsText())
+        assertEquals(
+            "24.00|90.00|50.00|2160.00|2160.00|${fixture.product.unitId}",
+            storedOfflineItem(offlineTransactionId(synced))
+        )
+    }
+
+    @Test
+    fun test_void_and_refund_of_converted_offline_items_restore_base_stock() = testApplication {
+        application { configureIntegrationApplication() }
+        val owner = loginAsOwner()
+        val fixture = offlineUnitFixture("60.00")
+        suspend fun sell(line: String): String {
+            val synced = syncOfflineBody(fixture, fixture.saleBody(listOf(line)))
+            assertEquals(HttpStatusCode.Created, synced.status, synced.bodyAsText())
+            assertEquals(BigDecimal("36.00"), stockQuantity(fixture.product.id))
+            return offlineTransactionId(synced)
+        }
+        val legacyDus = fixture.dusLine(unitId = null, baseQuantity = null)
+
+        listOf(fixture.dusLine(), legacyDus).forEach { line ->
+            val voided = voidTransaction(owner, sell(line), "void-unit-${UUID.randomUUID()}", "Salah input satuan")
+            assertTrue(voided.status.value in 200..201, voided.bodyAsText())
+            assertEquals(BigDecimal("60.00"), stockQuantity(fixture.product.id))
+
+            val refunded = refundTransaction(owner, sell(line), "refund-unit-${UUID.randomUUID()}", "Barang dikembalikan")
+            assertTrue(refunded.status.value in 200..201, refunded.bodyAsText())
+            assertTrue(refunded.bodyAsText().contains("\"refundedAmount\":\"2400.00\""), refunded.bodyAsText())
+            assertEquals(BigDecimal("60.00"), stockQuantity(fixture.product.id))
+        }
+        assertEquals(BigDecimal("60.00"), latestLedgerBalance(fixture.product.id))
+
+        val kept = refundTransaction(
+            owner, sell(legacyDus), "refund-unit-${UUID.randomUUID()}", "Barang rusak total", "DAMAGED"
+        )
+        assertTrue(kept.status.value in 200..201, kept.bodyAsText())
+        assertEquals(BigDecimal("36.00"), stockQuantity(fixture.product.id))
+    }
+
+    @Test
+    fun test_online_checkout_ignores_secondary_units() = testApplication {
+        application { configureIntegrationApplication() }
+        val fixture = offlineUnitFixture("30.00", openOnline = true)
+        val sale = checkout(fixture.cashier.token, fixture.product, "24.00", "2400.00", "online-unit-${UUID.randomUUID()}")
+        assertEquals(HttpStatusCode.Created, sale.status, sale.bodyAsText())
+        val transactionId = checkoutTransactionId(sale)
+        assertEquals(BigDecimal("6.00"), stockQuantity(fixture.product.id))
+        assertEquals("24.00|100.00|50.00|2400.00|2400.00|${fixture.product.unitId}", storedOfflineItem(transactionId))
+        assertEquals(
+            "0",
+            firstString(
+                "SELECT COUNT(*)::text FROM system.audit_logs a JOIN sales.transaction_items ti ON ti.id = a.record_id " +
+                    "WHERE ti.transaction_id = '$transactionId' AND a.new_data IS NOT NULL"
+            )
+        )
+    }
+
+    @Test
     fun test_e2e_supported_offline_sync_is_idempotent_and_audited() = testApplication {
         application { configureIntegrationApplication() }
         val cashier = loginAsCashier(loginAsOwner())
@@ -3056,6 +3276,75 @@ class IntegrationTest {
             ""","taxEnabled":true,"taxMode":"EXCLUDE","taxRate":"11.00","taxableBase":"$price","taxAmount":"$tax""""
         return """{"clientGeneratedId":"offline-checkout-${UUID.randomUUID()}","deviceId":"$OFFLINE_DEVICE_ID","localTransactionCode":"LOCAL-GUARD","cashierUserId":"${cashier.userId}","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"$price","discount":"0.00","total":"$total","paidAmount":"$total","remainingAmount":"0.00","occurredAt":"$occurredAt","roundingAmount":"$rounding","items":[{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"1.00","priceAtTransaction":"$price","cogsAtTransaction":"50.00","discount":"0.00","subtotal":"$price"}]$taxFields}"""
     }
+
+    /** Produk eceran 100 (HPP 50) dengan satuan sekunder berisi [factor] satuan dasar, dan sesi kas offline. */
+    private suspend fun ApplicationTestBuilder.offlineUnitFixture(
+        stock: String,
+        factor: String = "12.0000",
+        openOnline: Boolean = false
+    ): OfflineUnitFixture {
+        val cashier = loginAsCashier(loginAsOwner())
+        val product = createProductFixture(BigDecimal(stock))
+        val dusId = unitOtherThan(product.unitId)
+        insertUnitConversion(product.id, dusId, product.unitId, factor)
+        val openedAt = OffsetDateTime.now(ZoneOffset.UTC).minusHours(2)
+        val sessionId = if (openOnline) {
+            assertEquals(HttpStatusCode.Created, openSession(cashier.token).status)
+            ""
+        } else {
+            offlineSessionId(syncOpenSession(cashier, openedAt))
+        }
+        return OfflineUnitFixture(cashier, sessionId, product, dusId, openedAt.plusMinutes(30))
+    }
+
+    private fun insertUnitConversion(productId: UUID, fromUnitId: UUID, toUnitId: UUID, factor: String) {
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "INSERT INTO inventory.unit_conversions (product_id, from_unit_id, to_unit_id, factor) VALUES (?, ?, ?, ?)"
+            ).use { statement ->
+                statement.setObject(1, productId)
+                statement.setObject(2, fromUnitId)
+                statement.setObject(3, toUnitId)
+                statement.setBigDecimal(4, BigDecimal(factor))
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    private fun unitOtherThan(vararg unitIds: UUID): UUID = UUID.fromString(
+        firstString(
+            "SELECT id::text FROM inventory.units WHERE id NOT IN (${unitIds.joinToString { "'$it'" }}) ORDER BY id LIMIT 1"
+        )
+    )
+
+    private suspend fun ApplicationTestBuilder.syncOfflineBody(fixture: OfflineUnitFixture, body: String): HttpResponse =
+        client.post("/api/sales/checkout/sync") {
+            contentType(ContentType.Application.Json)
+            bearer(fixture.cashier.token)
+            setBody(body)
+        }
+
+    private suspend fun assertUnitConflict(response: HttpResponse) {
+        assertEquals(HttpStatusCode.Conflict, response.status, response.bodyAsText())
+        assertTrue(response.bodyAsText().contains("OFFLINE_UNIT_CONFLICT"), response.bodyAsText())
+        assertTrue(response.bodyAsText().contains("business rule"), response.bodyAsText())
+    }
+
+    private suspend fun offlineTransactionId(response: HttpResponse): String =
+        Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue("serverTransactionId").jsonPrimitive.content
+
+    private fun storedOfflineItem(transactionId: String): String = firstString(
+        "SELECT concat_ws('|', quantity, price_at_transaction, cogs_at_transaction, gross_line_total, subtotal, unit_id) " +
+            "FROM sales.transaction_items WHERE transaction_id = '$transactionId'"
+    )
+
+    private fun offlineItemAudit(transactionId: String) = Json.parseToJsonElement(
+        firstString(
+            "SELECT a.new_data::text FROM system.audit_logs a JOIN sales.transaction_items ti ON ti.id = a.record_id " +
+                "WHERE ti.transaction_id = '$transactionId' AND a.table_name = 'transaction_items'"
+        )
+    ).jsonObject
 
     private suspend fun ApplicationTestBuilder.syncOfflineExpense(
         cashier: ApprovalUserFixture,
@@ -4203,6 +4492,39 @@ class IntegrationTest {
         val id: UUID,
         val unitId: UUID
     )
+
+    private data class OfflineUnitFixture(
+        val cashier: ApprovalUserFixture,
+        val sessionId: String,
+        val product: ProductFixture,
+        val dusId: UUID,
+        val occurredAt: OffsetDateTime
+    ) {
+        /** Bawaan: 2 dus @ 1.200, isi 12. `null` = field tidak dikirim (klien lama). */
+        fun dusLine(
+            quantity: String = "2.00",
+            price: String = "1200.00",
+            unitId: String? = dusId.toString(),
+            baseQuantity: String? = "24.00"
+        ) = line(quantity, price, unitId, baseQuantity)
+
+        fun pcsLine(quantity: String, price: String = "100.00", baseQuantity: String = quantity) =
+            line(quantity, price, product.unitId.toString(), baseQuantity)
+
+        private fun line(quantity: String, price: String, unitId: String?, baseQuantity: String?): String {
+            val subtotal = BigDecimal(price).multiply(BigDecimal(quantity)).setScale(2)
+            val unitFields = listOfNotNull(
+                unitId?.let { "\"unitId\":\"$it\"" },
+                baseQuantity?.let { "\"baseQuantity\":\"$it\"" }
+            ).joinToString("") { ",$it" }
+            return """{"productId":"${product.id}","productNameSnapshot":"Offline Product","quantity":"$quantity","priceAtTransaction":"$price","cogsAtTransaction":"0.00","discount":"0.00","subtotal":"$subtotal"$unitFields}"""
+        }
+
+        fun saleBody(lines: List<String>, key: String = "offline-unit-${UUID.randomUUID()}"): String {
+            val total = lines.sumOf { BigDecimal(Json.parseToJsonElement(it).jsonObject.getValue("subtotal").jsonPrimitive.content) }
+            return """{"clientGeneratedId":"$key","deviceId":"$OFFLINE_DEVICE_ID","localTransactionCode":"LOCAL-UNIT","cashierUserId":"${cashier.userId}","cashSessionId":"$sessionId","paymentMethod":"tunai","subtotal":"$total","discount":"0.00","total":"$total","paidAmount":"$total","remainingAmount":"0.00","occurredAt":"$occurredAt","items":[${lines.joinToString(",")}]}"""
+        }
+    }
 
     private data class TokenPair(val access: String, val refresh: String)
 

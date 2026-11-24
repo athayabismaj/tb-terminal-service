@@ -161,7 +161,8 @@ data class OfflineCheckoutSyncItemCommand(
     val discountValue: java.math.BigDecimal,
     val discount: java.math.BigDecimal,
     val subtotal: java.math.BigDecimal,
-    val note: String? = null
+    val note: String? = null,
+    val unit: OfflineItemUnit? = null
 )
 
 data class CheckoutCommand(
@@ -1079,13 +1080,15 @@ class SalesRepositoryImpl(
                 storeSettings[StoreSettingsTable.taxSettingsUpdatedAt].isAfter(windowStart)
         )?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_TAX_CONFLICT, it) }
 
-        val lockedStockIds = lockAndValidateOfflineStocks(command.items)
+        val lockedStocks = lockOfflineStocks(command.items.map(OfflineCheckoutSyncItemCommand::productId))
         val pricingContext = loadOfflinePricingContext(
             customerId = command.customerId,
             productIds = command.items.map(OfflineCheckoutSyncItemCommand::productId),
             windowStart = windowStart
         )
-        val resolvedItems = command.items.map { item -> resolveItemForOfflineSync(item, pricingContext) }
+        val offlineItems = command.items.map { item -> resolveItemForOfflineSync(item, pricingContext) }
+        requireSufficientOfflineStocks(lockedStocks, offlineItems)
+        val resolvedItems = offlineItems.map(ResolvedOfflineItem::item)
         val itemTotal = resolvedItems.fold(BigDecimal.ZERO) { total, item -> total.add(item.subtotal) }
             .normalizeMoney()
         val totalAmount = command.total.normalizeMoney()
@@ -1211,13 +1214,15 @@ class SalesRepositoryImpl(
         }
 
         insertCheckoutAudit(command.cashierUserId, "sales", "transactions", trxId)
-        transactionItemIds.forEach {
-            insertCheckoutAudit(command.cashierUserId, "sales", "transaction_items", it)
+        transactionItemIds.zip(offlineItems).forEach { (itemId, offlineItem) ->
+            insertCheckoutAudit(
+                command.cashierUserId, "sales", "transaction_items", itemId, newData = offlineItem.auditMetadata()
+            )
         }
         paymentIds.forEach { insertCheckoutAudit(command.cashierUserId, "sales", "payments", it) }
         receivableId?.let { insertCheckoutAudit(command.cashierUserId, "receivable", "receivables", it) }
-        lockedStockIds.values.forEach {
-            insertCheckoutAudit(command.cashierUserId, "inventory", "stock", it, AuditAction.UPDATE)
+        lockedStocks.values.forEach {
+            insertCheckoutAudit(command.cashierUserId, "inventory", "stock", it.id, AuditAction.UPDATE)
         }
         if (payment.cashAppliedTotal > BigDecimal.ZERO) {
             insertCheckoutAudit(
@@ -1359,7 +1364,8 @@ class SalesRepositoryImpl(
         schema: String,
         table: String,
         recordId: UUID,
-        auditAction: AuditAction = AuditAction.INSERT
+        auditAction: AuditAction = AuditAction.INSERT,
+        newData: String? = null
     ) {
         AuditLogsTable.insert {
             it[id] = UUID.randomUUID()
@@ -1368,6 +1374,7 @@ class SalesRepositoryImpl(
             it[targetSchemaName] = schema
             it[targetTableName] = table
             it[this.recordId] = recordId
+            it[this.newData] = newData
         }
     }
 

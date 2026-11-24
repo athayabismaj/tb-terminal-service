@@ -458,7 +458,12 @@ data class OfflineCheckoutItemRequest(
     val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val subtotal: java.math.BigDecimal,
-    val note: String? = null
+    val note: String? = null,
+    /** Satuan yang dijual. Opsional demi klien lama; wajib bersama [baseQuantity]. */
+    val unitId: String? = null,
+    /** Jumlah dalam satuan dasar: `quantity` × faktor satuan, tanpa pembulatan. */
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
+    val baseQuantity: java.math.BigDecimal? = null
 )
 
 @Serializable

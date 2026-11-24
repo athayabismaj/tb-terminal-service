@@ -408,7 +408,8 @@ class SalesService(
                 discountValue = BigDecimal.ZERO.setScale(MONEY_SCALE),
                 discount = item.discount,
                 subtotal = item.subtotal,
-                note = itemNote
+                note = itemNote,
+                unit = parseOfflineItemUnit(item)
             )
         }
 
