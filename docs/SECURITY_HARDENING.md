@@ -11,7 +11,7 @@ Endpoint: `POST /api/sales/checkout/sync`, kecuali disebutkan lain.
 | Data dari perangkat | Sebelum | Sesudah |
 |---|---|---|
 | `priceAtTransaction` | diterima asal konsisten | wajib cocok dengan harga server: eceran/kontraktor/grosir saat ini, harga lama yang berubah di dalam jendela tepercaya, atau harga × faktor satuan sekunder |
-| `cogsAtTransaction` | diterima | diabaikan; server memakai `price_buy` × faktor satuan |
+| `cogsAtTransaction` | diterima | diabaikan; server memakai `price_buy` per satuan dasar |
 | `productNameSnapshot` | dipakai di struk/laporan | diabaikan; server memakai nama produk |
 | `roundingAmount` | tanpa batas | \|nilai\| < 1000, total hasil pembulatan wajib kelipatan 100/500/1000, dan bila pengaturan pembulatan tidak berubah di dalam jendela tepercaya: \|nilai\| < unit pembulatan toko |
 | `taxEnabled/taxMode/taxRate` | bebas | wajib sama dengan pengaturan toko, kecuali pengaturan pajak diubah di dalam jendela tepercaya |
@@ -21,8 +21,8 @@ Endpoint: `POST /api/sales/checkout/sync`, kecuali disebutkan lain.
 
 Pelanggaran dijawab **HTTP 409** dengan kode `OFFLINE_PRICE_CONFLICT`,
 `OFFLINE_ROUNDING_CONFLICT`, `OFFLINE_TAX_CONFLICT`,
-`OFFLINE_OCCURRED_AT_INVALID`, `OFFLINE_OPENED_AT_INVALID`, atau
-`OFFLINE_CLOSED_AT_INVALID`. Semua pesan memuat frasa "business rule" (dijamin `offlineConflict(...)`) sehingga
+`OFFLINE_OCCURRED_AT_INVALID`, `OFFLINE_OPENED_AT_INVALID`,
+`OFFLINE_CLOSED_AT_INVALID`, atau `OFFLINE_UNIT_CONFLICT` (lihat `API_CHANGES.md`). Semua pesan memuat frasa "business rule" (dijamin `offlineConflict(...)`) sehingga
 `SyncErrorClassifier` di aplikasi otomatis menandainya **CONFLICT**.
 
 **Jendela tepercaya.** Riwayat harga dan perubahan pengaturan hanya dilihat mulai
@@ -169,6 +169,7 @@ Pesan 409 sync offline (semuanya baru):
 | `OFFLINE_ROUNDING_CONFLICT` | Pelanggaran business rule: {alasan pembulatan} |
 | `OFFLINE_TAX_CONFLICT` | Pelanggaran business rule pajak: {status, mode, atau tarif} pajak transaksi offline berbeda dari pengaturan toko |
 | `OFFLINE_PRICE_CONFLICT` | Pelanggaran business rule harga: harga {produk} (Rp {harga}) tidak sesuai daftar harga server |
+| `OFFLINE_UNIT_CONFLICT` | Pelanggaran business rule satuan: {produk}: {alasan} (daftar alasan di `API_CHANGES.md`) |
 
 Pada commit awal branch ini `OFFLINE_OCCURRED_AT_INVALID` belum berawalan
 "Pelanggaran business rule: ".
@@ -189,8 +190,9 @@ Bila satu request melanggar beberapa aturan, error yang dikirim bisa berbeda dar
 - **`sync/open`:** key dan kepemilikan → duplikat → `openedAt` → kasir → sesi aktif. Sesi yang terlalu
   lama ditolak 409 walau kasir masih punya sesi terbuka (sebelumnya 400).
 - **`checkout/sync`:** key dan kepemilikan → duplikat → format dan aritmetika → kasir → sesi → `occurredAt` →
-  pembulatan → pajak → stok → item → harga → total → pembayaran. Artinya konflik waktu, pembulatan,
-  atau pajak muncul lebih dulu daripada stok tidak cukup, dan konflik harga sesudahnya.
+  pembulatan → pajak → baris stok ada → item → harga/satuan → stok cukup → total → pembayaran. Artinya konflik
+  waktu, pembulatan, pajak, harga, dan satuan muncul lebih dulu daripada stok tidak cukup, karena kecukupan stok
+  baru bisa dinilai setelah semua item diubah ke satuan dasar. Urutan lock tetap stok → produk.
 - **`cash-expenses/sync`:** key dan kepemilikan → format → duplikat → sesi → sesi sudah ditutup → `occurredAt`.
 - **`sessions/sync/close`:** format → sesi → kepemilikan → sudah ditutup (`DUPLICATE`/`ALREADY_CLOSED`) → `closedAt`.
 - **`/transactions/{id}/pay`:** idempotensi diperiksa sebelum status lunas dan sisa hutang, jadi retry
@@ -210,11 +212,10 @@ Bila satu request melanggar beberapa aturan, error yang dikirim bisa berbeda dar
    perlu ditinjau (sudah otomatis lewat kata kunci "business rule"), termasuk
    `OFFLINE_OPENED_AT_INVALID` dari `sessions/sync/open` dan `OFFLINE_CLOSED_AT_INVALID` dari
    `sessions/sync/close`. Sesi offline wajib di-sync dalam `OFFLINE_MAX_SESSION_AGE_HOURS` (default 72 jam); beri peringatan ke kasir sebelum batas itu terlewati.
-4. **Satuan sekunder di sync offline** — perangkat mengirim `quantity` dalam
-   satuan sekunder (mis. dus) sementara server mencatat stok dalam satuan dasar,
-   jadi stok berkurang terlalu sedikit. Server kini mengenali harganya, tetapi
-   kontraknya perlu diperbaiki: kirim kuantitas dan harga dalam satuan dasar
-   (seperti checkout online), atau tambahkan `unitId`/`baseQuantity` ke payload.
+4. **Satuan sekunder di sync offline** — kirim `unitId` dan `baseQuantity` per item; kontrak lengkap dan contoh
+   payload ada di `API_CHANGES.md`. Klien lama dikonversi otomatis hanya bila faktornya tunggal dan hasilnya eksak,
+   selain itu 409 `OFFLINE_UNIT_CONFLICT`. Transaksi lama yang terkena bug dideteksi dengan
+   `docs/sql/detect_offline_secondary_unit.sql` (hanya baca).
 5. **Pembayaran hutang** — kirim `idempotencyKey` (UUID per tombol "Bayar",
    dipakai ulang saat retry) di `PayDebtRequestDto`.
 6. **HTTP 429** — tampilkan pesan "coba lagi nanti" untuk `TOO_MANY_ATTEMPTS`

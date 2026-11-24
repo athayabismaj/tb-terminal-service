@@ -262,9 +262,10 @@ LANGKAH (BACKEND)
    satuan dasar (qty = baseQuantity, harga = harga dasar). Subtotal harus
    tetap persis sama. Kalau pembulatan 2 desimal membuat subtotal tidak
    bisa dijaga, tolak dengan 409 OFFLINE_UNIT_CONFLICT.
-3. Kalau field tidak dikirim (klien lama) DAN OfflineCheckoutGuard mendeteksi
-   faktor ≠ 1: tolak dengan 409 OFFLINE_UNIT_CONFLICT (pesan memuat frasa
-   "business rule"), jangan diterima diam-diam.
+3. Kalau field tidak dikirim (klien lama) DAN harganya cocok dengan faktor ≠ 1:
+   konversi otomatis hanya bila faktornya tunggal dan hasilnya eksak; selain itu
+   tolak dengan 409 OFFLINE_UNIT_CONFLICT (pesan memuat frasa "business rule").
+   Jangan diterima diam-diam. (Keputusan 24 Nov 2026; lihat docs/API_CHANGES.md.)
 4. Test: jual 2 dus (faktor 12), stok berkurang 24, subtotal sama.
 5. Siapkan migrasi data opsional (skrip SQL terpisah di docs/, BUKAN
    migrasi Flyway) untuk mendeteksi transaksi offline lama yang terkena bug.
