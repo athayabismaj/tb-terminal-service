@@ -13,12 +13,14 @@ import java.util.UUID
 
 interface PurchasingRepository {
     // Suppliers
-    suspend fun getPaginatedSuppliers(page: Int, limit: Int, search: String?): PaginatedResponse<SupplierResponse>
+    suspend fun getPaginatedSuppliers(page: Int, limit: Int, search: String?, status: String? = null): PaginatedResponse<SupplierResponse>
     suspend fun getSupplierById(id: UUID): SupplierResponse?
+    suspend fun getSupplierByIdIncludingInactive(id: UUID): SupplierResponse?
     suspend fun getSupplierByName(name: String): SupplierResponse?
     suspend fun createSupplier(name: String, phone: String?, address: String?, paymentTermDays: Int): UUID
     suspend fun updateSupplier(id: UUID, name: String, phone: String?, address: String?, paymentTermDays: Int): Boolean
     suspend fun softDeleteSupplier(id: UUID): Boolean
+    suspend fun activateSupplier(id: UUID): Boolean
 
     // Purchases
     suspend fun executePurchase(
@@ -82,10 +84,20 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     // SUPPLIERS
     // ==========================================
 
-    override suspend fun getPaginatedSuppliers(page: Int, limit: Int, search: String?): PaginatedResponse<SupplierResponse> = newSuspendedTransaction(Dispatchers.IO) {
+    override suspend fun getPaginatedSuppliers(
+        page: Int,
+        limit: Int,
+        search: String?,
+        status: String?
+    ): PaginatedResponse<SupplierResponse> = newSuspendedTransaction(Dispatchers.IO) {
         val offset = ((page - 1) * limit).toLong()
 
-        var query = SuppliersTable.select { SuppliersTable.isActive eq true }
+        var query = when (status?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }) {
+            null, "active" -> SuppliersTable.select { SuppliersTable.isActive eq true }
+            "inactive" -> SuppliersTable.select { SuppliersTable.isActive eq false }
+            "all" -> SuppliersTable.selectAll()
+            else -> throw ValidationException("Status supplier tidak valid. Gunakan: all, active, atau inactive")
+        }
 
         if (!search.isNullOrBlank()) {
             val searchTerm = "%${search.lowercase()}%"
@@ -114,6 +126,11 @@ class PurchasingRepositoryImpl : PurchasingRepository {
 
     override suspend fun getSupplierById(id: UUID): SupplierResponse? = newSuspendedTransaction(Dispatchers.IO) {
         SuppliersTable.select { (SuppliersTable.id eq id) and (SuppliersTable.isActive eq true) }
+            .singleOrNull()?.let { rowToSupplierResponse(it) }
+    }
+
+    override suspend fun getSupplierByIdIncludingInactive(id: UUID): SupplierResponse? = newSuspendedTransaction(Dispatchers.IO) {
+        SuppliersTable.select { SuppliersTable.id eq id }
             .singleOrNull()?.let { rowToSupplierResponse(it) }
     }
 
@@ -153,6 +170,14 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     override suspend fun softDeleteSupplier(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
         val updatedRows = SuppliersTable.update({ SuppliersTable.id eq id }) {
             it[isActive] = false
+            it[updatedAt] = OffsetDateTime.now()
+        }
+        updatedRows > 0
+    }
+
+    override suspend fun activateSupplier(id: UUID): Boolean = newSuspendedTransaction(Dispatchers.IO) {
+        val updatedRows = SuppliersTable.update({ SuppliersTable.id eq id }) {
+            it[isActive] = true
             it[updatedAt] = OffsetDateTime.now()
         }
         updatedRows > 0

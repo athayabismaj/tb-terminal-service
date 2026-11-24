@@ -36,8 +36,9 @@ fun Application.purchasingRoutes() {
                         val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
                         val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                         val search = call.request.queryParameters["search"]
+                        val status = call.request.queryParameters["status"]
 
-                        val suppliers = service.getSuppliers(page, limit, search)
+                        val suppliers = service.getSuppliers(page, limit, search, status)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(suppliers))
                     }
 
@@ -48,7 +49,8 @@ fun Application.purchasingRoutes() {
                                 HttpStatusCode.BadRequest,
                                 ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
                             )
-                        val supplier = service.getSupplierById(id)
+                        val includeInactive = call.request.queryParameters["includeInactive"]?.toBooleanStrictOrNull() ?: false
+                        val supplier = service.getSupplierById(id, includeInactive)
                         call.respond(HttpStatusCode.OK, ApiResponse.success(supplier))
                     }
 
@@ -107,6 +109,26 @@ fun Application.purchasingRoutes() {
                             recordId = id
                         )
                         call.respond(HttpStatusCode.OK, ApiResponse.success(Unit, "Supplier berhasil dihapus"))
+                    }
+
+                    patch("/{id}/activate") {
+                        call.requirePermission(Permission.MANAGE_PURCHASING)
+                        val actorUserId = call.getUserId()
+                        val id = call.parameters["id"]
+                            ?: return@patch call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse("VALIDATION_ERROR", "ID tidak ditemukan")
+                            )
+                        val supplier = service.activateSupplier(id)
+                        systemService.recordOperationalAudit(
+                            call = call,
+                            actorUserId = actorUserId,
+                            action = AuditAction.UPDATE,
+                            schemaName = "purchasing",
+                            tableName = "suppliers",
+                            recordId = supplier.id
+                        )
+                        call.respond(HttpStatusCode.OK, ApiResponse.success(supplier, "Supplier berhasil diaktifkan kembali"))
                     }
                 }
 

@@ -16,16 +16,20 @@ class PurchasingService(
     // SUPPLIERS
     // ==========================================
 
-    suspend fun getSuppliers(page: Int, limit: Int, search: String?): PaginatedResponse<SupplierResponse> {
+    suspend fun getSuppliers(page: Int, limit: Int, search: String?, status: String? = null): PaginatedResponse<SupplierResponse> {
         val safePage = if (page < 1) 1 else page
         val safeLimit = if (limit < 1) 20 else limit
-        return repository.getPaginatedSuppliers(safePage, safeLimit, search)
+        return repository.getPaginatedSuppliers(safePage, safeLimit, search, status)
     }
 
-    suspend fun getSupplierById(id: String): SupplierResponse {
+    suspend fun getSupplierById(id: String, includeInactive: Boolean = false): SupplierResponse {
         val uuid = parseUUID(id)
-        return repository.getSupplierById(uuid)
-            ?: throw NotFoundException("Supplier tidak ditemukan atau sudah dinonaktifkan")
+        val supplier = if (includeInactive) {
+            repository.getSupplierByIdIncludingInactive(uuid)
+        } else {
+            repository.getSupplierById(uuid)
+        }
+        return supplier ?: throw NotFoundException("Supplier tidak ditemukan atau sudah dinonaktifkan")
     }
 
     suspend fun createSupplier(request: SupplierRequest): SupplierResponse {
@@ -84,6 +88,24 @@ class PurchasingService(
             }
             throw e
         }
+    }
+
+    suspend fun activateSupplier(id: String): SupplierResponse {
+        val uuid = parseUUID(id)
+        val supplier = repository.getSupplierByIdIncludingInactive(uuid)
+            ?: throw NotFoundException("Supplier tidak ditemukan")
+
+        if (!supplier.isActive) {
+            val conflict = repository.getSupplierByName(supplier.name)
+            if (conflict != null && conflict.id != supplier.id) {
+                throw ValidationException("Supplier aktif dengan nama '${supplier.name}' sudah ada")
+            }
+            repository.activateSupplier(uuid)
+            return repository.getSupplierByIdIncludingInactive(uuid)
+                ?: throw NotFoundException("Supplier tidak ditemukan")
+        }
+
+        return supplier
     }
 
     // ==========================================
