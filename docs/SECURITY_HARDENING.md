@@ -1,37 +1,48 @@
 # Security Hardening (branch `security-hardening`)
 
 Ringkasan perbaikan keamanan backend beserta dampaknya ke aplikasi Android
-(`tb-terminal-app`). Semua perubahan memakai migrasi `V45`.
+(`tb-terminal-app`). Perubahan skema ada di migrasi `V45`
+(refresh token, lingkup lockout) dan `V46` (waktu perubahan pajak dan pembulatan).
 
 ## 1. Sync checkout offline tidak lagi percaya angka dari perangkat
 
-Endpoint: `POST /api/sales/checkout/sync`
+Endpoint: `POST /api/sales/checkout/sync`, kecuali disebutkan lain.
 
 | Data dari perangkat | Sebelum | Sesudah |
 |---|---|---|
 | `priceAtTransaction` | diterima asal konsisten | wajib cocok dengan harga server: eceran/kontraktor/grosir saat ini, harga lama yang berubah di dalam jendela tepercaya, atau harga × faktor satuan sekunder |
 | `cogsAtTransaction` | diterima | diabaikan; server memakai `price_buy` × faktor satuan |
 | `productNameSnapshot` | dipakai di struk/laporan | diabaikan; server memakai nama produk |
-| `roundingAmount` | tanpa batas | \|nilai\| < 1000, total hasil pembulatan wajib kelipatan 100/500/1000, dan bila pengaturan toko tidak berubah di dalam jendela tepercaya: \|nilai\| < unit pembulatan toko |
-| `taxEnabled/taxMode/taxRate` | bebas | wajib sama dengan pengaturan toko, kecuali pengaturan diubah di dalam jendela tepercaya |
-| `occurredAt` | bebas | wajib di antara pembukaan sesi kas (−5 menit) dan waktu server (+5 menit) |
-| `openedAt` (`POST /api/sales/sessions/sync/open`) | bebas | paling lama 24 jam sebelum, dan paling jauh 5 menit sesudah, waktu server |
+| `roundingAmount` | tanpa batas | \|nilai\| < 1000, total hasil pembulatan wajib kelipatan 100/500/1000, dan bila pengaturan pembulatan tidak berubah di dalam jendela tepercaya: \|nilai\| < unit pembulatan toko |
+| `taxEnabled/taxMode/taxRate` | bebas | wajib sama dengan pengaturan toko, kecuali pengaturan pajak diubah di dalam jendela tepercaya |
+| `occurredAt` (juga `POST /api/sales/cash-expenses/sync`) | bebas | wajib di antara pembukaan sesi kas (−5 menit) dan waktu server (+5 menit) |
+| `openedAt` (`POST /api/sales/sessions/sync/open`) | bebas | paling lama `OFFLINE_MAX_SESSION_AGE_HOURS` (default 72) jam sebelum, dan paling jauh 5 menit sesudah, waktu server |
+| `closedAt` (`POST /api/sales/sessions/sync/close`) | bebas | wajib di antara pembukaan sesi kas (−5 menit) dan waktu server (+5 menit) |
 
 Pelanggaran dijawab **HTTP 409** dengan kode `OFFLINE_PRICE_CONFLICT`,
 `OFFLINE_ROUNDING_CONFLICT`, `OFFLINE_TAX_CONFLICT`,
-`OFFLINE_OCCURRED_AT_INVALID`, atau `OFFLINE_OPENED_AT_INVALID`. Semua pesan
-memuat frasa "business rule" (dijamin `offlineConflict(...)`) sehingga
+`OFFLINE_OCCURRED_AT_INVALID`, `OFFLINE_OPENED_AT_INVALID`, atau
+`OFFLINE_CLOSED_AT_INVALID`. Semua pesan memuat frasa "business rule" (dijamin `offlineConflict(...)`) sehingga
 `SyncErrorClassifier` di aplikasi otomatis menandainya **CONFLICT**.
 
 **Jendela tepercaya.** Riwayat harga dan perubahan pengaturan hanya dilihat mulai
-dari `max(openedAt, waktu server saat sesi dibuat/di-sync − 24 jam)`. Jadi sesi yang
+dari `max(openedAt, waktu server saat sesi dibuat/di-sync − OFFLINE_MAX_SESSION_AGE_HOURS)`. Jadi sesi yang
 `openedAt`-nya terlanjur dimundurkan sebelum aturan ini berlaku tetap tidak bisa
 memakai harga lama atau melewati cek pajak dan pembulatan.
 
+**Perubahan pengaturan.** Cek pajak hanya longgar bila `tax_enabled`, `tax_rate`, atau `tax_mode`
+berubah di dalam jendela; cek pembulatan hanya bila `cash_rounding_unit` atau `cash_rounding_rule`
+berubah. Waktunya dicatat trigger database di `tax_settings_updated_at` dan
+`rounding_settings_updated_at` (V46), yang tidak bisa ditulis langsung. Mengubah nama toko, telepon,
+teks struk, label pajak, atau NPWP tidak lagi melonggarkan cek apa pun. Saat V46 dijalankan, kedua
+kolom diisi dari `updated_at`, jadi sesi yang sedang berjalan diperlakukan seperti sebelumnya.
+
 **Dampak operasional.** Sesi kas offline yang baru tersambung setelah lebih dari
-24 jam ditolak, dan transaksinya ikut tidak bisa di-sync karena membutuhkan
+`OFFLINE_MAX_SESSION_AGE_HOURS` (default 72, rentang 1–168) ditolak, dan transaksinya ikut tidak bisa di-sync karena membutuhkan
 `serverCashSessionId`. Sesi yang sudah pernah tersimpan tetap dijawab `DUPLICATE`
-saat diulang, berapa pun umurnya.
+saat diulang, berapa pun umurnya. Hal yang sama berlaku untuk pengeluaran (`DUPLICATE`) dan tutup
+sesi (`DUPLICATE`/`ALREADY_CLOSED`). Perangkat yang jamnya lebih dari 5 menit lebih cepat mendapat
+409 sampai waktu server menyusul; retry setelah itu diterima.
 
 ## 2. Lockout kredensial per user (bukan per deviceId)
 
@@ -39,9 +50,19 @@ saat diulang, berapa pun umurnya.
   `scope:manager-approval`). Mengganti `deviceId`/`X-Device-Id` tidak lagi
   mereset hitungan. `deviceId` hanya metadata audit (karakter di luar
   `[A-Za-z0-9._:-]` diganti `_`).
-- Penambahan hitungan dan penetapan `locked_until` terjadi dalam satu pernyataan
-  (`INSERT ... ON CONFLICT DO UPDATE ... RETURNING`). `locked_until` memakai
-  `GREATEST`, jadi request paralel tidak bisa memperpendek kunci yang lebih lama.
+- Percobaan **dicatat sebagai gagal sebelum bcrypt** (reservasi), dalam satu pernyataan
+  (`INSERT ... ON CONFLICT DO UPDATE ... WHERE kunci tidak aktif ... RETURNING`). Percobaan yang
+  mencapai ambang langsung memasang kunci, dan selama kunci aktif tidak ada reservasi baru. Jadi
+  tebakan paralel yang benar-benar diperiksa tidak pernah melebihi ambang.
+- Reservasi dilepas hanya bila kredensial benar. Pelepasan tidak menghapus kunci aktif yang dipasang
+  percobaan lain; kunci yang dipasang percobaan benar itu sendiri (mis. percobaan ke-5 benar) ikut
+  dilepas. Bcrypt yang gagal atau request yang dibatalkan tetap terhitung sebagai kegagalan.
+- Selama bcrypt percobaan yang mencapai ambang berjalan (± 0,1 detik), request paralel dapat menerima
+  jawaban terkunci walau percobaan itu ternyata benar.
+- Pada batas total, sesi dicabut dulu baru hitungan dimulai dari nol.
+- Ganti PIN dan reset PIN hanya mereset `scope:pin` dan `scope:manager-approval`. Sebelumnya semua
+  lingkup ikut terhapus, sehingga orang yang tahu PIN bisa menebak password tanpa batas dengan
+  berulang kali mengganti PIN. Reset PIN oleh owner tetap mereset semua lingkup.
 - Pemeriksaan PIN lama (`PUT /api/system/users/me/pin`) memakai penghitung yang
   sama dengan `/api/auth/unlock`. Pemeriksaan password (`/api/auth/reset-pin`,
   `PUT /api/system/users/me/password`) memakai lingkup `scope:password`.
@@ -98,7 +119,8 @@ saat diulang, berapa pun umurnya.
   `receivable_payments.idempotency_key` wajib diisi tetapi tidak di-set.
 - Kini menerima field opsional `idempotencyKey`. Bila dikirim, retry dengan key
   yang sama mengembalikan hasil yang sama tanpa mencatat pembayaran dua kali.
-- Retry dianggap sama bila transaksi, nominal, dan metode bayarnya sama. Selain itu
+- Retry dianggap sama bila entri itu pembayaran (bukan reversal) serta transaksi, nominal, dan
+  metode bayarnya sama. Selain itu
   dijawab 400 `VALIDATION_ERROR` "Idempotency key sudah dipakai untuk pembayaran lain".
 - ID transaksi yang formatnya salah kini dijawab 400, bukan 500.
 
@@ -137,9 +159,13 @@ Pesan 409 sync offline (semuanya baru):
 | Kode | Pesan |
 |---|---|
 | `OFFLINE_OPENED_AT_INVALID` | Pelanggaran business rule: Waktu buka sesi kas offline berada di masa depan |
-| | Pelanggaran business rule: Waktu buka sesi kas offline lebih dari 24 jam yang lalu |
+| | Pelanggaran business rule: Waktu buka sesi kas offline lebih dari {OFFLINE_MAX_SESSION_AGE_HOURS} jam yang lalu |
 | `OFFLINE_OCCURRED_AT_INVALID` | Pelanggaran business rule: Waktu transaksi offline lebih awal dari pembukaan sesi kas (session invalid) |
 | | Pelanggaran business rule: Waktu transaksi offline berada di masa depan |
+| | Pelanggaran business rule: Waktu pengeluaran kas offline lebih awal dari pembukaan sesi kas (session invalid) |
+| | Pelanggaran business rule: Waktu pengeluaran kas offline berada di masa depan |
+| `OFFLINE_CLOSED_AT_INVALID` | Pelanggaran business rule: Waktu tutup sesi kas offline lebih awal dari pembukaan sesi kas (session invalid) |
+| | Pelanggaran business rule: Waktu tutup sesi kas offline berada di masa depan |
 | `OFFLINE_ROUNDING_CONFLICT` | Pelanggaran business rule: {alasan pembulatan} |
 | `OFFLINE_TAX_CONFLICT` | Pelanggaran business rule pajak: {status, mode, atau tarif} pajak transaksi offline berbeda dari pengaturan toko |
 | `OFFLINE_PRICE_CONFLICT` | Pelanggaran business rule harga: harga {produk} (Rp {harga}) tidak sesuai daftar harga server |
@@ -165,6 +191,8 @@ Bila satu request melanggar beberapa aturan, error yang dikirim bisa berbeda dar
 - **`checkout/sync`:** key dan kepemilikan → duplikat → format dan aritmetika → kasir → sesi → `occurredAt` →
   pembulatan → pajak → stok → item → harga → total → pembayaran. Artinya konflik waktu, pembulatan,
   atau pajak muncul lebih dulu daripada stok tidak cukup, dan konflik harga sesudahnya.
+- **`cash-expenses/sync`:** key dan kepemilikan → format → duplikat → sesi → sesi sudah ditutup → `occurredAt`.
+- **`sessions/sync/close`:** format → sesi → kepemilikan → sudah ditutup (`DUPLICATE`/`ALREADY_CLOSED`) → `closedAt`.
 - **`/transactions/{id}/pay`:** idempotensi diperiksa sebelum status lunas dan sisa hutang, jadi retry
   yang terlambat dijawab sukses walau transaksinya sudah lunas.
 
@@ -180,8 +208,8 @@ Bila satu request melanggar beberapa aturan, error yang dikirim bisa berbeda dar
    (sesi lama sudah dicabut di server).
 3. **Sync offline** — tangani HTTP 409 kode `OFFLINE_*` sebagai konflik yang
    perlu ditinjau (sudah otomatis lewat kata kunci "business rule"), termasuk
-   `OFFLINE_OPENED_AT_INVALID` dari `sessions/sync/open`. Sesi offline wajib di-sync
-   dalam 24 jam; beri peringatan ke kasir sebelum batas itu terlewati.
+   `OFFLINE_OPENED_AT_INVALID` dari `sessions/sync/open` dan `OFFLINE_CLOSED_AT_INVALID` dari
+   `sessions/sync/close`. Sesi offline wajib di-sync dalam `OFFLINE_MAX_SESSION_AGE_HOURS` (default 72 jam); beri peringatan ke kasir sebelum batas itu terlewati.
 4. **Satuan sekunder di sync offline** — perangkat mengirim `quantity` dalam
    satuan sekunder (mis. dus) sementara server mencatat stok dalam satuan dasar,
    jadi stok berkurang terlalu sedikit. Server kini mengenali harganya, tetapi

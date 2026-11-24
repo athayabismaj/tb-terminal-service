@@ -32,7 +32,7 @@ src/main/kotlin/com/service/tbterminal/
   sales/       sesi kas, checkout online/offline (OfflineCheckoutGuard), void, refund, diskon, quotation
   receivable/  pelanggan & piutang    purchasing/  supplier & pembelian
   analytics/   laporan & CSV          backup/      pg_dump/pg_restore
-src/main/resources/db/migration/   Flyway V1..V45
+src/main/resources/db/migration/   Flyway V1..V46
 docs/                               DEPLOYMENT, TESTING, BACKUP_RESTORE, SECURITY_HARDENING, UAT_CHECKLIST
 ```
 
@@ -59,7 +59,8 @@ Route tipis; aturan bisnis di Service; SQL hanya di Repository.
   Role hanya dari `Role.OWNER/ADMIN/KASIR`, jangan hardcode string.
 - BCrypt selalu di dalam `withContext(Dispatchers.IO)`. Jangan me-log PIN, password, atau token.
 - Verifikasi PIN/password apa pun WAJIB lewat `PinVerificationService` / `CredentialAttemptGuard`
-  (lockout per user + scope). Jangan memanggil `BCrypt.checkpw` untuk kredensial user tanpa lockout.
+  (lockout per user + scope), dengan urutan `reserve` → periksa → `release`. Jangan memanggil
+  `BCrypt.checkpw` untuk kredensial user sebelum reservasi.
 - IP klien: `call.clientIpAddress()`. JANGAN membaca header `X-Forwarded-For` secara langsung.
 - Nilai uang dari klien (terutama sync offline) tidak boleh dipercaya. Harga, HPP, pajak, dan pembulatan
   harus bisa dijelaskan oleh data server (lihat `OfflineCheckoutGuard`).
