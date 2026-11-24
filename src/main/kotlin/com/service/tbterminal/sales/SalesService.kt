@@ -72,11 +72,16 @@ class SalesService(private val repository: SalesRepository) {
 
         repository.findOfflineSyncedCashSession(deviceId, clientGeneratedId, cashierUserId)?.let { return it }
 
+        // Setelah cek duplikat: retry sesi yang sudah tersimpan tetap dijawab DUPLICATE.
+        val openedAt = parseSyncOccurredAt(request.openedAt)
+        OfflineCheckoutGuard.validateOpenedAt(openedAt, OffsetDateTime.now())
+            ?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_OPENED_AT_INVALID, it) }
+
         val command = OfflineCashSessionOpenSyncCommand(
             clientGeneratedId = clientGeneratedId,
             deviceId = deviceId,
             cashierUserId = cashierUserId,
-            openedAt = parseSyncOccurredAt(request.openedAt),
+            openedAt = openedAt,
             startingCash = request.startingCash.normalizeMoney(),
             openingNote = request.openingNote?.trim()?.takeIf(String::isNotBlank)
         )

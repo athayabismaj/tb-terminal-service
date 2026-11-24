@@ -129,4 +129,38 @@ class OfflineCheckoutGuardTest {
         assertNotNull(OfflineCheckoutGuard.validateOccurredAt(opened.minusDays(3), opened, now))
         assertNotNull(OfflineCheckoutGuard.validateOccurredAt(now.plusDays(1), opened, now))
     }
+
+    @Test
+    fun `waktu buka sesi wajib dekat dengan waktu server`() {
+        val now = OffsetDateTime.parse("2026-11-24T12:00:00+07:00")
+        assertNull(OfflineCheckoutGuard.validateOpenedAt(now, now))
+        assertNull(OfflineCheckoutGuard.validateOpenedAt(now.plusMinutes(5), now))
+        assertNotNull(OfflineCheckoutGuard.validateOpenedAt(now.plusMinutes(5).plusSeconds(1), now))
+        assertNull(OfflineCheckoutGuard.validateOpenedAt(now.minusHours(24), now))
+        assertNotNull(OfflineCheckoutGuard.validateOpenedAt(now.minusHours(24).minusSeconds(1), now))
+    }
+
+    @Test
+    fun `awal jendela tepercaya tidak lebih tua dari 24 jam sebelum sesi tercatat di server`() {
+        val recordedAt = OffsetDateTime.parse("2026-11-24T12:00:00+07:00")
+        assertEquals(
+            recordedAt.minusHours(3),
+            OfflineCheckoutGuard.trustedWindowStart(recordedAt.minusHours(3), recordedAt)
+        )
+        assertEquals(
+            recordedAt.minusHours(24),
+            OfflineCheckoutGuard.trustedWindowStart(recordedAt.minusDays(30), recordedAt)
+        )
+    }
+
+    @Test
+    fun `semua pesan konflik offline memuat frasa business rule tepat sekali`() {
+        OfflineConflictCode.entries.forEach { code ->
+            listOf("detail biasa", "Pelanggaran business rule pajak: detail").forEach { detail ->
+                val error = offlineConflict(code, detail)
+                assertEquals(code.name, error.code)
+                assertEquals(1, Regex("business rule").findAll(error.message.orEmpty()).count(), error.message)
+            }
+        }
+    }
 }

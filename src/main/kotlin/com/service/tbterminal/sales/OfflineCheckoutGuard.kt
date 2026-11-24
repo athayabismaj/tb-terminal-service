@@ -23,6 +23,9 @@ internal object OfflineCheckoutGuard {
     /** Toleransi selisih jam perangkat terhadap server. */
     val CLOCK_SKEW: Duration = Duration.ofMinutes(5)
 
+    /** Umur maksimum sesi kas offline saat pertama kali tercatat di server. */
+    val MAX_OFFLINE_SESSION_AGE: Duration = Duration.ofHours(24)
+
     /**
      * Mencari faktor satuan yang menjelaskan harga offline.
      *
@@ -118,6 +121,28 @@ internal object OfflineCheckoutGuard {
             return "Pelanggaran business rule pajak: tarif pajak transaksi offline berbeda dari pengaturan toko"
         }
         return null
+    }
+
+    /** Waktu buka sesi berasal dari jam perangkat, jadi wajib dekat dengan waktu server. */
+    fun validateOpenedAt(openedAt: OffsetDateTime, now: OffsetDateTime): String? {
+        if (openedAt.isAfter(now.plus(CLOCK_SKEW))) {
+            return "Waktu buka sesi kas offline berada di masa depan"
+        }
+        if (openedAt.isBefore(now.minus(MAX_OFFLINE_SESSION_AGE))) {
+            return "Waktu buka sesi kas offline lebih dari ${MAX_OFFLINE_SESSION_AGE.toHours()} jam yang lalu"
+        }
+        return null
+    }
+
+    /**
+     * Awal jendela riwayat harga dan perubahan pengaturan yang boleh menjelaskan snapshot offline.
+     *
+     * [serverRecordedAt] (jam server) membatasi jendela ini sehingga `openedAt` yang dimundurkan
+     * tidak bisa menghidupkan harga lama atau melonggarkan validasi pajak dan pembulatan.
+     */
+    fun trustedWindowStart(openedAt: OffsetDateTime, serverRecordedAt: OffsetDateTime): OffsetDateTime {
+        val earliestTrusted = serverRecordedAt.minus(MAX_OFFLINE_SESSION_AGE)
+        return if (openedAt.isAfter(earliestTrusted)) openedAt else earliestTrusted
     }
 
     /** Waktu transaksi offline wajib berada di dalam rentang sesi kas. */

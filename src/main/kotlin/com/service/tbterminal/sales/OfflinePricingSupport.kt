@@ -33,7 +33,7 @@ internal data class OfflinePricingContext(
 internal fun loadOfflinePricingContext(
     customerId: UUID?,
     productIds: List<UUID>,
-    sessionOpenedAt: OffsetDateTime
+    windowStart: OffsetDateTime
 ): OfflinePricingContext {
     val distinctIds = productIds.distinct()
     val tierPricing = loadSalesTierPricingContext(customerId, distinctIds)
@@ -48,12 +48,12 @@ internal fun loadOfflinePricingContext(
             valueTransform = { it[UnitConversionsTable.factor] }
         )
 
-    // Harga lama yang masih berlaku saat sesi dibuka: perangkat offline mungkin
+    // Harga lama yang masih berlaku di awal jendela tepercaya: perangkat offline mungkin
     // belum menerima perubahan harga yang terjadi setelah sesi dimulai.
     val historicalPrices = PriceHistoryTable
         .select {
             (PriceHistoryTable.productId inList distinctIds) and
-                (PriceHistoryTable.changedAt greaterEq sessionOpenedAt)
+                (PriceHistoryTable.changedAt greaterEq windowStart)
         }
         .groupBy(keySelector = { it[PriceHistoryTable.productId] })
         .mapValues { (_, rows) ->

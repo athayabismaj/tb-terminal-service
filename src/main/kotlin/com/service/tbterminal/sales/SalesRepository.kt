@@ -15,7 +15,6 @@ import com.service.tbterminal.receivable.ReceivablesTable
 import com.service.tbterminal.receivable.ensureReceivableCreditLimit
 import com.service.tbterminal.receivable.receivableToday
 import com.service.tbterminal.receivable.validatePaymentIdempotencyKey
-import com.service.tbterminal.shared.BusinessConflictException
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.SessionNotFoundException
 import com.service.tbterminal.shared.StockInsufficientException
@@ -1040,17 +1039,21 @@ class SalesRepositoryImpl(
 
         val sessionOpenedAt = session[CashSessionsTable.openedAt]
         OfflineCheckoutGuard.validateOccurredAt(command.occurredAt, sessionOpenedAt, OffsetDateTime.now())
-            ?.let { throw BusinessConflictException("OFFLINE_OCCURRED_AT_INVALID", it) }
+            ?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_OCCURRED_AT_INVALID, it) }
 
+        val windowStart = OfflineCheckoutGuard.trustedWindowStart(
+            openedAt = sessionOpenedAt,
+            serverRecordedAt = session[CashSessionsTable.offlineSyncedAt] ?: session[CashSessionsTable.createdAt]
+        )
         val storeSettings = StoreSettingsTable.selectAll().limit(1).singleOrNull()
             ?: throw ValidationException("Pengaturan toko belum tersedia")
-        val settingsChangedDuringSession = storeSettings[StoreSettingsTable.updatedAt].isAfter(sessionOpenedAt)
+        val settingsChangedDuringSession = storeSettings[StoreSettingsTable.updatedAt].isAfter(windowStart)
         OfflineCheckoutGuard.validateRounding(
             roundingAmount = command.roundingAmount,
             totalAfterRounding = command.total,
             currentRoundingUnit = storeSettings[StoreSettingsTable.cashRoundingUnit],
             settingsChangedDuringSession = settingsChangedDuringSession
-        )?.let { throw BusinessConflictException("OFFLINE_ROUNDING_CONFLICT", "Pelanggaran business rule: $it") }
+        )?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_ROUNDING_CONFLICT, it) }
         OfflineCheckoutGuard.validateTaxSnapshot(
             requestTaxEnabled = command.taxEnabled,
             requestTaxMode = command.taxMode?.name,
@@ -1059,13 +1062,13 @@ class SalesRepositoryImpl(
             storeTaxMode = storeSettings[StoreSettingsTable.taxMode].name,
             storeTaxRate = storeSettings[StoreSettingsTable.taxRate],
             settingsChangedDuringSession = settingsChangedDuringSession
-        )?.let { throw BusinessConflictException("OFFLINE_TAX_CONFLICT", it) }
+        )?.let { throw offlineConflict(OfflineConflictCode.OFFLINE_TAX_CONFLICT, it) }
 
         val lockedStockIds = lockAndValidateOfflineStocks(command.items)
         val pricingContext = loadOfflinePricingContext(
             customerId = command.customerId,
             productIds = command.items.map(OfflineCheckoutSyncItemCommand::productId),
-            sessionOpenedAt = sessionOpenedAt
+            windowStart = windowStart
         )
         val resolvedItems = command.items.map { item -> resolveItemForOfflineSync(item, pricingContext) }
         val itemTotal = resolvedItems.fold(BigDecimal.ZERO) { total, item -> total.add(item.subtotal) }
@@ -1275,8 +1278,8 @@ class SalesRepositoryImpl(
                 pricingContext.tierPricing.resolveUnitPrice(product, baseQuantity)
             },
             historicalBaseUnitPrices = pricingContext.historicalPricesByProduct[item.productId].orEmpty()
-        ) ?: throw BusinessConflictException(
-            "OFFLINE_PRICE_CONFLICT",
+        ) ?: throw offlineConflict(
+            OfflineConflictCode.OFFLINE_PRICE_CONFLICT,
             "Pelanggaran business rule harga: harga ${product[ProductsTable.name]} " +
                 "(Rp ${item.priceAtTransaction.normalizeMoney().toPlainString()}) tidak sesuai daftar harga server"
         )
@@ -2178,6 +2181,7 @@ class SalesRepositoryImpl(
             it.dbValue.equals(request.method, ignoreCase = true)
         }?.takeIf { it in setOf(PaymentMethod.TUNAI, PaymentMethod.TRANSFER, PaymentMethod.QRIS) }
             ?: throw ValidationException("Metode pembayaran harus tunai, transfer, atau qris")
+        val receivableMethod = methodEnum.toReceivablePaymentMethod()
 
         // Urutan lock sama dengan endpoint pembayaran piutang: receivable lalu transaction.
         val receivableRow = ReceivablesTable.select {
@@ -2198,7 +2202,8 @@ class SalesRepositoryImpl(
                 .singleOrNull()
             if (existing != null) {
                 val samePayment = existing[ReceivablePaymentsTable.receivableId] == receivableRow[ReceivablesTable.id] &&
-                    existing[ReceivablePaymentsTable.amount].compareTo(request.amount) == 0
+                    existing[ReceivablePaymentsTable.amount].compareTo(request.amount) == 0 &&
+                    existing[ReceivablePaymentsTable.method] == receivableMethod
                 if (!samePayment) {
                     throw ValidationException("Idempotency key sudah dipakai untuk pembayaran lain")
                 }
@@ -2233,12 +2238,7 @@ class SalesRepositoryImpl(
             it[this.userId] = userId
             it[amount] = request.amount
             it[this.idempotencyKey] = idempotencyKey ?: "sales-pay-${UUID.randomUUID()}"
-            it[method] = when (methodEnum) {
-                PaymentMethod.TUNAI -> RecPaymentMethod.TUNAI
-                PaymentMethod.TRANSFER -> RecPaymentMethod.TRANSFER
-                PaymentMethod.QRIS -> RecPaymentMethod.QRIS
-                else -> error("Metode pembayaran piutang tidak valid")
-            }
+            it[method] = receivableMethod
         }
 
         val newPaidAmount = currentPaid.add(request.amount).min(total)
@@ -2272,6 +2272,13 @@ class SalesRepositoryImpl(
         getTransactionByIdInTransaction(transactionId)
             ?: throw NotFoundException("Transaksi tidak ditemukan setelah pembayaran")
     }
+}
+
+private fun PaymentMethod.toReceivablePaymentMethod(): RecPaymentMethod = when (this) {
+    PaymentMethod.TUNAI -> RecPaymentMethod.TUNAI
+    PaymentMethod.TRANSFER -> RecPaymentMethod.TRANSFER
+    PaymentMethod.QRIS -> RecPaymentMethod.QRIS
+    else -> error("Metode pembayaran piutang tidak valid")
 }
 
 private fun parseStartDate(value: String?): OffsetDateTime? {
