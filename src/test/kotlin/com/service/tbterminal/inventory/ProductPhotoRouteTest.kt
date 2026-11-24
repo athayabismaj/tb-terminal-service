@@ -348,6 +348,8 @@ class ProductPhotoRouteTest {
                     productName = "Semen Tiga Roda",
                     categoryName = "Semen",
                     unitName = "Sak",
+                    baseUnitId = "00000000-0000-0000-0000-000000000001",
+                    baseUnitName = "Sak",
                     quantity = BigDecimal("15.00"),
                     minStock = BigDecimal("10.00"),
                     priceBuy = BigDecimal("50000.00"),

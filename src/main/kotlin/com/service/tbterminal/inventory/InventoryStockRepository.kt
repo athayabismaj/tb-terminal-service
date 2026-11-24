@@ -130,9 +130,10 @@ internal class InventoryStockRepository {
                     }
                 }
         }
+        val unitsByProduct = loadProductUnits(productIds)
         val data = rows.map { row ->
             val pid = row[VStockDetailView.productId]
-            toStockDetailResponse(row, tiersByProduct[pid].orEmpty())
+            toStockDetailResponse(row, tiersByProduct[pid].orEmpty(), unitsByProduct.getValue(pid))
         }
         PaginatedResponse(data, totalCount, (offset / limit) + 1, limit, totalPages(totalCount, limit))
     }
@@ -222,7 +223,8 @@ internal class InventoryStockRepository {
 
     private fun toStockDetailResponse(
         row: ResultRow,
-        priceTiers: List<ProductPriceTierDto> = emptyList(),
+        priceTiers: List<ProductPriceTierDto>,
+        units: ProductUnits,
     ): StockDetailResponse {
         return StockDetailResponse(
             productId = row[VStockDetailView.productId].toString(),
@@ -238,6 +240,11 @@ internal class InventoryStockRepository {
             isActive = row[VStockDetailView.isActive],
             photoUrl = row[VStockDetailView.photoFilename],
             priceTiers = priceTiers,
+            baseUnitId = units.baseUnitId.toString(),
+            baseUnitName = row[VStockDetailView.unitName],
+            secondaryUnitId = units.secondary?.unitId?.toString(),
+            secondaryUnitName = units.secondary?.unitName,
+            secondaryUnitFactor = units.secondary?.factor,
         )
     }
 
