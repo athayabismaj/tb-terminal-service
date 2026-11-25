@@ -5,7 +5,7 @@
 1. Pilih jalur:
    - Agent yang membaca file dari repo (misalnya Claude Code): simpan file ini di `docs/AGENT_PROMPT_REFACTOR.md`, lalu tulis: *"Baca docs/AGENT_PROMPT_REFACTOR.md. Kerjakan Fase 0 saja."*
    - Agent tanpa akses file (chat): tempel **Prompt Utama** dulu, lalu tempel satu blok **Fase** per sesi.
-2. Kerjakan **satu fase = satu branch/PR**. Review dan merge dulu sebelum lanjut ke fase berikutnya.
+2. Kerjakan **satu fase = satu branch**. Agent tidak commit, push, tag, merge, atau rebase (CLAUDE.md aturan 7): agent mengubah file, melapor, dan mengusulkan pesan commit. Pemilik repo yang me-review, commit, dan merge sebelum fase berikutnya.
 3. Fase B1–B3 (Android) dijalankan di repo `tb-terminal-app`, di sesi terpisah.
 
 ---
@@ -32,8 +32,8 @@ ATURAN GLOBAL
    dan tanyakan dulu.
 3. Jangan mengubah file migrasi Flyway yang sudah ada (V1–V45). Perubahan
    skema selalu lewat file V berikutnya.
-4. Pindahkan kode dulu, baru perbaiki. Commit "move/extract" dipisah dari
-   commit "rename/cleanup" supaya diff mudah direview.
+4. Pindahkan kode dulu, baru perbaiki. Usulkan pesan commit terpisah untuk
+   "move/extract" dan "rename/cleanup" supaya diff mudah direview.
 5. Setiap langkah harus lulus `./gradlew test`. Jangan menghapus, melewati
    (@Ignore), atau melemahkan test supaya lulus. Kalau sebuah test memang
    salah, jelaskan alasannya di laporan.
@@ -45,6 +45,8 @@ ATURAN GLOBAL
    < 400 baris; fungsi < 60 baris; tanpa nama kelas fully-qualified di
    badan kode (pakai import).
 8. Jangan menambah dependency baru tanpa persetujuan.
+9. JANGAN commit, push, tag, merge, atau rebase (CLAUDE.md aturan 7). Cukup
+   ubah file, lalu usulkan pembagian dan pesan commit di laporan.
 
 FORMAT LAPORAN DI AKHIR SETIAP FASE
 - Ringkasan perubahan (maksimal 10 poin)
@@ -52,7 +54,7 @@ FORMAT LAPORAN DI AKHIR SETIAP FASE
 - Hasil `./gradlew test`: jumlah lulus/gagal, sebelum vs sesudah
 - Konfirmasi: "Kontrak API tidak berubah", atau daftar perubahan beserta alasannya
 - Temuan di luar scope
-- Usulan pesan commit/PR
+- Usulan pembagian dan pesan commit/PR
 ```
 
 ---
@@ -66,7 +68,8 @@ lulus. Patch ini ditulis TANPA sempat dikompilasi terhadap dependency asli,
 jadi kemungkinan ada error kompilasi kecil.
 
 LANGKAH
-1. git checkout -b security-hardening && git am security-hardening.patch
+1. Buat branch security-hardening, terapkan isi security-hardening.patch ke
+   working tree (git apply, tanpa commit), lalu usulkan pesan commit.
 2. ./gradlew compileKotlin compileTestKotlin, lalu perbaiki semua error.
    Titik yang paling mungkin bermasalah (cek API-nya untuk versi yang dipakai):
    - SystemRepository.incrementPinFailure: exec(..., args = listOf(
@@ -166,9 +169,9 @@ STRUKTUR TARGET (package com.service.tbterminal.sales)
 (Nama file boleh disesuaikan, asalkan tiap file punya satu tanggung jawab.)
 
 LANGKAH
-1. Commit 1: PINDAHKAN kode apa adanya ke class internal baru;
+1. Langkah 1 (usulkan pesan commit tersendiri): PINDAHKAN kode apa adanya ke class internal baru;
    SalesRepositoryImpl hanya mendelegasikan. Belum ada rename sama sekali.
-2. Commit 2: rapikan: helper privat yang dipakai lebih dari satu store pindah
+2. Langkah 2 (usulkan pesan commit tersendiri): rapikan: helper privat yang dipakai lebih dari satu store pindah
    ke *Support.kt; pecah fungsi > 60 baris (terutama executeCheckout dan
    executeOfflineCheckoutSync) menjadi langkah bernama, mis.
    validateSession -> lockStocks -> resolveItems -> resolvePayments ->
@@ -181,7 +184,7 @@ LANGKAH
 SELESAI BILA
 - Tidak ada file di sales/ yang > 500 baris.
 - IntegrationTest checkout/void/refund/offline sync/bayar hutang hijau.
-- Diff commit 1 bisa direview sebagai "pure move".
+- Diff langkah 1 bisa direview sebagai "pure move".
 ```
 
 ---
@@ -198,7 +201,7 @@ TARGET
    role), StoreSettingsService (settings & store profile),
    AuditLogService. Bisa dimulai dengan menjadikan SystemService facade agar
    route tidak perlu langsung berubah, lalu memindahkan route ke service yang
-   tepat di commit berikutnya.
+   tepat di langkah berikutnya (usulkan pesan commit terpisah).
 2. SystemRepository.kt (669) -> UserRepository, CredentialAttemptRepository
    (implementasi PinAttemptStore), RefreshTokenRepository,
    StoreSettingsRepository, AuditLogRepository.
@@ -210,7 +213,7 @@ TARGET
    (…Tables.kt) dari DTO request/response (…Dto.kt).
 
 ATURAN
-- Satu target = satu commit (atau lebih), urutan seperti di atas.
+- Satu target = satu usulan pesan commit (atau lebih), urutan seperti di atas.
 - Daftarkan class baru di AppModule (Koin). Jangan memakai service locator
   di dalam class.
 - Route cukup ganti dependency; isi handler tidak berubah.
@@ -302,7 +305,8 @@ Ada sekitar 164 pemakaian `Table.select { ... }` (deprecated di Exposed
 versi baru). Kerjakan HANYA setelah Fase 0–4 selesai dan test hijau.
 1. Upgrade Exposed ke versi stabil terbaru yang kompatibel dengan Kotlin
    dan Flyway proyek. Tanyakan dulu sebelum upgrade.
-2. Ganti dengan `selectAll().where { ... }` per modul, satu commit per modul.
+2. Ganti dengan `selectAll().where { ... }` per modul; usulkan satu
+   pesan commit per modul.
 3. Jangan mencampur dengan perubahan logika.
 ```
 

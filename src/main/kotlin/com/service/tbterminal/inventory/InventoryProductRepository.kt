@@ -225,6 +225,15 @@ internal class InventoryProductRepository {
         secondaryUnitId: UUID?,
         factor: BigDecimal?
     ) {
+        // Konversi yang sama tidak ditulis ulang: setiap penghapusan tercatat sebagai perubahan faktor.
+        val current = UnitConversionsTable.select { UnitConversionsTable.productId eq productId }.toList()
+        val unchanged = current.singleOrNull()?.let {
+            it[UnitConversionsTable.fromUnitId] == secondaryUnitId &&
+                it[UnitConversionsTable.toUnitId] == baseUnitId &&
+                factor?.compareTo(it[UnitConversionsTable.factor]) == 0
+        } ?: false
+        if (unchanged) return
+
         UnitConversionsTable.deleteWhere { UnitConversionsTable.productId eq productId }
         if (secondaryUnitId != null && factor != null) {
             UnitConversionsTable.insert {

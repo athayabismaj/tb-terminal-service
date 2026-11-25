@@ -1,8 +1,8 @@
 package com.service.tbterminal.sales
 
 import com.service.tbterminal.inventory.UnitConversionsTable
+import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.Table
-import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
 import org.jetbrains.exposed.sql.select
 import java.math.BigDecimal
@@ -20,6 +20,18 @@ internal object PriceHistoryTable : Table("inventory.price_history") {
     override val primaryKey = PrimaryKey(id)
 }
 
+/** Faktor konversi lama (diisi trigger `inventory.fn_log_unit_conversion_history`). */
+internal object UnitConversionHistoryTable : Table("inventory.unit_conversion_history") {
+    val id = uuid("id")
+    val productId = uuid("product_id")
+    val fromUnitId = uuid("from_unit_id")
+    val toUnitId = uuid("to_unit_id")
+    val oldFactor = decimal("old_factor", 10, 4)
+    val changedAt = timestampWithTimeZone("changed_at")
+
+    override val primaryKey = PrimaryKey(id)
+}
+
 /**
  * Konteks harga yang dipakai server untuk memvalidasi harga checkout offline.
  * Wajib dimuat di dalam transaksi database yang sedang berjalan.
@@ -27,13 +39,24 @@ internal object PriceHistoryTable : Table("inventory.price_history") {
 internal data class OfflinePricingContext(
     val tierPricing: SalesTierPricingContext,
     private val unitsByProduct: Map<UUID, List<ProductUnitRow>>,
-    val historicalPricesByProduct: Map<UUID, Set<BigDecimal>>
+    val historicalPricesByProduct: Map<UUID, Set<BigDecimal>>,
+    private val everUnitsByProduct: Map<UUID, List<ProductUnitRow>>,
+    private val everPricesByProduct: Map<UUID, Set<BigDecimal>>
 ) {
-    /** Hanya konversi yang bermuara ke satuan dasar produk yang boleh menentukan stok. */
+    /**
+     * Hanya konversi yang bermuara ke satuan dasar produk yang boleh menentukan stok. Satu satuan bisa
+     * muncul lebih dari sekali: faktor saat ini lebih dulu, lalu faktor lama di dalam jendela tepercaya.
+     */
     fun secondaryUnits(productId: UUID, baseUnitId: UUID): List<OfflineProductUnit> =
-        unitsByProduct[productId].orEmpty()
-            .filter { it.toUnitId == baseUnitId }
-            .map(ProductUnitRow::unit)
+        unitsByProduct[productId].towards(baseUnitId)
+
+    fun rejectOnlyHistory(productId: UUID, baseUnitId: UUID) = OfflineUnitHistory(
+        units = everUnitsByProduct[productId].towards(baseUnitId),
+        baseUnitPrices = everPricesByProduct[productId].orEmpty()
+    )
+
+    private fun List<ProductUnitRow>?.towards(baseUnitId: UUID): List<OfflineProductUnit> =
+        orEmpty().filter { it.toUnitId == baseUnitId }.map(ProductUnitRow::unit)
 }
 
 internal data class ProductUnitRow(val unit: OfflineProductUnit, val toUnitId: UUID)
@@ -46,10 +69,12 @@ internal fun loadOfflinePricingContext(
     val distinctIds = productIds.distinct()
     val tierPricing = loadSalesTierPricingContext(customerId, distinctIds)
     if (distinctIds.isEmpty()) {
-        return OfflinePricingContext(tierPricing, emptyMap(), emptyMap())
+        return OfflinePricingContext(tierPricing, emptyMap(), emptyMap(), emptyMap(), emptyMap())
     }
 
-    val units = UnitConversionsTable
+    // Urutan baca penting: perubahan yang di-commit di antara kedua query tetap terlihat sebagai
+    // faktor saat ini (query pertama) sekaligus riwayat, bukan hilang dari keduanya.
+    val currentUnits = UnitConversionsTable
         .select { UnitConversionsTable.productId inList distinctIds }
         .groupBy(
             keySelector = { it[UnitConversionsTable.productId] },
@@ -60,30 +85,43 @@ internal fun loadOfflinePricingContext(
                 )
             }
         )
-
-    // Harga lama yang masih berlaku di awal jendela tepercaya: perangkat offline mungkin
-    // belum menerima perubahan harga yang terjadi setelah sesi dimulai.
-    val historicalPrices = PriceHistoryTable
-        .select {
-            (PriceHistoryTable.productId inList distinctIds) and
-                (PriceHistoryTable.changedAt greaterEq windowStart)
+    // Riwayat dibaca seluruhnya: yang di dalam jendela tepercaya boleh menjelaskan transaksi (perangkat
+    // offline mungkin belum menerima perubahan setelah sesi dimulai), sisanya hanya boleh menolak.
+    val everUnits = UnitConversionHistoryTable
+        .select { UnitConversionHistoryTable.productId inList distinctIds }
+        .orderBy(UnitConversionHistoryTable.changedAt to SortOrder.DESC)
+        .map {
+            Dated(
+                it[UnitConversionHistoryTable.productId], it[UnitConversionHistoryTable.changedAt],
+                ProductUnitRow(
+                    unit = OfflineProductUnit(
+                        it[UnitConversionHistoryTable.fromUnitId], it[UnitConversionHistoryTable.oldFactor]
+                    ),
+                    toUnitId = it[UnitConversionHistoryTable.toUnitId]
+                )
+            )
         }
-        .groupBy(keySelector = { it[PriceHistoryTable.productId] })
-        .mapValues { (_, rows) ->
-            buildSet {
-                rows.forEach { row ->
-                    add(row[PriceHistoryTable.oldPriceRetail])
-                    val oldContractor = row[PriceHistoryTable.oldPriceContractor]
-                    if (tierPricing.isContractorCustomer && oldContractor > BigDecimal.ZERO) {
-                        add(oldContractor)
-                    }
-                }
-            }
+    val trustedUnits = everUnits.since(windowStart).byProduct()
+    val everPrices = PriceHistoryTable
+        .select { PriceHistoryTable.productId inList distinctIds }
+        .flatMap { row ->
+            val oldContractor = row[PriceHistoryTable.oldPriceContractor]
+                .takeIf { tierPricing.isContractorCustomer && it > BigDecimal.ZERO }
+            listOfNotNull(row[PriceHistoryTable.oldPriceRetail], oldContractor)
+                .map { Dated(row[PriceHistoryTable.productId], row[PriceHistoryTable.changedAt], it) }
         }
 
     return OfflinePricingContext(
         tierPricing = tierPricing,
-        unitsByProduct = units,
-        historicalPricesByProduct = historicalPrices
+        unitsByProduct = distinctIds.associateWith { currentUnits[it].orEmpty() + trustedUnits[it].orEmpty() },
+        historicalPricesByProduct = everPrices.since(windowStart).byProduct().mapValues { (_, prices) -> prices.toSet() },
+        everUnitsByProduct = everUnits.byProduct(),
+        everPricesByProduct = everPrices.byProduct().mapValues { (_, prices) -> prices.toSet() }
     )
 }
+
+private data class Dated<T>(val productId: UUID, val changedAt: OffsetDateTime, val value: T)
+
+private fun <T> List<Dated<T>>.since(start: OffsetDateTime) = filter { !it.changedAt.isBefore(start) }
+
+private fun <T> List<Dated<T>>.byProduct(): Map<UUID, List<T>> = groupBy({ it.productId }, { it.value })

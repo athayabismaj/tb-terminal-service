@@ -27,9 +27,12 @@ class OfflineUnitResolverTest {
         units: List<OfflineProductUnit> = emptyList(),
         client: OfflineItemUnit? = null,
         history: Set<BigDecimal> = emptySet(),
+        everUnits: List<OfflineProductUnit> = emptyList(),
+        everPrices: Set<BigDecimal> = emptySet(),
         expected: (BigDecimal) -> BigDecimal = { retail }
     ) = OfflineUnitResolver.resolve(
-        BigDecimal(quantity), BigDecimal(price), client, pcs, units, expected, history
+        BigDecimal(quantity), BigDecimal(price), client, pcs, units, expected, history,
+        OfflineUnitHistory(everUnits, everPrices)
     )
 
     private fun dusOf(factor: String) = listOf(OfflineProductUnit(dus, BigDecimal(factor)))
@@ -179,6 +182,9 @@ class OfflineUnitResolverTest {
             resolve("2", "0", dusOf("12"), client(dus, "24"), expected = free),
             "24.00", "0.00", OfflineUnitSource.CLIENT_UNIT, dus
         )
+        // Satuan sekunder yang sudah lama dihapus tetap membuat jumlahnya tidak pasti.
+        assertIs<OfflineUnitResolution.UnitConflict>(resolve("2", "0", everUnits = dusOf("12"), expected = free))
+        // Produk yang tidak pernah punya satuan sekunder hanya punya satu tafsir.
         assertResolved(resolve("2", "0", expected = free), "2.00", "0.00", OfflineUnitSource.LEGACY_BASE, pcs)
     }
 
@@ -253,5 +259,154 @@ class OfflineUnitResolverTest {
     fun `pesan konflik satuan memuat business rule`() {
         val message = offlineConflict(OfflineConflictCode.OFFLINE_UNIT_CONFLICT, "satuan").message.orEmpty()
         assertEquals(true, message.contains("business rule"))
+    }
+
+    // --- Faktor lama di dalam jendela sesi ---
+
+    /** Faktor saat ini 10, faktor lama 12. */
+    private val changedDus = dusOf("10.0000") + dusOf("12.0000")
+
+    @Test
+    fun `klien baru boleh memakai faktor saat ini atau faktor lama`() {
+        assertResolved(
+            resolve("2", "120000", changedDus, client(dus, "24")), "24.00", "10000.00", OfflineUnitSource.CLIENT_UNIT, dus
+        )
+        assertResolved(
+            resolve("2", "100000", changedDus, client(dus, "20")), "20.00", "10000.00", OfflineUnitSource.CLIENT_UNIT, dus
+        )
+    }
+
+    @Test
+    fun `harga dan baseQuantity tidak boleh memakai faktor yang berbeda`() {
+        assertIs<OfflineUnitResolution.PriceUnknown>(resolve("2", "100000", changedDus, client(dus, "24")))
+        assertIs<OfflineUnitResolution.PriceUnknown>(resolve("2", "120000", changedDus, client(dus, "20")))
+    }
+
+    @Test
+    fun `pesan konflik menyebut faktor saat ini`() {
+        val conflict = assertIs<OfflineUnitResolution.UnitConflict>(resolve("2", "120000", changedDus, client(dus, "22")))
+        assertEquals("baseQuantity tidak sama dengan quantity x faktor satuan di server (10)", conflict.reason)
+    }
+
+    @Test
+    fun `satuan dasar selalu berfaktor 1 dan faktor lama hanya berlaku untuk satuannya`() {
+        val box = UUID.randomUUID()
+        val units = listOf(
+            OfflineProductUnit(dus, BigDecimal("10")),
+            OfflineProductUnit(box, BigDecimal("12")),
+            OfflineProductUnit(pcs, BigDecimal("12"))
+        )
+        assertIs<OfflineUnitResolution.UnitConflict>(resolve("2", "120000", units, client(dus, "24")))
+        assertIs<OfflineUnitResolution.UnitConflict>(resolve("2", "120000", units, client(pcs, "24")))
+        assertResolved(resolve("2", "120000", units, client(box, "24")), "24.00", "10000.00", OfflineUnitSource.CLIENT_UNIT, box)
+    }
+
+    @Test
+    fun `klien lama dikonversi dengan faktor lama bila hanya itu yang cocok`() {
+        assertResolved(resolve("1", "120000", changedDus), "12.00", "10000.00", OfflineUnitSource.LEGACY_AUTO, dus)
+        assertResolved(resolve("1", "100000", changedDus), "10.00", "10000.00", OfflineUnitSource.LEGACY_AUTO, dus)
+    }
+
+    @Test
+    fun `klien lama ditolak bila faktor lama dan baru sama-sama menjelaskan harga`() {
+        // 120.000 = 10.000 x 12 (faktor lama) = 12.000 x 10 (harga lama).
+        assertIs<OfflineUnitResolution.UnitConflict>(
+            resolve("1", "120000", changedDus, history = setOf(BigDecimal("12000.00")))
+        )
+    }
+
+    @Test
+    fun `faktor yang kembali ke nilai semula tetap menunjuk satuan yang sama`() {
+        assertResolved(
+            resolve("1", "120000", dusOf("12.0000") + dusOf("10.0000") + dusOf("12.0000")),
+            "12.00", "10000.00", OfflineUnitSource.LEGACY_AUTO, dus
+        )
+    }
+
+    // --- Riwayat di luar jendela: hanya untuk menolak ---
+
+    private val oldPrice = setOf(BigDecimal("10000.00"))
+
+    @Test
+    fun `harga satuan dasar yang sama dengan harga dus lama ditolak`() {
+        // Dulu 12 x 10.000; sekarang satuan dasar 120.000 dan dus sudah dihapus.
+        val now: (BigDecimal) -> BigDecimal = { BigDecimal("120000.00") }
+        assertIs<OfflineUnitResolution.UnitConflict>(
+            resolve("2", "120000", everUnits = dusOf("12"), everPrices = oldPrice, expected = now)
+        )
+        // Tanpa pasangan faktor dan harga yang cocok, hanya ada satu tafsir.
+        listOf(
+            resolve("2", "120000", everUnits = dusOf("12"), expected = now),
+            resolve("2", "120000", everPrices = oldPrice, expected = now),
+            resolve("2", "120000", everUnits = dusOf("11"), everPrices = oldPrice, expected = now)
+        ).forEach { assertResolved(it, "2.00", "120000.00", OfflineUnitSource.LEGACY_BASE, pcs) }
+    }
+
+    @Test
+    fun `satuan pengganti dengan harga sekunder yang sama ditolak`() {
+        // Dulu 12 x 10.000, sekarang 24 x 5.000.
+        val now: (BigDecimal) -> BigDecimal = { BigDecimal("5000.00") }
+        assertIs<OfflineUnitResolution.UnitConflict>(
+            resolve("2", "120000", dusOf("24"), everUnits = dusOf("12"), everPrices = oldPrice, expected = now)
+        )
+        assertResolved(
+            resolve("2", "120000", dusOf("24"), everUnits = dusOf("12"), expected = now),
+            "48.00", "5000.00", OfflineUnitSource.LEGACY_AUTO, dus
+        )
+    }
+
+    @Test
+    fun `harga lama di luar jendela juga menolak faktor yang masih berlaku`() {
+        // 60.000 = 12 x 5.000 (sekarang) atau 1 x 60.000 (harga lama satuan dasar).
+        assertIs<OfflineUnitResolution.UnitConflict>(
+            resolve("2", "60000", dusOf("12"), everPrices = setOf(BigDecimal("60000.00")), expected = { BigDecimal("5000.00") })
+        )
+        // Harga lama di dalam jendela dengan faktor lama di luar jendela.
+        assertIs<OfflineUnitResolution.UnitConflict>(
+            resolve("2", "120000", history = oldPrice, everUnits = dusOf("12"), expected = { BigDecimal("120000.00") })
+        )
+    }
+
+    @Test
+    fun `riwayat di luar jendela tidak pernah membuat harga atau faktor sah`() {
+        assertIs<OfflineUnitResolution.PriceUnknown>(resolve("2", "120000", everUnits = dusOf("12")))
+        assertIs<OfflineUnitResolution.PriceUnknown>(resolve("2", "7000", everPrices = setOf(BigDecimal("7000.00"))))
+        assertIs<OfflineUnitResolution.PriceUnknown>(
+            resolve("2", "0", everUnits = dusOf("12"), everPrices = setOf(BigDecimal.ZERO))
+        )
+        assertIs<OfflineUnitResolution.UnitConflict>(
+            resolve("2", "120000", client = client(dus, "24"), everUnits = dusOf("12"))
+        )
+        assertIs<OfflineUnitResolution.PriceUnknown>(
+            resolve("2", "7000", client = client(pcs, "2"), everPrices = setOf(BigDecimal("7000.00")))
+        )
+    }
+
+    @Test
+    fun `riwayat faktor dan harga yang sama tidak membuat satu tafsir menjadi ambigu`() {
+        assertResolved(
+            resolve("2", "120000", dusOf("12"), everUnits = dusOf("12.0000"), everPrices = oldPrice),
+            "24.00", "10000.00", OfflineUnitSource.LEGACY_AUTO, dus
+        )
+        assertResolved(
+            resolve("2", "10000", everUnits = dusOf("12"), everPrices = oldPrice),
+            "2.00", "10000.00", OfflineUnitSource.LEGACY_BASE, pcs
+        )
+    }
+
+    @Test
+    fun `klien baru tidak terpengaruh riwayat di luar jendela`() {
+        val free: (BigDecimal) -> BigDecimal = { BigDecimal.ZERO }
+        assertResolved(
+            resolve("2", "0", client = client(pcs, "2"), everUnits = dusOf("12"), expected = free),
+            "2.00", "0.00", OfflineUnitSource.CLIENT_UNIT, pcs
+        )
+        assertResolved(
+            resolve(
+                "2", "120000", dusOf("24"), client(dus, "48"), everUnits = dusOf("12"), everPrices = oldPrice,
+                expected = { BigDecimal("5000.00") }
+            ),
+            "48.00", "5000.00", OfflineUnitSource.CLIENT_UNIT, dus
+        )
     }
 }

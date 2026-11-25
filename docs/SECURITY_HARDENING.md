@@ -10,7 +10,7 @@ Endpoint: `POST /api/sales/checkout/sync`, kecuali disebutkan lain.
 
 | Data dari perangkat | Sebelum | Sesudah |
 |---|---|---|
-| `priceAtTransaction` | diterima asal konsisten | wajib cocok dengan harga server: eceran/kontraktor/grosir saat ini, harga lama yang berubah di dalam jendela tepercaya, atau harga × faktor satuan sekunder |
+| `priceAtTransaction` | diterima asal konsisten | wajib cocok dengan harga server: eceran/kontraktor/grosir saat ini, harga lama yang berubah di dalam jendela tepercaya, atau harga × faktor satuan sekunder (faktor saat ini, atau faktor lama yang berubah di dalam jendela tepercaya; V47) |
 | `cogsAtTransaction` | diterima | diabaikan; server memakai `price_buy` per satuan dasar |
 | `productNameSnapshot` | dipakai di struk/laporan | diabaikan; server memakai nama produk |
 | `roundingAmount` | tanpa batas | \|nilai\| < 1000, total hasil pembulatan wajib kelipatan 100/500/1000, dan bila pengaturan pembulatan tidak berubah di dalam jendela tepercaya: \|nilai\| < unit pembulatan toko |
@@ -25,10 +25,14 @@ Pelanggaran dijawab **HTTP 409** dengan kode `OFFLINE_PRICE_CONFLICT`,
 `OFFLINE_CLOSED_AT_INVALID`, atau `OFFLINE_UNIT_CONFLICT` (lihat `API_CHANGES.md`). Semua pesan memuat frasa "business rule" (dijamin `offlineConflict(...)`) sehingga
 `SyncErrorClassifier` di aplikasi otomatis menandainya **CONFLICT**.
 
-**Jendela tepercaya.** Riwayat harga dan perubahan pengaturan hanya dilihat mulai
+**Jendela tepercaya.** Riwayat harga, riwayat faktor konversi, dan perubahan pengaturan hanya dilihat mulai
 dari `max(openedAt, waktu server saat sesi dibuat/di-sync − OFFLINE_MAX_SESSION_AGE_HOURS)`. Jadi sesi yang
 `openedAt`-nya terlanjur dimundurkan sebelum aturan ini berlaku tetap tidak bisa
 memakai harga lama atau melewati cek pajak dan pembulatan.
+
+**Penolakan ambigu (Fase 5b).** Untuk item tanpa `unitId`, seluruh riwayat faktor dan harga (juga di luar jendela)
+dipakai hanya untuk menolak: lebih dari satu faktor yang bisa menjelaskan harga → 409 `OFFLINE_UNIT_CONFLICT`. Riwayat di
+luar jendela tidak pernah mengesahkan harga atau faktor. Celah yang tersisa (satuan dasar diganti) ada di `BACKLOG.md`.
 
 **Perubahan pengaturan.** Cek pajak hanya longgar bila `tax_enabled`, `tax_rate`, atau `tax_mode`
 berubah di dalam jendela; cek pembulatan hanya bila `cash_rounding_unit` atau `cash_rounding_rule`
@@ -197,6 +201,17 @@ Bila satu request melanggar beberapa aturan, error yang dikirim bisa berbeda dar
 - **`sessions/sync/close`:** format → sesi → kepemilikan → sudah ditutup (`DUPLICATE`/`ALREADY_CLOSED`) → `closedAt`.
 - **`/transactions/{id}/pay`:** idempotensi diperiksa sebelum status lunas dan sisa hutang, jadi retry
   yang terlambat dijawab sukses walau transaksinya sudah lunas.
+
+## Urutan rilis backend 5b (wajib)
+
+1. **(a)** Rilis APK B1c yang tetap kompatibel dengan backend v1.0.7 (fallback `/products` bila `baseUnitId` tidak ada).
+2. **(b)** Perbarui semua HP ke B1c.
+3. **(c)** Baru deploy backend 5b (V47).
+
+Jangan men-deploy 5b selama masih ada HP v1.0.6. Respons stok baru memunculkan satuan sekunder di v1.0.6, yang memotong
+kuantitas checkout online dengan `toInt()` (faktor 2,5 menjadi 2: harga dan stok salah) dan mengirim penjualan offline
+tanpa `unitId`. `main` Android sesudah B1b masih memakai `toInt()` yang sama, jadi B1c wajib memperbaikinya. Rincian ada
+di `API_CHANGES.md`.
 
 ## Yang perlu disesuaikan di aplikasi Android
 

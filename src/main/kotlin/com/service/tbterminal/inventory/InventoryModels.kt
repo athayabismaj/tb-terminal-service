@@ -255,7 +255,13 @@ data class StockDetailResponse(
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val discount: java.math.BigDecimal = java.math.BigDecimal.ZERO,
     val isActive: Boolean,
     val photoUrl: String? = null,
-    val priceTiers: List<ProductPriceTierDto> = emptyList()
+    val priceTiers: List<ProductPriceTierDto> = emptyList(),
+    val baseUnitId: String,
+    val baseUnitName: String,
+    val secondaryUnitId: String? = null,
+    val secondaryUnitName: String? = null,
+    /** Jumlah satuan dasar per satu satuan sekunder, tanpa pembulatan. */
+    @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class) val secondaryUnitFactor: java.math.BigDecimal? = null
 )
 
 @Serializable

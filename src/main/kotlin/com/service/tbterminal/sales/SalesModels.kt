@@ -518,6 +518,7 @@ data class TransactionItemResponse(
     val productId: String,
     val productName: String,
     val unitId: String,
+    val unitName: String,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
     val quantity: java.math.BigDecimal,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
