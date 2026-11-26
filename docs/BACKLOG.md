@@ -21,3 +21,7 @@ Format: [prioritas] temuan — lokasi — dampak — usulan fase.
 - [RENDAH] Mengubah satuan dasar produk tidak mengubah `inventory.stock.unit_id` maupun jumlah stok — `InventoryProductRepository.updateProduct` — jumlah stok lama ditafsirkan dalam satuan baru — perlu keputusan bisnis (larang bila sudah ada mutasi)
 - [RENDAH] `createProduct`/`updateProduct` menulis produk dan harga grosir dalam dua transaksi terpisah, dan mengganti harga grosir tidak mengunci baris produk — `inventory/InventoryService.kt` — kegagalan di tengah menyimpan sebagian — gabungkan dalam satu transaksi
 - [RENDAH] `IntegrationTest.test_authenticated_user_can_read_and_update_only_safe_profile_fields` mengasumsikan DB baru (hitung audit absolut) — gagal bila suite dijalankan dua kali di DB yang sama, juga di `main` — bandingkan selisih hitungan
+
+## Ditemukan saat `docs/release-runbook-1.0.8`
+
+- [SEDANG] deploy/docker-compose.production.yml: APP_VERSION dan tag image ditulis mati (1.0.0) — ganti ke ${APP_VERSION:-1.0.0} dan tag image per versi agar rollback binary mungkin tanpa override; pertimbangkan LOG_LEVEL INFO untuk Flyway.
