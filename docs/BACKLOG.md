@@ -41,3 +41,38 @@ Format: [prioritas] temuan — lokasi — dampak — usulan fase.
 
 - [SEDANG] deploy/docker-compose.production.yml: APP_VERSION dan tag image ditulis mati (1.0.0) — ganti ke ${APP_VERSION:-1.0.0} dan tag image per versi agar rollback binary mungkin tanpa override; pertimbangkan LOG_LEVEL INFO untuk Flyway.
 - [RENDAH] deploy/docker-compose.production.yml tanpa `name:` — nama project (dan nama volume `<project>_postgres-data`) bergantung pada folder/`-p` saat perintah dijalankan; salah folder membuat stack + volume kosong baru — runbook v1.0.8 A1 kini memeriksanya. Jangan sekadar menambah `name:` tanpa menyamakannya dengan project yang sedang jalan: nama berbeda = volume database baru yang kosong.
+
+## Ditemukan saat `feat/purchasing-idempotency`
+
+- [SEDANG] **Rencana mewajibkan `idempotencyKey`** di `POST /api/purchasing/purchases` dan
+  `POST /api/purchasing/payables/payments` (juga `POST /api/sales/transactions/{id}/pay` yang masih opsional) —
+  `purchasing/PurchasingIdempotency.kt` (`normalizeOptionalIdempotencyKey`) — selama opsional, klien lama/salah masih bisa
+  mencatat dua kali saat retry — usulan: flag `EnvironmentConfig` `REQUIRE_PURCHASING_IDEMPOTENCY_KEY` (default `false`);
+  bila aktif, key kosong dijawab 400 `VALIDATION_ERROR` "Idempotency key wajib diisi". Urutan: (1) rilis APK B2b yang selalu
+  mengirim key, (2) pastikan semua HP sudah B2b dan antrean retry lama sudah habis, (3) nyalakan flag
+  **sebelum go-live**, (4) setelah stabil, hapus flag dan jadikan wajib permanen. Kolom DB tetap nullable karena baris lama
+  tidak punya key. Perlu persetujuan karena mengubah kontrak.
+- [SEDANG] `insertPaymentAndUpdatePayable` meng-UPDATE langsung `supplier_payables.paid_amount/status`, padahal CLAUDE.md
+  menyebut trigger yang menanganinya; trigger itu tidak ada di V1–V48 (komentar "Auto-update via trigger" di V10 tidak
+  pernah diwujudkan) — `purchasing/PurchasingRepository.kt` — aturan CLAUDE.md dan kode bertentangan; aman selama hanya
+  jalur ini yang menulis (baris hutang dikunci `FOR UPDATE`) — putuskan: buat trigger seperti piutang (V30) atau koreksi
+  CLAUDE.md
+- [SEDANG] `paySupplier` menerima metode `hutang` dan `dp` (enum `PurchasePaymentMethod` dipakai apa adanya), padahal
+  pesannya "Gunakan: tunai, transfer, atau qris"; nominal juga tidak dibatasi 2 desimal (NUMERIC(15,2) membulatkan diam-diam)
+  — `purchasing/PurchasingService.kt` — data pembayaran bisa bermetode tidak masuk akal — validasi seperti
+  `validateReceivablePaymentRequest`; mengubah perilaku, perlu persetujuan
+- [RENDAH] `executePurchase` mengunci/meng-UPDATE baris produk sesuai urutan item request — `purchasing/PurchasingRepository.kt`
+  — dua pembelian paralel dengan produk sama dalam urutan terbalik bisa deadlock (PostgreSQL membatalkan salah satunya) —
+  urutkan item per `productId` sebelum menulis
+- [RENDAH] `PurchasingService.purchase` membaca `price_buy` (snapshot HPP) di luar transaksi pencatatan — pembelian paralel
+  untuk produk sama bisa mencatat `cogsAtTransaction` yang sudah usang — baca HPP dengan `FOR UPDATE` di dalam transaksi
+- [RENDAH] `GET /api/purchasing/purchases/{id}` mengembalikan `productName` kosong untuk setiap item (respons POST dan replay
+  sudah berisi nama) — `PurchasingRepositoryImpl.getPurchaseById` — layar detail Android harus mencari nama sendiri — join
+  `inventory.products` seperti `replayPurchase`; mengubah nilai respons, perlu persetujuan
+- [RENDAH] Pembelian dan pembayaran hutang supplier tidak menyentuh sesi kas (pembayaran tunai ke supplier tidak mengurangi
+  `system_cash`) — `purchasing/` — rekonsiliasi kas bisa selisih bila pembayaran supplier diambil dari laci — perlu keputusan
+  bisnis
+- [RENDAH] Retry otomatis Exposed (default 3 percobaan) diam-diam mengubah benturan unique index menjadi replay sukses —
+  terbukti saat uji mutasi: tanpa advisory lock, request paralel tetap 201 karena transaksi yang gagal 23505 diulang dan
+  menemukan baris pertama — perilaku implisit ini juga menyembunyikan gejala lain (lihat temuan restore) — pertimbangkan
+  menyetel `DatabaseConfig { defaultRepetitionAttempts }` secara eksplisit
