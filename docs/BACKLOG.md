@@ -25,3 +25,4 @@ Format: [prioritas] temuan — lokasi — dampak — usulan fase.
 ## Ditemukan saat `docs/release-runbook-1.0.8`
 
 - [SEDANG] deploy/docker-compose.production.yml: APP_VERSION dan tag image ditulis mati (1.0.0) — ganti ke ${APP_VERSION:-1.0.0} dan tag image per versi agar rollback binary mungkin tanpa override; pertimbangkan LOG_LEVEL INFO untuk Flyway.
+- [RENDAH] deploy/docker-compose.production.yml tanpa `name:` — nama project (dan nama volume `<project>_postgres-data`) bergantung pada folder/`-p` saat perintah dijalankan; salah folder membuat stack + volume kosong baru — runbook v1.0.8 A1 kini memeriksanya. Jangan sekadar menambah `name:` tanpa menyamakannya dengan project yang sedang jalan: nama berbeda = volume database baru yang kosong.
