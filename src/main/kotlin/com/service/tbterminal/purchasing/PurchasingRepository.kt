@@ -32,8 +32,12 @@ interface PurchasingRepository {
         paymentMethod: PurchasePaymentMethod,
         amountPaid: java.math.BigDecimal,
         notes: String?,
-        dueDays: Int
+        dueDays: Int,
+        idempotency: PurchasingIdempotency? = null
     ): PurchaseResponse
+
+    /** Pengecekan cepat tanpa lock; kepastian tetap di [executePurchase]. */
+    suspend fun findPurchaseByIdempotency(idempotency: PurchasingIdempotency): PurchaseResponse?
 
     suspend fun getPaginatedPurchases(
         page: Int, limit: Int, supplierId: UUID?, startDate: String? = null, endDate: String? = null
@@ -53,7 +57,8 @@ interface PurchasingRepository {
     suspend fun insertPaymentAndUpdatePayable(
         payableId: UUID, userId: UUID,
         paymentAmount: java.math.BigDecimal, method: PurchasePaymentMethod,
-        reference: String?, notes: String?
+        reference: String?, notes: String?,
+        idempotency: PurchasingIdempotency? = null
     ): SupplierPaymentResponse
 }
 
@@ -196,8 +201,13 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         paymentMethod: PurchasePaymentMethod,
         amountPaid: java.math.BigDecimal,
         notes: String?,
-        dueDays: Int
+        dueDays: Int,
+        idempotency: PurchasingIdempotency?
     ): PurchaseResponse = newSuspendedTransaction(Dispatchers.IO) {
+        if (idempotency != null) {
+            lockPurchasingIdempotencyKey(PURCHASE_IDEMPOTENCY_LOCK_SCOPE, idempotency.key)
+            replayPurchase(idempotency)?.let { return@newSuspendedTransaction it }
+        }
 
         // 1. Insert ke purchases
         val purchaseId = UUID.randomUUID()
@@ -208,6 +218,8 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             it[this.invoiceNo] = invoiceNo
             it[this.total] = calculatedTotal
             it[this.notes] = notes
+            it[this.idempotencyKey] = idempotency?.key
+            it[this.requestFingerprint] = idempotency?.fingerprint
         }
 
         // 2. Loop insert purchase_items + update HPP di products
@@ -282,6 +294,9 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             items = items
         )
     }
+
+    override suspend fun findPurchaseByIdempotency(idempotency: PurchasingIdempotency): PurchaseResponse? =
+        newSuspendedTransaction(Dispatchers.IO) { replayPurchase(idempotency) }
 
     // ==========================================
     // PURCHASE LIST
@@ -481,8 +496,13 @@ class PurchasingRepositoryImpl : PurchasingRepository {
     override suspend fun insertPaymentAndUpdatePayable(
         payableId: UUID, userId: UUID,
         paymentAmount: java.math.BigDecimal, method: PurchasePaymentMethod,
-        reference: String?, notes: String?
+        reference: String?, notes: String?,
+        idempotency: PurchasingIdempotency?
     ): SupplierPaymentResponse = newSuspendedTransaction(Dispatchers.IO) {
+        if (idempotency != null) {
+            lockPurchasingIdempotencyKey(SUPPLIER_PAYMENT_IDEMPOTENCY_LOCK_SCOPE, idempotency.key)
+            replaySupplierPayment(idempotency)?.let { return@newSuspendedTransaction it }
+        }
         val lockedPayable = SupplierPayablesTable.select { SupplierPayablesTable.id eq payableId }
             .forUpdate()
             .singleOrNull()
@@ -508,6 +528,10 @@ class PurchasingRepositoryImpl : PurchasingRepository {
             it[this.method] = method
             it[this.reference] = reference
             it[this.notes] = notes
+            it[this.idempotencyKey] = idempotency?.key
+            it[this.requestFingerprint] = idempotency?.fingerprint
+            it[this.payableRemainingAfter] = payableAmount.subtract(newPaidAmount)
+            it[this.payableStatusAfter] = newStatus
         }
 
         // 2. UPDATE payable paid_amount dan status
@@ -518,18 +542,9 @@ class PurchasingRepositoryImpl : PurchasingRepository {
         }
 
         // 3. Baca payment yang baru dibuat untuk response
-        val paymentRow = SupplierPaymentsTable.select { SupplierPaymentsTable.id eq paymentId }.single()
-        SupplierPaymentResponse(
-            id = paymentRow[SupplierPaymentsTable.id].toString(),
-            payableId = payableId.toString(),
-            amount = paymentRow[SupplierPaymentsTable.amount],
-            method = paymentRow[SupplierPaymentsTable.method].dbValue,
-            reference = paymentRow[SupplierPaymentsTable.reference],
-            notes = paymentRow[SupplierPaymentsTable.notes],
-            paidAt = paymentRow[SupplierPaymentsTable.paidAt].toString(),
-            payableStatus = newStatus.dbValue,
-            payableRemainingAmount = payableAmount.subtract(newPaidAmount)
-        )
+        SupplierPaymentsTable.select { SupplierPaymentsTable.id eq paymentId }
+            .single()
+            .toSupplierPaymentResponse(idempotentReplay = false)
     }
 
     // ==========================================

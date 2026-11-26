@@ -50,6 +50,8 @@ object PurchasesTable : Table("purchasing.purchases") {
     val receivedAt = timestampWithTimeZone("received_at").databaseGenerated()
     val notes = text("notes").nullable()
     val createdAt = timestampWithTimeZone("created_at").databaseGenerated()
+    val idempotencyKey = varchar("idempotency_key", 100).nullable()
+    val requestFingerprint = varchar("request_fingerprint", 64).nullable()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -132,7 +134,9 @@ data class PurchaseRequest(
     val amountPaid: java.math.BigDecimal,
     val notes: String? = null,
     val dueDays: Int = 30,              // Termin hutang jika HUTANG/DP
-    val items: List<PurchaseItemRequest>
+    val items: List<PurchaseItemRequest>,
+    /** Opsional (V48). Key sama + payload sama = respons pertama tanpa mencatat ulang. */
+    val idempotencyKey: String? = null
 )
 
 @Serializable
@@ -162,7 +166,8 @@ data class PurchaseResponse(
     val notes: String?,
     val receivedAt: String,
     val createdAt: String,
-    val items: List<PurchaseItemResponse>
+    val items: List<PurchaseItemResponse>,
+    val idempotentReplay: Boolean = false
 )
 
 @Serializable
@@ -195,6 +200,15 @@ object SupplierPaymentsTable : Table("purchasing.supplier_payments") {
     val reference = varchar("reference", 100).nullable()
     val notes = text("notes").nullable()
     val paidAt = timestampWithTimeZone("paid_at").databaseGenerated()
+    val idempotencyKey = varchar("idempotency_key", 100).nullable()
+    val requestFingerprint = varchar("request_fingerprint", 64).nullable()
+    val payableRemainingAfter = decimal("payable_remaining_after", 15, 2).nullable()
+    val payableStatusAfter = customEnumeration(
+        name = "payable_status_after",
+        sql = "system.payable_status",
+        fromDb = { value -> PayableStatus.entries.first { e -> e.dbValue == value.toString() } },
+        toDb = { value -> postgresEnum("system.payable_status", value.dbValue) }
+    ).nullable()
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -227,7 +241,9 @@ data class SupplierPaymentRequest(
     val amount: java.math.BigDecimal,
     val method: String,         // "tunai", "transfer", "qris"
     val reference: String? = null,
-    val notes: String? = null
+    val notes: String? = null,
+    /** Opsional (V48). Key sama + payload sama = respons pertama tanpa mencatat ulang. */
+    val idempotencyKey: String? = null
 )
 
 @Serializable
@@ -243,7 +259,8 @@ data class SupplierPaymentResponse(
     // Status hutang setelah pembayaran
     val payableStatus: String,
     @Serializable(with = com.service.tbterminal.shared.BigDecimalSerializer::class)
-    val payableRemainingAmount: java.math.BigDecimal
+    val payableRemainingAmount: java.math.BigDecimal,
+    val idempotentReplay: Boolean = false
 )
 
 private fun postgresEnum(type: String, value: String): PGobject {

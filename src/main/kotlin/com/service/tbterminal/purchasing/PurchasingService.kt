@@ -113,6 +113,11 @@ class PurchasingService(
     // ==========================================
 
     suspend fun purchase(userId: UUID, request: PurchaseRequest): PurchaseResponse {
+        // Retry dengan key yang sudah tercatat dijawab sebelum aturan bisnis lain, supaya retry yang
+        // terlambat tetap sukses walau supplier/produk sudah berubah setelah request pertama.
+        val idempotency = purchaseIdempotency(request)
+        idempotency?.let { repository.findPurchaseByIdempotency(it) }?.let { return it }
+
         // 1. Validasi items tidak boleh kosong
         if (request.items.isEmpty()) {
             throw ValidationException("Daftar item pembelian tidak boleh kosong")
@@ -183,7 +188,8 @@ class PurchasingService(
             paymentMethod = paymentMethod,
             amountPaid = request.amountPaid,
             notes = request.notes?.trim(),
-            dueDays = request.dueDays
+            dueDays = request.dueDays,
+            idempotency = idempotency
         )
     }
 
@@ -243,6 +249,10 @@ class PurchasingService(
     // ==========================================
 
     suspend fun paySupplier(userId: UUID, request: SupplierPaymentRequest): SupplierPaymentResponse {
+        // Replay diperiksa di repository sebelum cek "sudah lunas"/"melebihi sisa hutang", jadi retry yang
+        // terlambat tetap sukses; tidak perlu pengecekan cepat seperti pembelian.
+        val idempotency = supplierPaymentIdempotency(request)
+
         // 1. Validasi amount > 0
         if (request.amount <= java.math.BigDecimal.ZERO) {
             throw ValidationException("Jumlah pembayaran harus lebih dari nol")
@@ -266,7 +276,8 @@ class PurchasingService(
             paymentAmount = request.amount,
             method = method,
             reference = request.reference?.trim()?.takeIf(String::isNotBlank),
-            notes = request.notes?.trim()?.takeIf(String::isNotBlank)
+            notes = request.notes?.trim()?.takeIf(String::isNotBlank),
+            idempotency = idempotency
         )
     }
 
