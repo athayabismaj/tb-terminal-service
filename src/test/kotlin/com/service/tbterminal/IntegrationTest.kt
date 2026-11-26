@@ -1,5 +1,12 @@
 package com.service.tbterminal
 
+import com.service.tbterminal.analytics.AnalyticsRepository
+import com.service.tbterminal.analytics.CsvExportType
+import com.service.tbterminal.analytics.SalesReportFilter
+import com.service.tbterminal.backup.BackupRepository
+import com.service.tbterminal.receivable.RecPaymentMethod
+import com.service.tbterminal.receivable.ReceivableRepository
+import com.service.tbterminal.shared.DecimalInputLimits
 import com.service.tbterminal.inventory.ProductCsvImportRequest
 import com.service.tbterminal.plugins.configureDI
 import com.service.tbterminal.plugins.configureRouting
@@ -59,6 +66,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -83,13 +93,16 @@ import java.sql.Types
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.koin.core.context.GlobalContext
 import org.koin.core.context.stopKoin
@@ -1484,6 +1497,8 @@ class IntegrationTest {
         val initialData = Json.parseToJsonElement(initial.bodyAsText()).jsonObject.getValue("data").jsonObject
         assertEquals("owner", initialData.getValue("username").jsonPrimitive.content)
         assertEquals("owner", initialData.getValue("role").jsonPrimitive.content)
+        // audit_logs immutable: di DB yang sudah pernah dipakai suite ini, hitungan awalnya tidak nol.
+        val profileAuditsBefore = auditActionCount("system", "user_profile", ownerId(), "UPDATE")
 
         val updated = client.put("/api/auth/me") {
             contentType(ContentType.Application.Json)
@@ -1496,7 +1511,7 @@ class IntegrationTest {
         assertEquals("pemilik@tbterminal.test", updatedData.getValue("email").jsonPrimitive.content)
         assertEquals("owner", updatedData.getValue("username").jsonPrimitive.content)
         assertEquals("owner", updatedData.getValue("role").jsonPrimitive.content)
-        assertEquals(1, auditActionCount("system", "user_profile", ownerId(), "UPDATE"))
+        assertEquals(profileAuditsBefore + 1, auditActionCount("system", "user_profile", ownerId(), "UPDATE"))
 
         val invalid = client.put("/api/auth/me") {
             contentType(ContentType.Application.Json)
@@ -2764,6 +2779,12 @@ class IntegrationTest {
         val confirmationToken = validationData.getValue("confirmationToken").jsonPrimitive.content
         val confirmationPhrase = validationData.getValue("confirmationPhrase").jsonPrimitive.content
 
+        // Setiap koneksi fisik di pool memegang prepared statement di server untuk query yang mengembalikan
+        // enum system.user_role. pg_restore --clean membuat ulang enum itu dengan OID baru.
+        val beforeRestore = probeEveryPooledConnection(executions = RESTORE_PROBE_WARMUP_EXECUTIONS)
+        assertTrue(beforeRestore.all { it.error == null }, "Probe sebelum restore gagal: $beforeRestore")
+        assertTrue(beforeRestore.all { it.serverPrepared }, "Probe harus sudah di-prepare di server: $beforeRestore")
+
         val restored = client.post("/api/system/database-backups/restore/$restoreId/confirm") {
             contentType(ContentType.Application.Json)
             bearer(token)
@@ -2788,6 +2809,160 @@ class IntegrationTest {
         assertEquals(1, backupJobCount(UUID.fromString(restoreId)))
         assertTrue(successfulBackupCount() >= 2, "Backup sumber dan safety backup harus tercatat")
         awaitRestoreAudit(UUID.fromString(restoreId))
+
+        // Tanpa soft evict, koneksi lama menjalankan statement lama dan PostgreSQL menjawab
+        // "cached plan must not change result type". JDBC mentah dipakai agar retry transaksi Exposed
+        // tidak menyembunyikan error itu.
+        val afterRestore = probeEveryPooledConnection(executions = 1)
+        assertTrue(afterRestore.all { it.error == null }, "Koneksi pool lama dipakai lagi setelah restore: $afterRestore")
+        val reusedBackends = afterRestore.map { it.backendPid }.toSet() intersect beforeRestore.map { it.backendPid }.toSet()
+        assertTrue(reusedBackends.isEmpty(), "Koneksi fisik sebelum restore masih ada di pool: $reusedBackends")
+    }
+
+    private data class PoolConnectionProbe(val backendPid: Int, val serverPrepared: Boolean, val error: String?)
+
+    /**
+     * Meminjam SEMUA koneksi pool (yang juga dipakai Exposed dan di-evict `DatabaseHealth`) sekaligus,
+     * ditahan oleh barrier, sehingga setiap koneksi fisik menjalankan [RESTORE_PROBE_SQL]. JDBC murni dengan
+     * autoCommit=false seperti Exposed; error ditangkap di sini sehingga tidak ada retry yang menyembunyikannya.
+     */
+    private suspend fun probeEveryPooledConnection(executions: Int): List<PoolConnectionProbe> = coroutineScope {
+        val poolSize = dataSource.maximumPoolSize
+        val barrier = CyclicBarrier(poolSize)
+        (1..poolSize).map {
+            async(Dispatchers.IO) {
+                dataSource.connection.use { jdbc ->
+                    barrier.await(30, TimeUnit.SECONDS)
+                    jdbc.autoCommit = false
+                    try {
+                        val pid = jdbc.createStatement().use { st ->
+                            st.executeQuery("SELECT pg_backend_pid()").use { rs -> rs.next(); rs.getInt(1) }
+                        }
+                        val error = runCatching {
+                            repeat(executions) {
+                                jdbc.prepareStatement(RESTORE_PROBE_SQL).use { st ->
+                                    st.executeQuery().use { rs -> while (rs.next()) rs.getString(1) }
+                                }
+                            }
+                        }.exceptionOrNull()
+                        // Hikari menutup koneksi yang menjawab SQLSTATE 0A000; jangan dipakai lagi.
+                        if (error != null) {
+                            val state = (error as? SQLException)?.sqlState
+                            return@use PoolConnectionProbe(pid, serverPrepared = false, error = "SQLSTATE $state: ${error.message}")
+                        }
+                        jdbc.rollback()
+                        val serverPrepared = jdbc.createStatement().use { st ->
+                            st.executeQuery(
+                                "SELECT COUNT(*) FROM pg_prepared_statements WHERE statement LIKE '%restore-evict-probe%'"
+                            ).use { rs -> rs.next(); rs.getInt(1) > 0 }
+                        }
+                        PoolConnectionProbe(pid, serverPrepared, error = null)
+                    } finally {
+                        if (!jdbc.isClosed) {
+                            jdbc.rollback()
+                            jdbc.autoCommit = true
+                        }
+                    }
+                }
+            }
+        }.awaitAll()
+    }
+
+    @Test
+    fun test_json_decimal_with_huge_exponent_is_rejected_before_calculation() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val product = createProductFixture(BigDecimal.ZERO)
+
+        suspend fun openingBalance(quantity: String) = client.post("/api/inventory/stock/opening-balance") {
+            contentType(ContentType.Application.Json)
+            bearer(token)
+            setBody("""{"productId":"${product.id}","date":"2026-07-01","quantity":"$quantity","note":"Batas angka"}""")
+        }
+
+        for (quantity in listOf("1E+3000000", "1E-3000000", "-1e2147483647", "0E+3000000", "1".repeat(65))) {
+            val startedAt = System.nanoTime()
+            val response = openingBalance(quantity)
+            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+            assertEquals(HttpStatusCode.BadRequest, response.status, "$quantity: ${response.bodyAsText()}")
+            val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            assertEquals("VALIDATION_ERROR", body.getValue("code").jsonPrimitive.content, quantity)
+            assertEquals(DecimalInputLimits.MESSAGE, body.getValue("message").jsonPrimitive.content, quantity)
+            assertTrue(elapsedMs < 2_000, "$quantity diproses $elapsedMs ms")
+        }
+        assertEquals(BigDecimal.ZERO, stockQuantity(product.id).stripTrailingZeros())
+
+        // Kontrak lama tetap: teks bukan angka = INVALID_REQUEST.
+        val notNumber = openingBalance("dua belas")
+        assertEquals(HttpStatusCode.BadRequest, notNumber.status, notNumber.bodyAsText())
+        assertEquals(
+            "INVALID_REQUEST",
+            Json.parseToJsonElement(notNumber.bodyAsText()).jsonObject.getValue("code").jsonPrimitive.content
+        )
+
+        val accepted = openingBalance("1.25E+1")
+        assertEquals(HttpStatusCode.Created, accepted.status, accepted.bodyAsText())
+    }
+
+    @Test
+    fun test_analytics_repository_binds_quote_and_backslash_filters() = testApplication {
+        application { configureIntegrationApplication() }
+        startApplication()
+        val repository = GlobalContext.get().get<AnalyticsRepository>()
+        val today = LocalDate.now(ZoneId.of("Asia/Jakarta"))
+        val hostile = SalesReportFilter(
+            startDate = today.minusDays(30),
+            endDate = today,
+            paymentMethod = SQL_HOSTILE_TEXT,
+            status = SQL_HOSTILE_TEXT
+        )
+
+        val report = repository.getSalesReport(hostile, topProductsLimit = 5)
+        assertEquals(0, report.totals.transactionCount)
+        assertTrue(report.topProducts.isEmpty())
+        for (type in CsvExportType.entries) {
+            val page = repository.getCsvPage(type, hostile, limit = 10, offset = 0)
+            val filtered = type in setOf(CsvExportType.TRANSACTIONS, CsvExportType.SALES_DETAILS, CsvExportType.PAYMENTS)
+            if (filtered) assertTrue(page.rows.isEmpty(), "$type harus kosong untuk filter yang tidak cocok")
+        }
+    }
+
+    @Test
+    fun test_backup_repository_round_trips_quote_and_backslash_values() = runBlocking {
+        val repository = BackupRepository()
+        // file_name dibatasi CHECK (tanpa / dan \), jadi backslash diuji lewat error_message.
+        val created = repository.create("BACKUP", "PENDING", "o'brien-phase4.dump", requestedBy = null)
+        val id = UUID.fromString(created.response.id)
+        assertEquals("o'brien-phase4.dump", created.response.fileName)
+
+        assertTrue(repository.transitionStatus(id, "PENDING", "RUNNING"))
+        assertFalse(repository.transitionStatus(id, SQL_HOSTILE_TEXT, "FAILED"))
+        repository.markFailed(id, SQL_HOSTILE_TEXT)
+        val failed = assertNotNull(repository.find(id)).response
+        assertEquals("FAILED", failed.status)
+        assertEquals(SQL_HOSTILE_TEXT, failed.errorMessage)
+        assertEquals(null, repository.findSuccessfulBackupByChecksum(SQL_HOSTILE_TEXT))
+        assertEquals(1, backupJobCount(id))
+    }
+
+    @Test
+    fun test_receivable_idempotency_lock_binds_quote_and_backslash_key() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val customerId = createReceivableCustomerFixture(BigDecimal("1000.00"))
+        val receivableId = UUID.fromString(checkoutDataId(createOpeningReceivable(token, customerId, "100.00", "QUOTE-KEY")))
+        val repository = GlobalContext.get().get<ReceivableRepository>()
+
+        // Service membatasi karakter kunci; repository tetap harus aman bila dipanggil langsung.
+        suspend fun pay() = repository.insertPaymentAndUpdateReceivable(
+            receivableId, ownerId(), BigDecimal("40.00"), RecPaymentMethod.TRANSFER, null, null, SQL_HOSTILE_TEXT
+        )
+        val first = pay()
+        val replay = pay()
+        assertFalse(first.idempotentReplay)
+        assertTrue(replay.idempotentReplay)
+        assertEquals(first.id, replay.id)
+        assertEquals(BigDecimal("60.00"), receivableRemaining(customerId))
     }
 
     @Test
@@ -4987,6 +5162,11 @@ class IntegrationTest {
     private data class TokenPair(val access: String, val refresh: String)
 
     private companion object {
+        /** Mengembalikan enum system.user_role; komentar dipakai untuk mencarinya di pg_prepared_statements. */
+        const val RESTORE_PROBE_SQL = "SELECT r.name /* restore-evict-probe */ FROM system.roles r ORDER BY r.name"
+        /** Di atas prepareThreshold default pgjdbc (5), agar statement menjadi prepared statement di server. */
+        const val RESTORE_PROBE_WARMUP_EXECUTIONS = 10
+        const val SQL_HOSTILE_TEXT = "x' OR '1'='1 \\'; -- \\\\"
         const val OFFLINE_DEVICE_ID = "integration-offline-device"
         const val APPROVAL_TEST_PASSWORD = "Integration-Approval-789!"
         const val APPROVAL_TEST_PIN = "846291"
