@@ -4,7 +4,7 @@ Format: [prioritas] temuan — lokasi — dampak — usulan fase.
 
 ## Ditemukan saat `fix/offline-secondary-unit`
 
-- [SEDANG] Angka JSON dengan eksponen besar tidak dibatasi — `shared/Extensions.kt` (`BigDecimalSerializer`) dan pemakai `setScale` (mis. `SalesService.syncOfflineCheckout`) — `"quantity":"1E+3000000"` memakan ± 1,5 detik CPU per nilai (diukur terpisah di JVM, bukan lewat endpoint); user login bisa membebani server — batasi presisi/eksponen di serializer
+- ~~[SEDANG] Angka JSON dengan eksponen besar tidak dibatasi~~ — **selesai di Fase 4** (`shared/DecimalInputLimits.kt`, lihat `API_CHANGES.md`)
 - [RENDAH] Harga grosir lama tidak masuk jendela harga riwayat (hanya eceran/kontraktor) — `sales/OfflinePricingSupport.kt` — perubahan harga grosir selama sesi offline menghasilkan `OFFLINE_PRICE_CONFLICT` — setelah Fase 2. Dikaji di Fase 5b, **tidak** dikerjakan karena tidak sederhana: harga riwayat saat ini tidak melihat kuantitas, jadi memasukkan `unit_price` lama apa adanya membuat harga grosir sah untuk 1 pcs. Juga ada kasus sebaliknya: tier yang **baru ditambahkan** membuat harga eceran perangkat (kuantitas sudah memenuhi tier) ditolak. Usulan: tabel `inventory.price_tier_history` berisi snapshot seluruh daftar tier sebelum diganti (termasuk daftar kosong) + `changed_at`, ditulis `replaceProductPriceTiers` hanya bila berubah dan setelah mengunci baris produk; `OfflineUnitResolver`/`OfflineCheckoutGuard` menerima harga riwayat sebagai fungsi kuantitas dasar: untuk tiap snapshot di jendela, hitung `TieredPricingResolver.resolveUnitPrice(eceran saat ini atau lama, snapshot, qty)`
 - [RENDAH] `normalizeMoney`/`money` disalin di dua file baru (`OfflineCheckoutItems.kt`, `OfflineUnitResolver.kt`) — digabung di Fase 1
 
@@ -20,7 +20,22 @@ Format: [prioritas] temuan — lokasi — dampak — usulan fase.
 - [RENDAH] `toProductResponse` mengambil konversi per produk (N+1) dan tidak memfilter `to_unit` = satuan dasar — `inventory/InventoryProductRepository.kt` — lambat di daftar produk; bisa berbeda dengan endpoint stok bila ada konversi tidak langsung — pakai `loadProductUnits`
 - [RENDAH] Mengubah satuan dasar produk tidak mengubah `inventory.stock.unit_id` maupun jumlah stok — `InventoryProductRepository.updateProduct` — jumlah stok lama ditafsirkan dalam satuan baru — perlu keputusan bisnis (larang bila sudah ada mutasi)
 - [RENDAH] `createProduct`/`updateProduct` menulis produk dan harga grosir dalam dua transaksi terpisah, dan mengganti harga grosir tidak mengunci baris produk — `inventory/InventoryService.kt` — kegagalan di tengah menyimpan sebagian — gabungkan dalam satu transaksi
-- [RENDAH] `IntegrationTest.test_authenticated_user_can_read_and_update_only_safe_profile_fields` mengasumsikan DB baru (hitung audit absolut) — gagal bila suite dijalankan dua kali di DB yang sama, juga di `main` — bandingkan selisih hitungan
+- ~~[RENDAH] `IntegrationTest.test_authenticated_user_can_read_and_update_only_safe_profile_fields` mengasumsikan DB baru~~ — **selesai di Fase 4** (selisih hitungan audit)
+
+## Ditemukan saat `refactor/phase-4-sql-binding`
+
+- ~~[SEDANG] Pool koneksi tidak dikosongkan setelah restore~~ — **dibuktikan di Fase 4**: soft evict sudah ada di
+  `BackupService.executeRestore` (`DatabaseHealth.evictConnectionsAfterRestore`), tetapi test lama tetap hijau tanpa evict.
+  Test restore kini meminjam semua koneksi pool, membuat prepared statement di server untuk query yang mengembalikan enum
+  `system.user_role`, lalu memastikan setelah restore tidak ada koneksi lama yang tersisa. Tanpa evict ada dua gejala:
+  (1) `0A000 cached plan must not change result type`: Hikari menutup koneksi itu dan retry Exposed menyembunyikannya;
+  (2) `XX000 cache lookup failed for type <oid>` pada INSERT `system.audit_logs` (parameter enum): Hikari **tidak** menganggap
+  koneksi rusak, ketiga retry gagal, dan audit restore hilang. Gejala (2) bergantung pada koneksi mana yang sudah memakai
+  INSERT itu ≥ 5 kali, jadi tidak dipakai sebagai bukti utama.
+- [RENDAH] Soft evict hanya langsung menutup koneksi yang idle. Koneksi yang sedang dipakai request lain saat restore baru ditutup
+  setelah dikembalikan, sehingga request itu masih bisa terkena gejala (1)/(2) di atas — `backup/BackupService.kt` — tidak ada
+  penjaga yang menolak request lain selama restore `RUNNING` — tambah mode maintenance (tolak request selain health/status
+  restore selama restore berjalan), atau dokumentasikan bahwa aplikasi wajib di-restart setelah restore
 
 ## Ditemukan saat `docs/release-runbook-1.0.8`
 

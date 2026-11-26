@@ -3,6 +3,24 @@
 Untuk tim Android (`tb-terminal-app`), terbaru di atas. Perubahan dari pekerjaan keamanan ada di
 `SECURITY_HARDENING.md`.
 
+## Batas angka desimal di request JSON (Fase 4 backend)
+
+Berlaku untuk semua field desimal (`BigDecimalSerializer`: harga, jumlah, uang, faktor, tarif). Nilai yang
+melewati salah satu batas berikut kini dijawab **400 `VALIDATION_ERROR`** dengan pesan
+"Nilai angka di luar batas yang diizinkan", sebelum perhitungan apa pun:
+
+| Batas | Nilai | Contoh ditolak |
+|---|---|---|
+| Panjang teks | maks. 64 karakter | `"111…1"` (65 digit) |
+| Digit bilangan bulat | maks. 18 | `"1E+18"`, `"1E+3000000"` |
+| Digit desimal (skala) | maks. 20 | `"0.000000000000000000001"`, `"1E-3000000"` |
+
+- Sebelumnya nilai seperti `"1E+3000000"` lolos parsing dan bisa memakan CPU sekitar 1,5 detik per nilai di
+  `setScale`, lalu dijawab dengan error lain atau 500 (numeric overflow).
+- Kolom terbesar di database adalah `NUMERIC(15,2)`, jadi nilai sah dari aplikasi tidak terdampak.
+- Teks yang bukan angka tetap dijawab seperti sebelumnya: 400 `INVALID_REQUEST` "Format request tidak valid".
+- Android tidak perlu diubah. Aplikasi sudah menampilkan pesan `VALIDATION_ERROR` apa adanya.
+
 ## Data satuan (Fase 5b backend, dipakai Fase B1c Android)
 
 Field baru semuanya **aditif**: tidak ada field yang dihapus atau berubah arti. Perubahan perilaku hanya di

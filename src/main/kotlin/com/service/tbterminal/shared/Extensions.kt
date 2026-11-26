@@ -65,7 +65,7 @@ object BigDecimalSerializer : kotlinx.serialization.KSerializer<java.math.BigDec
         kotlinx.serialization.descriptors.PrimitiveSerialDescriptor("java.math.BigDecimal", kotlinx.serialization.descriptors.PrimitiveKind.STRING)
 
     override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): java.math.BigDecimal {
-        return java.math.BigDecimal(decoder.decodeString())
+        return DecimalInputLimits.parse(decoder.decodeString())
     }
 
     override fun serialize(encoder: kotlinx.serialization.encoding.Encoder, value: java.math.BigDecimal) {

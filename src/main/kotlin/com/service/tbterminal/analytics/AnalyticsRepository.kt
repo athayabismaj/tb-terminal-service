@@ -1,17 +1,18 @@
 package com.service.tbterminal.analytics
 
+import com.service.tbterminal.shared.SqlFragment
+import com.service.tbterminal.shared.queryList
+import com.service.tbterminal.shared.sql
+import com.service.tbterminal.shared.sqlParam
 import kotlinx.coroutines.Dispatchers
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.javatime.date
-import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import java.math.BigDecimal
 import java.sql.ResultSet
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.util.UUID
 
 class AnalyticsRepository {
 
@@ -22,7 +23,7 @@ class AnalyticsRepository {
             val endExclusive = endDate.plusDays(1).atStartOfDay(zoneId).toOffsetDateTime()
 
             queryList(
-                """
+                sql("""
                 SELECT
                     (COALESCE(t.occurred_at, t.created_at) AT TIME ZONE 'Asia/Jakarta')::date AS sale_date,
                     COUNT(t.id) FILTER (WHERE t.status::text NOT IN ('voided', 'refunded')) AS total_transactions,
@@ -36,11 +37,11 @@ class AnalyticsRepository {
                 FROM sales.transactions t
                 LEFT JOIN sales.transaction_refunds rf ON rf.transaction_id = t.id
                 WHERE t.type = 'penjualan'::system.trx_type
-                  AND COALESCE(t.occurred_at, t.created_at) >= ${startAt.toSqlTimestamptz()}
-                  AND COALESCE(t.occurred_at, t.created_at) < ${endExclusive.toSqlTimestamptz()}
+                  AND COALESCE(t.occurred_at, t.created_at) """) + sqlParam(">= ?::timestamptz", startAt) + sql("""
+                  AND COALESCE(t.occurred_at, t.created_at) """) + sqlParam("< ?::timestamptz", endExclusive) + sql("""
                 GROUP BY sale_date
                 ORDER BY sale_date DESC
-                """
+                """)
             ) { row ->
                 DailySalesSummary(
                     date = row.getDate("sale_date").toString(),
@@ -64,16 +65,15 @@ class AnalyticsRepository {
             val todayStart = today.atStartOfDay(zoneId).toOffsetDateTime()
             val tomorrowStart = today.plusDays(1).atStartOfDay(zoneId).toOffsetDateTime()
             val revenue = queryOne(
-                """
+                sql("""
                 SELECT
-                    COALESCE(SUM(total) FILTER (WHERE created_at >= ${todayStart.toSqlTimestamptz()}), 0)::numeric AS today,
+                    COALESCE(SUM(total) FILTER (WHERE created_at """) + sqlParam(">= ?::timestamptz)", todayStart) + sql(""", 0)::numeric AS today,
                     COALESCE(SUM(total), 0)::numeric AS month
                 FROM sales.transactions
                 WHERE type = 'penjualan'::system.trx_type
                   AND status::text NOT IN ('voided', 'refunded')
-                  AND created_at >= ${monthStart.toSqlTimestamptz()}
-                  AND created_at < ${tomorrowStart.toSqlTimestamptz()}
-                """
+                  AND created_at """) + sqlParam(">= ?::timestamptz", monthStart) + sql("""
+                  AND created_at """) + sqlParam("< ?::timestamptz", tomorrowStart)
             ) { it.getBigDecimalOrZero("today") to it.getBigDecimalOrZero("month") }
                 ?: (BigDecimal.ZERO to BigDecimal.ZERO)
 
@@ -138,7 +138,7 @@ class AnalyticsRepository {
             includeTerminalStatuses = true
         )
         val baseTotals = queryOne(
-            """
+            sql("""
             WITH transaction_report AS (
                 SELECT
                     t.id,
@@ -153,7 +153,7 @@ class AnalyticsRepository {
                     END AS remaining_amount
                 FROM sales.transactions t
                 LEFT JOIN receivable.receivables r ON r.transaction_id = t.id
-                WHERE $grossTransactionWhere AND t.status::text <> 'voided'
+                WHERE """) + grossTransactionWhere + sql(""" AND t.status::text <> 'voided'
             )
             SELECT
                 COUNT(id) AS transaction_count,
@@ -163,7 +163,7 @@ class AnalyticsRepository {
                 COALESCE(SUM(rounding_amount), 0)::numeric AS rounding_amount,
                 COALESCE(SUM(LEAST(total, GREATEST(total - remaining_amount, 0))), 0)::numeric AS paid_amount
             FROM transaction_report
-            """
+            """)
         ) { row ->
             SalesReportTotals(
                 transactionCount = row.getLong("transaction_count"),
@@ -184,18 +184,17 @@ class AnalyticsRepository {
         )
 
         val grossProfit = queryOne(
-            """
+            sql("""
             SELECT COALESCE(SUM(ti.subtotal - (ti.cogs_at_transaction * ti.quantity)), 0)::numeric AS gross_profit
             FROM sales.transaction_items ti
             JOIN sales.transactions t ON t.id = ti.transaction_id
-            WHERE $transactionWhere
-            """
+            WHERE """) + transactionWhere
         ) { row ->
             row.getBigDecimalOrZero("gross_profit")
         } ?: BigDecimal.ZERO
 
         val receivables = queryOne(
-            """
+            sql("""
             SELECT
                 COUNT(r.id) AS receivable_count,
                 COALESCE(SUM(r.amount), 0)::numeric AS created_receivable_amount,
@@ -203,8 +202,7 @@ class AnalyticsRepository {
                 COALESCE(SUM(r.amount - r.paid_amount), 0)::numeric AS remaining_amount
             FROM receivable.receivables r
             JOIN sales.transactions t ON t.id = r.transaction_id
-            WHERE $transactionWhere
-            """
+            WHERE """) + transactionWhere
         ) { row ->
             SalesReceivableSummary(
                 createdReceivableAmount = row.getBigDecimalOrZero("created_receivable_amount"),
@@ -220,16 +218,16 @@ class AnalyticsRepository {
         )
 
         val paymentRows = queryList(
-            """
+            sql("""
             SELECT
                 p.method::text AS payment_method,
                 COUNT(p.id) FILTER (WHERE p.amount > 0) AS payment_count,
                 COALESCE(SUM(p.amount), 0)::numeric AS amount
             FROM sales.payments p
             JOIN sales.transactions t ON t.id = p.transaction_id
-            WHERE $transactionWhere
+            WHERE """) + transactionWhere + sql("""
             GROUP BY p.method
-            """
+            """)
         ) { row ->
             PaymentMethodSummary(
                 method = row.getString("payment_method"),
@@ -247,7 +245,7 @@ class AnalyticsRepository {
         }
 
         val statusRows = queryList(
-            """
+            sql("""
             WITH transaction_report AS (
                 SELECT
                     t.id,
@@ -258,7 +256,7 @@ class AnalyticsRepository {
                     END AS remaining_amount
                 FROM sales.transactions t
                 LEFT JOIN receivable.receivables r ON r.transaction_id = t.id
-                WHERE $transactionWhere
+                WHERE """) + transactionWhere + sql("""
             ), status_report AS (
                 SELECT
                     id,
@@ -278,7 +276,7 @@ class AnalyticsRepository {
                 COALESCE(SUM(effective_paid_amount), 0)::numeric AS paid_amount
             FROM status_report
             GROUP BY effective_status
-            """
+            """)
         ) { row ->
             TransactionStatusSummary(
                 status = row.getString("transaction_status"),
@@ -298,7 +296,7 @@ class AnalyticsRepository {
         }
 
         val topProducts = queryList(
-            """
+            sql("""
             SELECT
                 ti.product_id::text AS product_id,
                 COALESCE(p.name, ti.product_id::text) AS product_name,
@@ -308,11 +306,10 @@ class AnalyticsRepository {
             FROM sales.transaction_items ti
             JOIN sales.transactions t ON t.id = ti.transaction_id
             LEFT JOIN inventory.products p ON p.id = ti.product_id
-            WHERE $transactionWhere
+            WHERE """) + transactionWhere + sql("""
             GROUP BY ti.product_id, p.name
             ORDER BY qty_sold DESC, revenue DESC, product_name ASC
-            LIMIT $topProductsLimit
-            """
+            """) + sqlParam("LIMIT ?", topProductsLimit)
         ) { row ->
             TopProductSalesSummary(
                 productId = row.getString("product_id"),
@@ -331,14 +328,14 @@ class AnalyticsRepository {
             includeTerminalStatuses = false
         )
         val cashiers = queryList(
-            """
+            sql("""
             WITH item_profit AS (
                 SELECT
                     ti.transaction_id,
                     COALESCE(SUM(ti.subtotal - (ti.cogs_at_transaction * ti.quantity)), 0)::numeric AS gross_profit
                 FROM sales.transaction_items ti
                 JOIN sales.transactions t2 ON t2.id = ti.transaction_id
-                WHERE $profitSubqueryWhere
+                WHERE """) + profitSubqueryWhere + sql("""
                 GROUP BY ti.transaction_id
             )
             SELECT
@@ -350,10 +347,10 @@ class AnalyticsRepository {
             FROM sales.transactions t
             JOIN system.users u ON u.id = t.user_id
             LEFT JOIN item_profit ip ON ip.transaction_id = t.id
-            WHERE $transactionWhere
+            WHERE """) + transactionWhere + sql("""
             GROUP BY t.user_id, u.name
             ORDER BY revenue DESC, transaction_count DESC, cashier_name ASC
-            """
+            """)
         ) { row ->
             CashierSalesSummary(
                 userId = row.getString("user_id"),
@@ -366,13 +363,13 @@ class AnalyticsRepository {
 
         val terminalWhere = buildTransactionWhere("t", startAt, endExclusive, filter, includeTerminalStatuses = true)
         val voided = queryOne(
-            """
+            sql("""
             SELECT COUNT(t.id) AS transaction_count,
                    COALESCE(SUM(t.total), 0)::numeric AS amount,
                    COALESCE(SUM(t.paid_amount), 0)::numeric AS paid_amount
             FROM sales.transactions t
-            WHERE $terminalWhere AND t.status::text = 'voided'
-            """
+            WHERE """) + terminalWhere + sql(""" AND t.status::text = 'voided'
+            """)
         ) { row ->
             VoidedSalesSummary(
                 transactionCount = row.getLong("transaction_count"),
@@ -382,14 +379,14 @@ class AnalyticsRepository {
         } ?: VoidedSalesSummary()
 
         val refunded = queryOne(
-            """
+            sql("""
             SELECT COUNT(t.id) AS transaction_count,
                    COALESCE(SUM(t.total), 0)::numeric AS sales_amount,
                    COALESCE(SUM(rf.refunded_amount), 0)::numeric AS financial_refund_amount
             FROM sales.transactions t
             JOIN sales.transaction_refunds rf ON rf.transaction_id = t.id
-            WHERE $terminalWhere AND t.status::text = 'refunded'
-            """
+            WHERE """) + terminalWhere + sql(""" AND t.status::text = 'refunded'
+            """)
         ) { row ->
             RefundedSalesSummary(
                 transactionCount = row.getLong("transaction_count"),
@@ -431,13 +428,13 @@ class AnalyticsRepository {
         val startAt = filter.startDate.atStartOfDay(zoneId).toOffsetDateTime()
         val endExclusive = filter.endDate.plusDays(1).atStartOfDay(zoneId).toOffsetDateTime()
         val transactionWhere = buildTransactionWhere("t", startAt, endExclusive, filter, includeTerminalStatuses = true)
-        val paging = "LIMIT $limit OFFSET $offset"
+        val paging = sqlParam("LIMIT ? ", limit) + sqlParam("OFFSET ?", offset)
 
         when (type) {
             CsvExportType.TRANSACTIONS -> CsvPage(
                 headers = listOf("nomor_transaksi", "tanggal", "status", "kasir", "pelanggan", "subtotal_kotor", "diskon_item", "tipe_diskon_transaksi", "nilai_diskon_transaksi", "diskon_transaksi", "total_diskon", "pajak", "pembulatan", "total_bersih", "dibayar", "metode_pembayaran", "catatan"),
                 rows = queryList(
-                    """
+                    sql("""
                     SELECT t.receipt_number, t.created_at::text, t.status::text, u.name AS cashier,
                            COALESCE(c.name, 'Umum') AS customer, t.gross_subtotal::text,
                            t.item_discount_total::text,
@@ -451,18 +448,17 @@ class AnalyticsRepository {
                     JOIN system.users u ON u.id = t.user_id
                     LEFT JOIN receivable.customers c ON c.id = t.customer_id
                     LEFT JOIN sales.payments p ON p.transaction_id = t.id AND p.amount > 0
-                    WHERE $transactionWhere
+                    WHERE """) + transactionWhere + sql("""
                     GROUP BY t.id, u.name, c.name
                     ORDER BY t.created_at, t.id
-                    $paging
-                    """
+                    """) + paging
                 ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("cashier"), r.str("customer"), r.str("gross_subtotal"), r.str("item_discount_total"), r.str("transaction_discount_type"), r.str("transaction_discount_value"), r.str("transaction_discount_amount"), r.str("total_discount_amount"), r.str("tax_amount"), r.str("rounding_amount"), r.str("total"), r.str("paid_amount"), r.str("methods"), r.str("notes")) }
             )
 
             CsvExportType.SALES_DETAILS -> CsvPage(
                 headers = listOf("nomor_transaksi", "tanggal", "status", "sku", "produk", "kategori", "satuan", "jumlah", "harga_snapshot", "hpp_snapshot", "total_kotor", "tipe_diskon", "nilai_diskon", "nominal_diskon", "total_bersih", "catatan_item"),
                 rows = queryList(
-                    """
+                    sql("""
                     SELECT t.receipt_number, t.created_at::text, t.status::text, p.sku, p.name AS product,
                            c.name AS category, u.symbol AS unit, ti.quantity::text,
                            ti.price_at_transaction::text, ti.cogs_at_transaction::text,
@@ -474,10 +470,9 @@ class AnalyticsRepository {
                     JOIN inventory.products p ON p.id = ti.product_id
                     JOIN inventory.categories c ON c.id = p.category_id
                     JOIN inventory.units u ON u.id = ti.unit_id
-                    WHERE $transactionWhere
+                    WHERE """) + transactionWhere + sql("""
                     ORDER BY t.created_at, t.id, ti.id
-                    $paging
-                    """
+                    """) + paging
                 ) { r -> listOf(r.str("receipt_number"), r.str("created_at"), r.str("status"), r.str("sku"), r.str("product"), r.str("category"), r.str("unit"), r.str("quantity"), r.str("price_at_transaction"), r.str("cogs_at_transaction"), r.str("gross_line_total"), r.str("discount_type"), r.str("discount_value"), r.str("discount"), r.str("subtotal"), r.str("item_note")) }
             )
 
@@ -486,7 +481,7 @@ class AnalyticsRepository {
                 CsvPage(
                     headers = listOf("sku", "produk", "kategori", "satuan", "stok", "stok_minimum", "harga_beli", "harga_jual", "aktif"),
                     rows = queryList(
-                        """
+                        sql("""
                         SELECT p.sku, p.name AS product, c.name AS category, u.symbol AS unit,
                                COALESCE(s.quantity, 0)::text AS stock, p.min_stock::text,
                                p.price_buy::text, p.price_retail::text, p.is_active::text
@@ -494,25 +489,24 @@ class AnalyticsRepository {
                         JOIN inventory.categories c ON c.id = p.category_id
                         JOIN inventory.units u ON u.id = p.base_unit_id
                         LEFT JOIN inventory.stock s ON s.product_id = p.id
-                        WHERE $productWhere
+                        WHERE """) + productWhere + sql("""
                         ORDER BY p.sku, p.id
-                        $paging
-                        """
+                        """) + paging
                     ) { r -> listOf(r.str("sku"), r.str("product"), r.str("category"), r.str("unit"), r.str("stock"), r.str("min_stock"), r.str("price_buy"), r.str("price_retail"), r.str("is_active")) }
                 )
             }
 
             CsvExportType.STOCK_CARD -> {
                 val conditions = mutableListOf(
-                    "m.occurred_at >= ${startAt.toSqlTimestamptz()}",
-                    "m.occurred_at < ${endExclusive.toSqlTimestamptz()}"
+                    sqlParam("m.occurred_at >= ?::timestamptz", startAt),
+                    sqlParam("m.occurred_at < ?::timestamptz", endExclusive)
                 )
-                filter.productId?.let { conditions += "m.product_id = ${it.toSqlUuid()}" }
-                filter.categoryId?.let { conditions += "p.category_id = ${it.toSqlUuid()}" }
+                filter.productId?.let { conditions += sqlParam("m.product_id = ?::uuid", it) }
+                filter.categoryId?.let { conditions += sqlParam("p.category_id = ?::uuid", it) }
                 CsvPage(
                     headers = listOf("tanggal", "sku", "produk", "jenis", "saldo_sebelum", "masuk", "keluar", "saldo_sesudah", "referensi", "pengguna"),
                     rows = queryList(
-                        """
+                        sql("""
                         SELECT m.occurred_at::text, p.sku, p.name AS product, m.movement_type::text,
                                m.balance_before::text, m.qty_in::text, m.qty_out::text, m.balance_after::text,
                                COALESCE(m.reference_number, m.reference_id::text) AS reference,
@@ -520,29 +514,28 @@ class AnalyticsRepository {
                         FROM inventory.stock_movements m
                         JOIN inventory.products p ON p.id = m.product_id
                         LEFT JOIN system.users u ON u.id = m.user_id
-                        WHERE ${conditions.joinToString(" AND ")}
+                        WHERE """) + SqlFragment.join(conditions, " AND ") + sql("""
                         ORDER BY m.occurred_at, m.sequence_no
-                        $paging
-                        """
+                        """) + paging
                     ) { r -> listOf(r.str("occurred_at"), r.str("sku"), r.str("product"), r.str("movement_type"), r.str("balance_before"), r.str("qty_in"), r.str("qty_out"), r.str("balance_after"), r.str("reference"), r.str("actor")) }
                 )
             }
 
             CsvExportType.RECEIVABLES -> {
                 val conditions = mutableListOf(
-                    "r.debt_date >= '${filter.startDate}'::date",
-                    "r.debt_date <= '${filter.endDate}'::date",
-                    "r.is_active = TRUE"
+                    sqlParam("r.debt_date >= ?::date", filter.startDate),
+                    sqlParam("r.debt_date <= ?::date", filter.endDate),
+                    sql("r.is_active = TRUE")
                 )
-                filter.customerId?.let { conditions += "r.customer_id = ${it.toSqlUuid()}" }
+                filter.customerId?.let { conditions += sqlParam("r.customer_id = ?::uuid", it) }
                 filter.status?.let { status ->
                     val receivableStatus = mapOf("lunas" to "lunas", "dp" to "sebagian", "hutang" to "belum_lunas")[status]
-                    if (receivableStatus != null) conditions += "r.status::text = '$receivableStatus'"
+                    if (receivableStatus != null) conditions += sqlParam("r.status::text = ?", receivableStatus)
                 }
                 CsvPage(
                     headers = listOf("pelanggan", "tanggal_piutang", "jatuh_tempo", "sumber", "nomor_nota", "nominal", "dibayar", "sisa", "status", "catatan"),
                     rows = queryList(
-                        """
+                        sql("""
                         SELECT c.name AS customer, r.debt_date::text, r.due_date::text, r.source::text,
                                COALESCE(t.receipt_number, r.legacy_invoice_number, '') AS invoice,
                                r.amount::text, r.paid_amount::text, (r.amount-r.paid_amount)::text AS remaining,
@@ -550,26 +543,25 @@ class AnalyticsRepository {
                         FROM receivable.receivables r
                         JOIN receivable.customers c ON c.id = r.customer_id
                         LEFT JOIN sales.transactions t ON t.id = r.transaction_id
-                        WHERE ${conditions.joinToString(" AND ")}
+                        WHERE """) + SqlFragment.join(conditions, " AND ") + sql("""
                         ORDER BY r.debt_date, r.id
-                        $paging
-                        """
+                        """) + paging
                     ) { r -> listOf(r.str("customer"), r.str("debt_date"), r.str("due_date"), r.str("source"), r.str("invoice"), r.str("amount"), r.str("paid_amount"), r.str("remaining"), r.str("status"), r.str("notes")) }
                 )
             }
 
             CsvExportType.PAYMENTS -> {
                 val conditions = mutableListOf(
-                    "rp.payment_date >= '${filter.startDate}'::date",
-                    "rp.payment_date <= '${filter.endDate}'::date"
+                    sqlParam("rp.payment_date >= ?::date", filter.startDate),
+                    sqlParam("rp.payment_date <= ?::date", filter.endDate)
                 )
-                filter.cashierId?.let { conditions += "rp.user_id = ${it.toSqlUuid()}" }
-                filter.customerId?.let { conditions += "r.customer_id = ${it.toSqlUuid()}" }
-                filter.paymentMethod?.let { conditions += "rp.method::text = '$it'" }
+                filter.cashierId?.let { conditions += sqlParam("rp.user_id = ?::uuid", it) }
+                filter.customerId?.let { conditions += sqlParam("r.customer_id = ?::uuid", it) }
+                filter.paymentMethod?.let { conditions += sqlParam("rp.method::text = ?", it) }
                 CsvPage(
                     headers = listOf("nomor_pembayaran", "tanggal", "jenis", "pelanggan", "metode", "nominal", "referensi", "catatan", "penerima", "saldo_sebelum", "saldo_sesudah", "status_sesudah"),
                     rows = queryList(
-                        """
+                        sql("""
                         SELECT rp.payment_number, rp.payment_date::text, rp.entry_type::text,
                                c.name AS customer, rp.method::text, rp.amount::text,
                                COALESCE(rp.reference, '') AS reference, COALESCE(rp.notes, '') AS notes,
@@ -579,83 +571,61 @@ class AnalyticsRepository {
                         JOIN receivable.receivables r ON r.id = rp.receivable_id
                         JOIN receivable.customers c ON c.id = r.customer_id
                         JOIN system.users u ON u.id = rp.user_id
-                        WHERE ${conditions.joinToString(" AND ")}
+                        WHERE """) + SqlFragment.join(conditions, " AND ") + sql("""
                         ORDER BY rp.payment_date, rp.paid_at, rp.id
-                        $paging
-                        """
+                        """) + paging
                     ) { r -> listOf(r.str("payment_number"), r.str("payment_date"), r.str("entry_type"), r.str("customer"), r.str("method"), r.str("amount"), r.str("reference"), r.str("notes"), r.str("receiver"), r.str("balance_before"), r.str("balance_after"), r.str("status_after")) }
                 )
             }
         }
     }
 
-    private fun buildProductWhere(filter: SalesReportFilter, alias: String): String {
-        val conditions = mutableListOf("TRUE")
-        filter.productId?.let { conditions += "$alias.id = ${it.toSqlUuid()}" }
-        filter.categoryId?.let { conditions += "$alias.category_id = ${it.toSqlUuid()}" }
-        return conditions.joinToString(" AND ")
+    private fun buildProductWhere(filter: SalesReportFilter, alias: String): SqlFragment {
+        val conditions = mutableListOf(sql("TRUE"))
+        filter.productId?.let { conditions += sqlParam("$alias.id = ?::uuid", it) }
+        filter.categoryId?.let { conditions += sqlParam("$alias.category_id = ?::uuid", it) }
+        return SqlFragment.join(conditions, " AND ")
     }
 
+    /** [transactionAlias] adalah alias tabel tetap dari kode (bukan input), nilai filter selalu di-bind. */
     private fun buildTransactionWhere(
         transactionAlias: String,
         startAt: OffsetDateTime,
         endExclusive: OffsetDateTime,
         filter: SalesReportFilter,
         includeTerminalStatuses: Boolean
-    ): String {
+    ): SqlFragment {
+        val t = transactionAlias
         val conditions = mutableListOf(
-            "$transactionAlias.type = 'penjualan'::system.trx_type",
-            "COALESCE($transactionAlias.occurred_at, $transactionAlias.created_at) >= ${startAt.toSqlTimestamptz()}",
-            "COALESCE($transactionAlias.occurred_at, $transactionAlias.created_at) < ${endExclusive.toSqlTimestamptz()}"
+            sql("$t.type = 'penjualan'::system.trx_type"),
+            sqlParam("COALESCE($t.occurred_at, $t.created_at) >= ?::timestamptz", startAt),
+            sqlParam("COALESCE($t.occurred_at, $t.created_at) < ?::timestamptz", endExclusive)
         )
-        if (!includeTerminalStatuses) conditions += "$transactionAlias.status::text NOT IN ('voided', 'refunded')"
-        filter.cashierId?.let { conditions += "$transactionAlias.user_id = ${it.toSqlUuid()}" }
-        filter.sessionId?.let { conditions += "$transactionAlias.session_id = ${it.toSqlUuid()}" }
-        filter.customerId?.let { conditions += "$transactionAlias.customer_id = ${it.toSqlUuid()}" }
-        filter.status?.let { conditions += "$transactionAlias.status::text = '${it}'" }
+        if (!includeTerminalStatuses) conditions += sql("$t.status::text NOT IN ('voided', 'refunded')")
+        filter.cashierId?.let { conditions += sqlParam("$t.user_id = ?::uuid", it) }
+        filter.sessionId?.let { conditions += sqlParam("$t.session_id = ?::uuid", it) }
+        filter.customerId?.let { conditions += sqlParam("$t.customer_id = ?::uuid", it) }
+        filter.status?.let { conditions += sqlParam("$t.status::text = ?", it) }
         filter.paymentMethod?.let {
-            conditions += "EXISTS (SELECT 1 FROM sales.payments fp WHERE fp.transaction_id = $transactionAlias.id AND fp.method::text = '${it}' AND fp.amount > 0)"
+            conditions += sqlParam(
+                "EXISTS (SELECT 1 FROM sales.payments fp WHERE fp.transaction_id = $t.id AND fp.method::text = ? AND fp.amount > 0)", it
+            )
         }
         filter.productId?.let {
-            conditions += "EXISTS (SELECT 1 FROM sales.transaction_items fi WHERE fi.transaction_id = $transactionAlias.id AND fi.product_id = ${it.toSqlUuid()})"
+            conditions += sqlParam(
+                "EXISTS (SELECT 1 FROM sales.transaction_items fi WHERE fi.transaction_id = $t.id AND fi.product_id = ?::uuid)", it
+            )
         }
         filter.categoryId?.let {
-            conditions += "EXISTS (SELECT 1 FROM sales.transaction_items fi JOIN inventory.products fp ON fp.id = fi.product_id WHERE fi.transaction_id = $transactionAlias.id AND fp.category_id = ${it.toSqlUuid()})"
+            conditions += sqlParam(
+                "EXISTS (SELECT 1 FROM sales.transaction_items fi JOIN inventory.products fp ON fp.id = fi.product_id WHERE fi.transaction_id = $t.id AND fp.category_id = ?::uuid)", it
+            )
         }
-        return conditions.joinToString(" AND ")
+        return SqlFragment.join(conditions, " AND ")
     }
 
-    private fun buildPaymentWhere(
-        paymentAlias: String,
-        transactionAlias: String,
-        startAt: OffsetDateTime,
-        endExclusive: OffsetDateTime,
-        cashierId: UUID?,
-        sessionId: UUID?
-    ): String {
-        val conditions = mutableListOf(
-            "$transactionAlias.type = 'penjualan'::system.trx_type",
-            "$paymentAlias.paid_at >= ${startAt.toSqlTimestamptz()}",
-            "$paymentAlias.paid_at < ${endExclusive.toSqlTimestamptz()}"
-        )
-        cashierId?.let { conditions += "$transactionAlias.user_id = ${it.toSqlUuid()}" }
-        sessionId?.let { conditions += "$transactionAlias.session_id = ${it.toSqlUuid()}" }
-        return conditions.joinToString(" AND ")
-    }
-
-    private fun <T> Transaction.queryList(sql: String, mapper: (ResultSet) -> T): List<T> {
-        return exec(sql.trimIndent(), explicitStatementType = StatementType.SELECT) { resultSet ->
-            val rows = mutableListOf<T>()
-            while (resultSet.next()) {
-                rows += mapper(resultSet)
-            }
-            rows
-        } ?: emptyList()
-    }
-
-    private fun <T> Transaction.queryOne(sql: String, mapper: (ResultSet) -> T): T? {
-        return queryList(sql, mapper).firstOrNull()
-    }
+    private fun <T> Transaction.queryOne(query: SqlFragment, mapper: (ResultSet) -> T): T? =
+        queryList(query, mapper).firstOrNull()
 
     private fun ResultSet.getBigDecimalOrZero(columnLabel: String): BigDecimal {
         return getBigDecimal(columnLabel) ?: BigDecimal.ZERO
@@ -663,13 +633,7 @@ class AnalyticsRepository {
 
     private fun ResultSet.str(columnLabel: String): String? = getString(columnLabel)
 
-    private fun OffsetDateTime.toSqlTimestamptz(): String {
-        return "'${format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)}'::timestamptz"
-    }
 
-    private fun UUID.toSqlUuid(): String {
-        return "'$this'::uuid"
-    }
 
     private companion object {
         val PAYMENT_METHODS = listOf("tunai", "transfer", "qris", "dp", "hutang")
