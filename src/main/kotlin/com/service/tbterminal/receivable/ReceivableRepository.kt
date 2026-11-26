@@ -9,6 +9,8 @@ import com.service.tbterminal.sales.PaymentSource
 import com.service.tbterminal.sales.CashSessionsTable
 import com.service.tbterminal.shared.NotFoundException
 import com.service.tbterminal.shared.ValidationException
+import com.service.tbterminal.shared.queryList
+import com.service.tbterminal.shared.sqlParam
 import com.service.tbterminal.system.AuditAction
 import com.service.tbterminal.system.AuditLogsTable
 import com.service.tbterminal.system.UsersTable
@@ -743,8 +745,8 @@ class ReceivableRepositoryImpl : ReceivableRepository {
         )
     }
 
-    private fun org.jetbrains.exposed.sql.Transaction.lockIdempotencyKey(idempotencyKey: String) {
-        exec("SELECT pg_advisory_xact_lock(hashtextextended('$idempotencyKey', 0))")
+    private fun Transaction.lockIdempotencyKey(idempotencyKey: String) {
+        queryList(sqlParam("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", idempotencyKey)) { }
     }
 
     private fun rowToReceivableResponse(row: ResultRow): ReceivableResponse {
