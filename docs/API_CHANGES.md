@@ -3,6 +3,163 @@
 Untuk tim Android (`tb-terminal-app`), terbaru di atas. Perubahan dari pekerjaan keamanan ada di
 `SECURITY_HARDENING.md`.
 
+## Idempotency pembelian dan pembayaran hutang supplier (backend `feat/purchasing-idempotency`, dipakai Android B2b)
+
+Endpoint:
+
+- `POST /api/purchasing/purchases` (barang masuk / restok)
+- `POST /api/purchasing/payables/payments` (bayar hutang supplier)
+
+Perubahan **aditif**: field baru opsional, klien lama tidak terdampak. Migrasi database: `V48`. Polanya sama dengan
+`POST /api/sales/transactions/{id}/pay`.
+
+### Field baru
+
+| Arah | Field | Tipe JSON | Arti |
+|---|---|---|---|
+| Request | `idempotencyKey` | string, opsional | 8–100 karakter `[A-Za-z0-9._:-]`. Kosong/spasi = tidak dikirim |
+| Respons `data` | `idempotentReplay` | boolean, hanya muncul bila `true` | Respons ini hasil request sebelumnya; tidak ada yang dicatat ulang |
+
+`idempotentReplay` tidak dikirim pada respons pertama (nilai bawaan `false` tidak diserialisasi, sama dengan
+`/api/receivable/payments`). Baca sebagai `false` bila tidak ada.
+
+### Aturan jawaban
+
+| Kondisi | Jawaban |
+|---|---|
+| Tanpa `idempotencyKey` (atau kosong) | Perilaku lama: setiap request mencatat transaksi baru |
+| Key baru | 201, dicatat seperti biasa |
+| Key sama + payload sama | 201, **pesan sama**, `data` = hasil pertama + `idempotentReplay: true`. Tidak ada nota, item, stok, HPP, hutang, pembayaran, atau audit baru |
+| Key sama + payload beda | 400 `VALIDATION_ERROR` (lihat pesan di bawah). Tidak ada yang dicatat |
+| Key salah format | 400 `VALIDATION_ERROR`: Idempotency key harus 8-100 karakter dan hanya berisi huruf, angka, titik, garis, titik dua, atau underscore |
+| Request paralel dengan key sama | Hanya satu yang dicatat; yang lain menunggu lalu menerima hasil yang sama (`idempotentReplay: true`) |
+
+Pesan konflik payload:
+
+- Pembelian: `Idempotency key sudah digunakan untuk request pembelian yang berbeda`
+- Pembayaran hutang: `Idempotency key sudah digunakan untuk request pembayaran yang berbeda`
+
+Konflik payload dijawab **400**, bukan 409, agar sama dengan `/pay`, `/api/receivable/payments`, dan checkout online
+(keputusan 26 Nov 2026).
+
+**Payload dianggap sama** bila setelah normalisasi berikut semua field bisnisnya sama:
+
+- teks di-trim, dan kosong sama dengan `null`;
+- metode tidak membedakan huruf besar/kecil;
+- angka dibandingkan nilainya (`"5"` = `"5.00"`).
+
+| Endpoint | Field yang dibandingkan |
+|---|---|
+| Pembelian | `supplierId`, `invoiceNo`, `paymentMethod`, `amountPaid`, `notes`, `dueDays`, dan `items` (`productId`, `qty`, `price`) **dengan urutan yang sama** |
+| Pembayaran | `payableId`, `amount`, `method`, `reference`, `notes` |
+
+### Isi respons replay
+
+- **Pembelian:** nota yang sama. `productName` item diambil dari nama produk saat ini (bila produk diganti namanya
+  setelah request pertama, yang tampil nama barunya).
+- **Pembayaran:** `payableStatus` dan `payableRemainingAmount` adalah kondisi hutang **tepat setelah pembayaran pertama**
+  (disimpan sejak V48), bukan kondisi sekarang. Contoh: bayar 100 dari 300 (`sebagian`, sisa 200), lalu hutang dilunasi
+  dengan pembayaran lain; retry key pertama tetap menjawab `sebagian`/`200.00`. Ambil kondisi terkini lewat
+  `GET /api/purchasing/payables/{id}`.
+
+### Urutan pemeriksaan
+
+- **Pembelian:** format key → replay → aturan lain (item kosong, supplier aktif, produk ada, metode). Jadi retry yang
+  terlambat tetap sukses walau supplier sudah dinonaktifkan.
+- **Pembayaran:** format key, nominal, ID, metode → replay → hutang ada → sudah lunas → melebihi sisa. Jadi retry yang
+  terlambat tetap sukses walau hutangnya sudah lunas.
+- Key berlaku global per endpoint (tidak per user), sama dengan `/pay`. Key pembelian dan key pembayaran terpisah.
+
+### Contoh
+
+Pembelian (barang masuk) secara hutang:
+
+```json
+{
+  "supplierId": "<uuid supplier>",
+  "invoiceNo": "INV-2026-1101",
+  "paymentMethod": "hutang",
+  "amountPaid": "0",
+  "notes": "Restok paku",
+  "dueDays": 30,
+  "items": [
+    { "productId": "<uuid produk>", "qty": "5.00", "price": "60000.00" }
+  ],
+  "idempotencyKey": "purchase-7d0c1e5a-3c3b-4f7e-9a51-0f2a6f1b9c20"
+}
+```
+
+Respons retry (201, `message`: "Pembelian berhasil dicatat"):
+
+```json
+{
+  "id": "<uuid nota>",
+  "supplierId": "<uuid supplier>",
+  "supplierName": "CV Sumber Baja",
+  "userId": "<uuid user>",
+  "invoiceNo": "INV-2026-1101",
+  "total": "300000.00",
+  "notes": "Restok paku",
+  "receivedAt": "2026-11-26T10:15:00.123+07:00",
+  "createdAt": "2026-11-26T10:15:00.123+07:00",
+  "items": [
+    {
+      "productId": "<uuid produk>",
+      "productName": "Paku 5 cm",
+      "unitId": "<uuid pcs>",
+      "quantity": "5.00",
+      "priceAtTransaction": "60000.00",
+      "cogsAtTransaction": "55000.00",
+      "subtotal": "300000.00"
+    }
+  ],
+  "idempotentReplay": true
+}
+```
+
+Pembayaran hutang supplier:
+
+```json
+{
+  "payableId": "<uuid hutang>",
+  "amount": "100000.00",
+  "method": "transfer",
+  "reference": "TRF-001",
+  "notes": null,
+  "idempotencyKey": "supplier-pay-2b8f4d3e-61a4-4c55-b8c1-7f0e9d2a6b11"
+}
+```
+
+Respons retry (201, `message`: "Pembayaran hutang berhasil dicatat"):
+
+```json
+{
+  "id": "<uuid pembayaran>",
+  "payableId": "<uuid hutang>",
+  "amount": "100000.00",
+  "method": "transfer",
+  "reference": "TRF-001",
+  "notes": null,
+  "paidAt": "2026-11-26T10:20:00.456+07:00",
+  "payableStatus": "sebagian",
+  "payableRemainingAmount": "200000.00",
+  "idempotentReplay": true
+}
+```
+
+### Daftar kerja Android (B2b)
+
+1. Tambah `idempotencyKey: String? = null` di DTO request pembelian dan pembayaran hutang supplier.
+2. Buat UUID **sekali** saat layar/dialog simpan dibuka (atau saat tombol simpan pertama kali ditekan), simpan di
+   state yang bertahan saat rotasi/proses dibunuh, dan **pakai ulang** untuk setiap retry request yang sama. Buat key
+   baru hanya setelah sukses, atau bila user mengubah isi form.
+3. Kirim angka yang sama persis saat retry. Mengubah item, harga, atau urutan item dengan key yang sama dijawab 400.
+4. Tangani 400 dengan pesan konflik di atas sebagai "sudah pernah dikirim dengan isi berbeda": jangan retry otomatis,
+   minta user memeriksa riwayat pembelian/pembayaran.
+5. Tambah `idempotentReplay: Boolean = false` di DTO respons bila ingin membedakan; perlakukan replay sebagai sukses.
+6. Rencana: key akan **diwajibkan** setelah semua HP memakai B2b (lihat `BACKLOG.md`). Sesudah itu request tanpa key
+   dijawab 400.
+
 ## Batas angka desimal di request JSON (Fase 4 backend)
 
 Berlaku untuk semua field desimal (`BigDecimalSerializer`: harga, jumlah, uang, faktor, tarif). Nilai yang

@@ -166,8 +166,12 @@ private class FakeSupplierActivationRepository(
         paymentMethod: PurchasePaymentMethod,
         amountPaid: BigDecimal,
         notes: String?,
-        dueDays: Int
+        dueDays: Int,
+        idempotency: PurchasingIdempotency?
     ): PurchaseResponse = error("unused")
+
+    override suspend fun findPurchaseByIdempotency(idempotency: PurchasingIdempotency): PurchaseResponse? =
+        error("unused")
 
     override suspend fun getPaginatedPurchases(
         page: Int,
@@ -196,6 +200,7 @@ private class FakeSupplierActivationRepository(
         paymentAmount: BigDecimal,
         method: PurchasePaymentMethod,
         reference: String?,
-        notes: String?
+        notes: String?,
+        idempotency: PurchasingIdempotency?
     ): SupplierPaymentResponse = error("unused")
 }

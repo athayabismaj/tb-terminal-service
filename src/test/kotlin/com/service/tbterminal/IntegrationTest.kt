@@ -3729,6 +3729,266 @@ class IntegrationTest {
     }
 
     @Test
+    fun test_purchase_with_same_idempotency_key_is_recorded_once() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val supplierId = createSupplierFixture()
+        val product = createProductFixture()
+        val key = "purchase-${UUID.randomUUID()}"
+
+        val first = postPurchase(token, purchaseBody(supplierId, product, qty = "5.00", idempotencyKey = key))
+        assertEquals(HttpStatusCode.Created, first.status, first.bodyAsText())
+        assertFalse(idempotentReplay(first))
+        val purchaseId = UUID.fromString(checkoutDataId(first))
+        val payableId = payableIdForPurchase(purchaseId)
+        val snapshot = purchasingSnapshot(supplierId, product)
+        assertEquals(BigDecimal("15.00"), stockQuantity(product.id))
+
+        // Angka setara ("5" = "5.00") tetap payload yang sama.
+        val replay = postPurchase(token, purchaseBody(supplierId, product, qty = "5", amountPaid = "0.00", idempotencyKey = key))
+        assertEquals(HttpStatusCode.Created, replay.status, replay.bodyAsText())
+        assertTrue(idempotentReplay(replay))
+        assertEquals(purchaseId.toString(), checkoutDataId(replay))
+        assertEquals(responseItems(first), responseItems(replay))
+        assertEquals(snapshot, purchasingSnapshot(supplierId, product))
+        assertEquals(BigDecimal("15.00"), stockQuantity(product.id))
+        assertEquals(1, auditCount("purchasing", "purchases", purchaseId))
+        assertEquals(1, auditCount("purchasing", "supplier_payables", payableId))
+
+        // Retry yang terlambat dijawab sebelum aturan bisnis, walau supplier sudah dinonaktifkan.
+        execute("UPDATE purchasing.suppliers SET is_active = FALSE WHERE id = '$supplierId'")
+        val lateReplay = postPurchase(token, purchaseBody(supplierId, product, qty = "5.00", idempotencyKey = key))
+        assertEquals(HttpStatusCode.Created, lateReplay.status, lateReplay.bodyAsText())
+        assertEquals(purchaseId.toString(), checkoutDataId(lateReplay))
+        assertEquals(snapshot, purchasingSnapshot(supplierId, product))
+    }
+
+    @Test
+    fun test_purchase_rejects_reused_idempotency_key_for_different_payload() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val supplierId = createSupplierFixture()
+        val product = createProductFixture()
+        val otherProduct = createProductFixture()
+        val key = "purchase-${UUID.randomUUID()}"
+        val first = postPurchase(token, purchaseBody(supplierId, product, idempotencyKey = key))
+        assertEquals(HttpStatusCode.Created, first.status, first.bodyAsText())
+        val snapshot = purchasingSnapshot(supplierId, product)
+
+        val conflicts = listOf(
+            purchaseBody(supplierId, product, qty = "6.00", idempotencyKey = key),
+            purchaseBody(supplierId, product, price = "61.00", idempotencyKey = key),
+            purchaseBody(supplierId, product, paymentMethod = "tunai", amountPaid = "300.00", idempotencyKey = key),
+            purchaseBody(supplierId, otherProduct, idempotencyKey = key)
+        )
+        conflicts.forEach { body ->
+            val conflict = postPurchase(token, body)
+            assertEquals(HttpStatusCode.BadRequest, conflict.status, conflict.bodyAsText())
+            assertTrue(conflict.bodyAsText().contains("VALIDATION_ERROR"), conflict.bodyAsText())
+            assertTrue(
+                conflict.bodyAsText().contains("Idempotency key sudah digunakan untuk request pembelian yang berbeda"),
+                conflict.bodyAsText()
+            )
+        }
+        assertEquals(snapshot, purchasingSnapshot(supplierId, product))
+        assertEquals(BigDecimal("10.00"), stockQuantity(otherProduct.id))
+
+        val invalidKey = postPurchase(token, purchaseBody(supplierId, product, idempotencyKey = "short"))
+        assertEquals(HttpStatusCode.BadRequest, invalidKey.status, invalidKey.bodyAsText())
+        assertTrue(invalidKey.bodyAsText().contains("Idempotency key harus 8-100 karakter"), invalidKey.bodyAsText())
+        assertEquals(snapshot, purchasingSnapshot(supplierId, product))
+    }
+
+    @Test
+    fun test_concurrent_purchases_with_same_idempotency_key_record_once() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val supplierId = createSupplierFixture()
+        val product = createProductFixture()
+        val key = "purchase-${UUID.randomUUID()}"
+        val release = CompletableDeferred<Unit>()
+
+        installSlowIdempotentInsertTrigger("purchases")
+        val (responses, insertAttempts) = try {
+            val responses = coroutineScope {
+                val requests = (1..3).map {
+                    async {
+                        release.await()
+                        postPurchase(token, purchaseBody(supplierId, product, idempotencyKey = key))
+                    }
+                }
+                release.complete(Unit)
+                requests.awaitAll()
+            }
+            responses to idempotentInsertAttempts()
+        } finally {
+            removeSlowIdempotentInsertTrigger("purchases")
+        }
+
+        // Request kedua dan ketiga menunggu lock, lalu tidak pernah mencoba INSERT.
+        assertEquals(1, insertAttempts)
+
+        responses.forEach { assertEquals(HttpStatusCode.Created, it.status, it.bodyAsText()) }
+        assertEquals(1, responses.map { checkoutDataId(it) }.distinct().size)
+        assertEquals(2, responses.count { idempotentReplay(it) })
+        assertEquals(1, purchaseCount(supplierId))
+        assertEquals(1, payableCount(supplierId))
+        assertEquals(BigDecimal("15.00"), stockQuantity(product.id))
+    }
+
+    @Test
+    fun test_purchase_without_idempotency_key_keeps_legacy_behavior() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val supplierId = createSupplierFixture()
+        val product = createProductFixture()
+
+        val first = postPurchase(token, purchaseBody(supplierId, product))
+        val second = postPurchase(token, purchaseBody(supplierId, product))
+        // Key kosong diperlakukan seperti tidak dikirim, sama dengan /pay.
+        val blankKey = postPurchase(token, purchaseBody(supplierId, product, idempotencyKey = "  "))
+
+        listOf(first, second, blankKey).forEach { response ->
+            assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+            assertFalse(idempotentReplay(response))
+            assertTrue(response.bodyAsText().contains("Pembelian berhasil dicatat"), response.bodyAsText())
+        }
+        assertEquals(3, listOf(first, second, blankKey).map { checkoutDataId(it) }.distinct().size)
+        assertEquals(3, purchaseCount(supplierId))
+        assertEquals(3, payableCount(supplierId))
+        assertEquals(BigDecimal("25.00"), stockQuantity(product.id))
+        assertEquals(0, firstString(
+            "SELECT COUNT(*) FROM purchasing.purchases WHERE supplier_id = '$supplierId' AND idempotency_key IS NOT NULL"
+        ).toInt())
+    }
+
+    @Test
+    fun test_supplier_payment_with_same_idempotency_key_is_recorded_once() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val payableId = createSupplierPayableFixture(token)
+        val key = "supplier-pay-${UUID.randomUUID()}"
+
+        val first = paySupplier(token, payableId, "100.00", idempotencyKey = key)
+        assertEquals(HttpStatusCode.Created, first.status, first.bodyAsText())
+        assertFalse(idempotentReplay(first))
+        val paymentId = UUID.fromString(checkoutDataId(first))
+        assertEquals("100.00|sebagian", payableState(payableId))
+
+        val replay = paySupplier(token, payableId, "100", idempotencyKey = key)
+        assertEquals(HttpStatusCode.Created, replay.status, replay.bodyAsText())
+        assertTrue(idempotentReplay(replay))
+        assertEquals(paymentId.toString(), checkoutDataId(replay))
+        assertEquals("100.00|sebagian", payableState(payableId))
+        assertEquals(1, supplierPaymentCount(payableId))
+        assertEquals(1, auditCount("purchasing", "supplier_payments", paymentId))
+        assertEquals(1, auditActionCount("purchasing", "supplier_payables", payableId, "UPDATE"))
+
+        val settle = paySupplier(token, payableId, "200.00", idempotencyKey = "supplier-pay-${UUID.randomUUID()}")
+        assertEquals(HttpStatusCode.Created, settle.status, settle.bodyAsText())
+        assertEquals("300.00|lunas", payableState(payableId))
+
+        // Retry terlambat: sukses walau hutang sudah lunas, dan respons tetap snapshot pembayaran pertama.
+        val lateReplay = paySupplier(token, payableId, "100.00", idempotencyKey = key)
+        assertEquals(HttpStatusCode.Created, lateReplay.status, lateReplay.bodyAsText())
+        assertEquals(paymentId.toString(), checkoutDataId(lateReplay))
+        assertEquals(responseField(first, "payableStatus"), responseField(lateReplay, "payableStatus"))
+        assertEquals(responseField(first, "payableRemainingAmount"), responseField(lateReplay, "payableRemainingAmount"))
+        assertEquals(responseField(first, "paidAt"), responseField(lateReplay, "paidAt"))
+        assertEquals(2, supplierPaymentCount(payableId))
+        assertEquals("300.00|lunas", payableState(payableId))
+    }
+
+    @Test
+    fun test_supplier_payment_rejects_reused_idempotency_key_for_different_payload() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val payableId = createSupplierPayableFixture(token)
+        val otherPayableId = createSupplierPayableFixture(token)
+        val key = "supplier-pay-${UUID.randomUUID()}"
+        val first = paySupplier(token, payableId, "100.00", idempotencyKey = key)
+        assertEquals(HttpStatusCode.Created, first.status, first.bodyAsText())
+
+        val conflicts = listOf(
+            paySupplier(token, payableId, "90.00", idempotencyKey = key),
+            paySupplier(token, payableId, "100.00", method = "tunai", idempotencyKey = key),
+            paySupplier(token, payableId, "100.00", reference = "TRF-LAIN", idempotencyKey = key),
+            paySupplier(token, otherPayableId, "100.00", idempotencyKey = key)
+        )
+        conflicts.forEach { conflict ->
+            assertEquals(HttpStatusCode.BadRequest, conflict.status, conflict.bodyAsText())
+            assertTrue(conflict.bodyAsText().contains("VALIDATION_ERROR"), conflict.bodyAsText())
+            assertTrue(
+                conflict.bodyAsText().contains("Idempotency key sudah digunakan untuk request pembayaran yang berbeda"),
+                conflict.bodyAsText()
+            )
+        }
+        assertEquals(1, supplierPaymentCount(payableId))
+        assertEquals(0, supplierPaymentCount(otherPayableId))
+        assertEquals("100.00|sebagian", payableState(payableId))
+        assertEquals("0.00|belum_lunas", payableState(otherPayableId))
+    }
+
+    @Test
+    fun test_concurrent_supplier_payments_with_same_idempotency_key_record_once() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val payableId = createSupplierPayableFixture(token)
+        val key = "supplier-pay-${UUID.randomUUID()}"
+        val release = CompletableDeferred<Unit>()
+
+        installSlowIdempotentInsertTrigger("supplier_payments")
+        val (responses, insertAttempts) = try {
+            val responses = coroutineScope {
+                val requests = (1..3).map {
+                    async {
+                        release.await()
+                        paySupplier(token, payableId, "100.00", idempotencyKey = key)
+                    }
+                }
+                release.complete(Unit)
+                requests.awaitAll()
+            }
+            responses to idempotentInsertAttempts()
+        } finally {
+            removeSlowIdempotentInsertTrigger("supplier_payments")
+        }
+
+        // Request kedua dan ketiga menunggu lock, lalu tidak pernah mencoba INSERT.
+        assertEquals(1, insertAttempts)
+
+        responses.forEach { assertEquals(HttpStatusCode.Created, it.status, it.bodyAsText()) }
+        assertEquals(1, responses.map { checkoutDataId(it) }.distinct().size)
+        assertEquals(2, responses.count { idempotentReplay(it) })
+        assertEquals(1, supplierPaymentCount(payableId))
+        assertEquals("100.00|sebagian", payableState(payableId))
+    }
+
+    @Test
+    fun test_supplier_payment_without_idempotency_key_keeps_legacy_behavior() = testApplication {
+        application { configureIntegrationApplication() }
+        val token = loginAsOwner()
+        val payableId = createSupplierPayableFixture(token)
+
+        val responses = listOf(
+            paySupplier(token, payableId, "100.00"),
+            paySupplier(token, payableId, "100.00"),
+            paySupplier(token, payableId, "100.00", idempotencyKey = "")
+        )
+        responses.forEach { response ->
+            assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+            assertFalse(idempotentReplay(response))
+            assertTrue(response.bodyAsText().contains("Pembayaran hutang berhasil dicatat"), response.bodyAsText())
+        }
+        assertEquals(3, supplierPaymentCount(payableId))
+        assertEquals("300.00|lunas", payableState(payableId))
+        assertEquals("0.00", responseField(responses.last(), "payableRemainingAmount"))
+        val overpay = paySupplier(token, payableId, "1.00")
+        assertEquals(HttpStatusCode.BadRequest, overpay.status, overpay.bodyAsText())
+        assertTrue(overpay.bodyAsText().contains("Hutang ini sudah lunas"), overpay.bodyAsText())
+    }
+
+    @Test
     fun test_owner_discount_above_cashier_limit_needs_no_approval() = testApplication {
         application { configureIntegrationApplication() }
         val ownerToken = loginAsOwner()
@@ -4234,6 +4494,140 @@ class IntegrationTest {
             }
         }
     }
+
+    private fun createSupplierFixture(): UUID = dataSource.connection.use { connection ->
+        connection.prepareStatement("INSERT INTO purchasing.suppliers (name) VALUES (?) RETURNING id").use { statement ->
+            statement.setString(1, "Integration Supplier ${UUID.randomUUID()}")
+            statement.executeQuery().use { result -> result.next(); result.getObject(1, UUID::class.java) }
+        }
+    }
+
+    /** Pembelian 5 × 60 secara hutang lewat API: hutang supplier Rp300. */
+    private suspend fun ApplicationTestBuilder.createSupplierPayableFixture(token: String): UUID {
+        val response = postPurchase(token, purchaseBody(createSupplierFixture(), createProductFixture()))
+        assertEquals(HttpStatusCode.Created, response.status, response.bodyAsText())
+        return payableIdForPurchase(UUID.fromString(checkoutDataId(response)))
+    }
+
+    private fun purchaseBody(
+        supplierId: UUID,
+        product: ProductFixture,
+        qty: String = "5.00",
+        price: String = "60.00",
+        paymentMethod: String = "hutang",
+        amountPaid: String = "0",
+        idempotencyKey: String? = null
+    ): String {
+        val key = idempotencyKey?.let { ""","idempotencyKey":"$it"""" }.orEmpty()
+        return """{"supplierId":"$supplierId","invoiceNo":"INV-IT","paymentMethod":"$paymentMethod","amountPaid":"$amountPaid","notes":"Integration purchase","dueDays":30,"items":[{"productId":"${product.id}","qty":"$qty","price":"$price"}]$key}"""
+    }
+
+    private suspend fun ApplicationTestBuilder.postPurchase(token: String, body: String): HttpResponse =
+        client.post("/api/purchasing/purchases") {
+            bearer(token)
+            contentType(ContentType.Application.Json)
+            setBody(body)
+        }
+
+    private suspend fun ApplicationTestBuilder.paySupplier(
+        token: String,
+        payableId: UUID,
+        amount: String,
+        method: String = "transfer",
+        reference: String? = null,
+        idempotencyKey: String? = null
+    ): HttpResponse = client.post("/api/purchasing/payables/payments") {
+        bearer(token)
+        contentType(ContentType.Application.Json)
+        val referenceJson = reference?.let { ""","reference":"$it"""" }.orEmpty()
+        val keyJson = idempotencyKey?.let { ""","idempotencyKey":"$it"""" }.orEmpty()
+        setBody("""{"payableId":"$payableId","amount":"$amount","method":"$method"$referenceJson$keyJson}""")
+    }
+
+    private suspend fun idempotentReplay(response: HttpResponse): Boolean =
+        Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("data").jsonObject["idempotentReplay"]
+            ?.jsonPrimitive?.content?.toBoolean() ?: false
+
+    private suspend fun responseField(response: HttpResponse, field: String): String =
+        Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue(field).jsonPrimitive.content
+
+    private suspend fun responseItems(response: HttpResponse): String =
+        Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            .getValue("data").jsonObject.getValue("items").toString()
+
+    private fun payableIdForPurchase(purchaseId: UUID): UUID = UUID.fromString(
+        firstString("SELECT id FROM purchasing.supplier_payables WHERE purchase_id = '$purchaseId'")
+    )
+
+    private fun purchaseCount(supplierId: UUID): Int =
+        firstString("SELECT COUNT(*) FROM purchasing.purchases WHERE supplier_id = '$supplierId'").toInt()
+
+    private fun payableCount(supplierId: UUID): Int =
+        firstString("SELECT COUNT(*) FROM purchasing.supplier_payables WHERE supplier_id = '$supplierId'").toInt()
+
+    private fun supplierPaymentCount(payableId: UUID): Int =
+        firstString("SELECT COUNT(*) FROM purchasing.supplier_payments WHERE supplier_payable_id = '$payableId'").toInt()
+
+    private fun payableState(payableId: UUID): String =
+        firstString("SELECT paid_amount || '|' || status FROM purchasing.supplier_payables WHERE id = '$payableId'")
+
+    /** Semua jejak satu pembelian: nota, item, hutang, stok, kartu stok, dan riwayat HPP. */
+    private fun purchasingSnapshot(supplierId: UUID, product: ProductFixture): String = firstString(
+        """
+        SELECT concat_ws('|',
+            (SELECT COUNT(*) FROM purchasing.purchases WHERE supplier_id = '$supplierId'),
+            (SELECT COUNT(*) FROM purchasing.purchase_items pi JOIN purchasing.purchases p ON p.id = pi.purchase_id
+                WHERE p.supplier_id = '$supplierId'),
+            (SELECT COALESCE(SUM(amount), 0) FROM purchasing.supplier_payables WHERE supplier_id = '$supplierId'),
+            (SELECT quantity FROM inventory.stock WHERE product_id = '${product.id}'),
+            (SELECT COUNT(*) FROM inventory.stock_movements WHERE product_id = '${product.id}'),
+            (SELECT COUNT(*) FROM inventory.price_history WHERE product_id = '${product.id}'),
+            (SELECT price_buy FROM inventory.products WHERE id = '${product.id}')
+        )
+        """.trimIndent()
+    )
+
+    /**
+     * Memperlebar jendela race: INSERT berkey tertahan 0,5 detik sebelum unique index diperiksa.
+     * Setiap percobaan INSERT dihitung di sequence (tidak ikut rollback). Tanpa advisory lock, request
+     * paralel tetap mencapai INSERT, gagal di unique index, lalu diulang otomatis oleh Exposed; hasil
+     * akhirnya bisa terlihat benar, jadi yang dibuktikan adalah jumlah percobaan INSERT.
+     */
+    private fun installSlowIdempotentInsertTrigger(table: String) {
+        execute("CREATE SEQUENCE purchasing.test_idempotent_insert_attempts")
+        execute(
+            """
+            CREATE OR REPLACE FUNCTION purchasing.fn_test_slow_idempotent_insert()
+            RETURNS TRIGGER LANGUAGE plpgsql AS ${'$'}${'$'}
+            BEGIN
+                IF NEW.idempotency_key IS NOT NULL THEN
+                    PERFORM nextval('purchasing.test_idempotent_insert_attempts');
+                    PERFORM pg_sleep(0.5);
+                END IF;
+                RETURN NEW;
+            END;
+            ${'$'}${'$'}
+            """.trimIndent()
+        )
+        execute(
+            """
+            CREATE TRIGGER trg_test_slow_idempotent_insert
+            BEFORE INSERT ON purchasing.$table
+            FOR EACH ROW EXECUTE FUNCTION purchasing.fn_test_slow_idempotent_insert()
+            """.trimIndent()
+        )
+    }
+
+    private fun removeSlowIdempotentInsertTrigger(table: String) {
+        execute("DROP TRIGGER IF EXISTS trg_test_slow_idempotent_insert ON purchasing.$table")
+        execute("DROP FUNCTION IF EXISTS purchasing.fn_test_slow_idempotent_insert()")
+        execute("DROP SEQUENCE IF EXISTS purchasing.test_idempotent_insert_attempts")
+    }
+
+    private fun idempotentInsertAttempts(): Int = firstString(
+        "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM purchasing.test_idempotent_insert_attempts"
+    ).toInt()
 
     private fun installFailingDiscountCheckoutTrigger() {
         dataSource.connection.use { connection ->

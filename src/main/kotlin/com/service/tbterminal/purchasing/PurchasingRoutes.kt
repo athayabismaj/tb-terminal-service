@@ -168,21 +168,24 @@ fun Application.purchasingRoutes() {
                         val userId = call.getUserId()
                         val request = call.receive<PurchaseRequest>()
                         val purchase = service.purchase(userId, request)
-                        systemService.recordOperationalAudit(
-                            call = call,
-                            actorUserId = userId,
-                            action = AuditAction.INSERT,
-                            schemaName = "purchasing",
-                            tableName = "purchases",
-                            recordId = purchase.id
-                        )
-                        recordPurchaseDerivedAudits(
-                            call = call,
-                            service = service,
-                            systemService = systemService,
-                            actorUserId = userId,
-                            purchase = purchase
-                        )
+                        // Replay idempotency tidak mencatat apa pun, jadi audit tidak boleh ditulis ulang.
+                        if (!purchase.idempotentReplay) {
+                            systemService.recordOperationalAudit(
+                                call = call,
+                                actorUserId = userId,
+                                action = AuditAction.INSERT,
+                                schemaName = "purchasing",
+                                tableName = "purchases",
+                                recordId = purchase.id
+                            )
+                            recordPurchaseDerivedAudits(
+                                call = call,
+                                service = service,
+                                systemService = systemService,
+                                actorUserId = userId,
+                                purchase = purchase
+                            )
+                        }
                         call.respond(HttpStatusCode.Created, ApiResponse.success(purchase, "Pembelian berhasil dicatat"))
                     }
                 }
@@ -223,22 +226,24 @@ fun Application.purchasingRoutes() {
                             val userId = call.getUserId()
                             val request = call.receive<SupplierPaymentRequest>()
                             val payment = service.paySupplier(userId, request)
-                            systemService.recordOperationalAudit(
-                                call = call,
-                                actorUserId = userId,
-                                action = AuditAction.INSERT,
-                                schemaName = "purchasing",
-                                tableName = "supplier_payments",
-                                recordId = payment.id
-                            )
-                            systemService.recordOperationalAudit(
-                                call = call,
-                                actorUserId = userId,
-                                action = AuditAction.UPDATE,
-                                schemaName = "purchasing",
-                                tableName = "supplier_payables",
-                                recordId = payment.payableId
-                            )
+                            if (!payment.idempotentReplay) {
+                                systemService.recordOperationalAudit(
+                                    call = call,
+                                    actorUserId = userId,
+                                    action = AuditAction.INSERT,
+                                    schemaName = "purchasing",
+                                    tableName = "supplier_payments",
+                                    recordId = payment.id
+                                )
+                                systemService.recordOperationalAudit(
+                                    call = call,
+                                    actorUserId = userId,
+                                    action = AuditAction.UPDATE,
+                                    schemaName = "purchasing",
+                                    tableName = "supplier_payables",
+                                    recordId = payment.payableId
+                                )
+                            }
                             call.respond(HttpStatusCode.Created, ApiResponse.success(payment, "Pembayaran hutang berhasil dicatat"))
                         }
                     }
