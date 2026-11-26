@@ -23,10 +23,13 @@ fun Application.configureStatusPages() {
                 ErrorResponse("INVALID_REQUEST", "Format request atau response tidak valid")
             )
         }
-        exception<BadRequestException> { call, _ ->
+        exception<BadRequestException> { call, cause ->
+            // Ktor membungkus exception dari deserializer (mis. batas angka di BigDecimalSerializer).
+            val validation = generateSequence(cause.cause) { it.cause }.filterIsInstance<ValidationException>().firstOrNull()
             call.respond(
                 HttpStatusCode.BadRequest,
-                ErrorResponse("INVALID_REQUEST", "Format request tidak valid")
+                if (validation != null) ErrorResponse("VALIDATION_ERROR", validation.message ?: "Validasi gagal")
+                else ErrorResponse("INVALID_REQUEST", "Format request tidak valid")
             )
         }
         exception<NotFoundException> { call, cause ->
