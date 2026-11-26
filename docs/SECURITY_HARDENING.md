@@ -235,3 +235,6 @@ di `API_CHANGES.md`.
    dipakai ulang saat retry) di `PayDebtRequestDto`.
 6. **HTTP 429** — tampilkan pesan "coba lagi nanti" untuk `TOO_MANY_ATTEMPTS`
    dan `MANAGER_APPROVER_LOCKED`.
+7. **Input uang v1.0.6** — titik ribuan terbaca sebagai desimal ("20.000" menjadi 20) di Sesi Kas/Rekonsiliasi
+   dan dialog diskon; diperbaiki di APK 1.0.8. Server tidak berubah. Data yang terkena dideteksi dengan
+   `docs/sql/detect_money_input_bug.sql` (hanya baca); cara pakai dan keterbatasan di `MONEY_INPUT_BUG_DETECTION.md`.
